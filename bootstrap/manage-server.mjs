@@ -260,10 +260,9 @@ function renderPage() {
     .pill { display: inline-flex; padding: 3px 8px; border-radius: 999px; background: #102338; border: 1px solid #23405f; font-size: 12px; }
     .table-wrap { overflow: auto; }
     .flash { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #0b1220; border: 1px solid #22304a; white-space: pre-wrap; }
-    .modal-backdrop { position: fixed; inset: 0; background: rgba(2, 6, 23, 0.72); display: grid; place-items: center; padding: 20px; z-index: 30; }
-    .modal { width: min(920px, 100%); background: #08111f; border: 1px solid #22304a; border-radius: 18px; box-shadow: 0 30px 80px rgba(0,0,0,0.55); }
-    .modal header { padding: 18px 20px 0; display: flex; justify-content: space-between; align-items: center; gap: 16px; }
-    .modal .body { padding: 18px 20px 20px; }
+    .scripts-panel { background: #08111f; border: 1px solid #22304a; border-radius: 18px; box-shadow: 0 30px 80px rgba(0,0,0,0.35); margin: 0 24px 24px; }
+    .scripts-panel header { padding: 18px 20px 0; display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+    .scripts-panel .body { padding: 18px 20px 20px; }
     .script-list { display: grid; gap: 10px; }
     .script-row { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: start; padding: 12px; border: 1px solid #22304a; border-radius: 12px; background: #0b1220; }
     .script-row code { white-space: pre-wrap; }
@@ -341,19 +340,17 @@ function renderPage() {
       <div id="listResult" class="flash" hidden></div>
     </section>
   </main>
-  <div id="scriptsBackdrop" class="modal-backdrop" hidden>
-    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="scriptsTitle">
-      <header>
-        <div>
-          <h2 id="scriptsTitle">Package Scripts</h2>
-          <div id="scriptsSubtitle" class="muted"></div>
-        </div>
-        <button id="closeScriptsBtn" class="ghost" type="button">Close</button>
-      </header>
-      <div class="body">
-        <div id="scriptsFlash" class="flash" hidden></div>
-        <div id="scriptsList" class="script-list"></div>
+  <div id="scriptsPanel" class="scripts-panel" hidden>
+    <header>
+      <div>
+        <h2 id="scriptsTitle">Package Scripts</h2>
+        <div id="scriptsSubtitle" class="muted"></div>
       </div>
+      <button id="closeScriptsBtn" class="ghost" type="button">Close</button>
+    </header>
+    <div class="body">
+      <div id="scriptsFlash" class="flash" hidden></div>
+      <div id="scriptsList" class="script-list"></div>
     </div>
   </div>
   <script>
@@ -361,7 +358,7 @@ function renderPage() {
     const projectsBody = document.getElementById('projectsBody');
     const listResult = document.getElementById('listResult');
     const installResult = document.getElementById('installResult');
-    const scriptsBackdrop = document.getElementById('scriptsBackdrop');
+    const scriptsPanel = document.getElementById('scriptsPanel');
     const scriptsTitle = document.getElementById('scriptsTitle');
     const scriptsSubtitle = document.getElementById('scriptsSubtitle');
     const scriptsList = document.getElementById('scriptsList');
@@ -498,11 +495,12 @@ function renderPage() {
           </div>
         \`).join('')
         : '<div class="muted">No package scripts found.</div>';
-      scriptsBackdrop.hidden = false;
+      scriptsPanel.hidden = false;
+      scriptsPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
     function closeScriptsModal() {
-      scriptsBackdrop.hidden = true;
+      scriptsPanel.hidden = true;
       currentScriptsRef = '';
       scriptsList.innerHTML = '';
       scriptsFlash.hidden = true;
@@ -571,9 +569,6 @@ function renderPage() {
     });
 
     closeScriptsBtn.addEventListener('click', closeScriptsModal);
-    scriptsBackdrop.addEventListener('click', (event) => {
-      if (event.target === scriptsBackdrop) closeScriptsModal();
-    });
     document.addEventListener('click', async (event) => {
       const btn = event.target.closest('button[data-script-run], button[data-script-activate]');
       if (!btn || !currentScriptsRef) return;
