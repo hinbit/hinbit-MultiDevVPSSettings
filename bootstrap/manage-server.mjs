@@ -235,6 +235,13 @@ print(extract_dir)
   );
 
   for (const name of ENV_CANDIDATES) {
+    const target = path.join(projectPath, name);
+    if (fs.existsSync(target)) {
+      fs.rmSync(target, { force: true });
+    }
+  }
+
+  for (const name of ENV_CANDIDATES) {
     const source = path.join(extractDir, name);
     if (!fs.existsSync(source)) continue;
     fs.copyFileSync(source, path.join(projectPath, name));
@@ -1027,6 +1034,14 @@ function renderPage() {
     }
 
     refresh().catch((error) => showMessage(listResult, error.message, false));
+    setInterval(async () => {
+      try {
+        const data = await api('/system');
+        refreshSystemStats(data.system || null);
+      } catch {
+        // Ignore transient stats failures.
+      }
+    }, 15000);
   </script>
 </body>
 </html>`;
