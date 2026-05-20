@@ -611,6 +611,7 @@ User=root
 WorkingDirectory=/root
 EnvironmentFile=-${SYSTEM_ENV_FILE}
 Environment=MANAGE_PORT=8090
+Environment=TZ=Asia/Jerusalem
 ExecStart=${NODE_BIN} ${BIN_DIR}/manage-server.mjs
 Restart=always
 RestartSec=3
@@ -633,6 +634,7 @@ LimitNPROC=infinity
 LimitCORE=infinity
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
 Environment=PM2_HOME=/root/.pm2
+Environment=TZ=Asia/Jerusalem
 PIDFile=/root/.pm2/pm2.pid
 Restart=on-failure
 

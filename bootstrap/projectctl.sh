@@ -395,6 +395,8 @@ clone_or_pull() {
 start_pm2() {
   local -a runtime_env=()
 
+  runtime_env+=("TZ=Asia/Jerusalem")
+
   if [[ -n "${APP_DOMAIN:-}" ]]; then
     runtime_env+=("VITE_ALLOWED_HOSTS=${APP_DOMAIN}")
     runtime_env+=("CORS_ORIGIN=https://${APP_DOMAIN}")
@@ -628,7 +630,7 @@ do_script() {
     (
       cd "${APP_DIR}"
       pm2 delete "${pm2_script_name}" >/dev/null 2>&1 || true
-      env PORT="${APP_PORT}" pm2 start /bin/bash --name "${pm2_script_name}" --no-autorestart --time -- -lc "${runner}"
+      env TZ=Asia/Jerusalem PORT="${APP_PORT}" pm2 start /bin/bash --name "${pm2_script_name}" --no-autorestart --time -- -lc "${runner}"
     )
     pm2 save
     printf '[projectctl] activated %s script %s as %s\n' "${REPO_REF}" "${script}" "${pm2_script_name}"
