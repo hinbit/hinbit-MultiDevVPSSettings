@@ -12,7 +12,7 @@ Bootstrap for a clean Ubuntu VPS that hosts multiple Node/React apps behind ngin
 - UFW, fail2ban, and unattended upgrades
 - the app routing files used by `app-sync.sh`
 - `projectctl` for GitHub clone/pull/restart workflows
-- a `/manage/` control panel on the system portal for installs, restarts, updates, logs, stop/kill, project passwords, DB details, and package scripts
+- a `/manage/` control panel on the system portal for installs, restarts, updates, logs, stop/kill, project passwords, DB details, environment files, package scripts, and machine stats
 
 ## What it does not install
 

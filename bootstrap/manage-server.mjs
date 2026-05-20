@@ -16,6 +16,15 @@ const PORT = Number(process.env.MANAGE_PORT || 8090);
 const PASSWORD = process.env.MANAGE_PASSWORD || '';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const ENV_CANDIDATES = [
+  '.env',
+  '.env.local',
+  '.env.production',
+  '.env.credentials',
+  '.env.machine',
+  '.env.production.local',
+  '.env.development',
+];
 
 function loadSystemEnv() {
   if (!fs.existsSync(SYSTEM_ENV_FILE)) return;
@@ -85,17 +94,7 @@ function parseEnvFile(filePath) {
 function readProjectEnv(projectPath) {
   const merged = {};
   const files = [];
-  const candidates = [
-    '.env',
-    '.env.local',
-    '.env.production',
-    '.env.credentials',
-    '.env.machine',
-    '.env.production.local',
-    '.env.development',
-  ];
-
-  for (const name of candidates) {
+  for (const name of ENV_CANDIDATES) {
     const filePath = path.join(projectPath, name);
     if (!fs.existsSync(filePath)) continue;
     files.push(filePath);
@@ -166,6 +165,85 @@ function pickDbDetails(projectPath) {
   return { files, db };
 }
 
+function pickEnvDetails(projectPath) {
+  const { merged, files } = readProjectEnv(projectPath);
+  return { files, env: merged };
+}
+
+function runPython(script, args = []) {
+  const res = spawnSync('python3', ['-c', script, ...args], {
+    encoding: 'utf8',
+    maxBuffer: 20 * 1024 * 1024,
+  });
+  if (res.error) throw res.error;
+  if (res.status !== 0) {
+    throw new Error((res.stderr || res.stdout || 'python3 failed').trim());
+  }
+  return (res.stdout || '').trim();
+}
+
+function createEnvZip(projectPath) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vps-env-'));
+  const zipPath = path.join(tmpDir, 'project-env.zip');
+  const filesJson = JSON.stringify(ENV_CANDIDATES);
+  runPython(
+    `
+import json, os, sys, zipfile
+project = sys.argv[1]
+zip_path = sys.argv[2]
+files = json.loads(sys.argv[3])
+with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+    for name in files:
+        src = os.path.join(project, name)
+        if os.path.isfile(src):
+            zf.write(src, arcname=name)
+print(zip_path)
+`,
+    [projectPath, zipPath, filesJson],
+  );
+  const data = fs.readFileSync(zipPath);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  return data;
+}
+
+function replaceEnvZip(projectPath, zipBuffer) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vps-env-up-'));
+  const zipPath = path.join(tmpDir, 'upload.zip');
+  const extractDir = path.join(tmpDir, 'extract');
+  fs.writeFileSync(zipPath, zipBuffer);
+  fs.mkdirSync(extractDir, { recursive: true });
+  const filesJson = JSON.stringify(ENV_CANDIDATES);
+  runPython(
+    `
+import json, os, pathlib, sys, zipfile
+zip_path = sys.argv[1]
+extract_dir = sys.argv[2]
+allowed = set(json.loads(sys.argv[3]))
+with zipfile.ZipFile(zip_path) as zf:
+    for info in zf.infolist():
+        name = info.filename.replace('\\\\', '/')
+        if not name or name.endswith('/'):
+            continue
+        if '/' in name or '\\\\' in name:
+            raise SystemExit(f'Invalid zip entry: {name}')
+        if name not in allowed:
+            continue
+        zf.extract(info, extract_dir)
+print(extract_dir)
+`,
+    [zipPath, extractDir, filesJson],
+  );
+
+  for (const name of ENV_CANDIDATES) {
+    const source = path.join(extractDir, name);
+    if (!fs.existsSync(source)) continue;
+    fs.copyFileSync(source, path.join(projectPath, name));
+    fs.chmodSync(path.join(projectPath, name), 0o600);
+  }
+
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+}
+
 function getPm2List() {
   try {
     const out = execFileSync(PM2, ['jlist'], { encoding: 'utf8' });
@@ -206,6 +284,8 @@ function projectView() {
       outLog: env.pm_out_log_path || '',
       errLog: env.pm_err_log_path || '',
       nodeEnv: env.node_env || '',
+      memory: proc?.monit?.memory ?? proc?.pm2_env?.monit?.memory ?? 0,
+      cpu: proc?.monit?.cpu ?? proc?.pm2_env?.monit?.cpu ?? 0,
     };
   });
 }
@@ -222,6 +302,39 @@ function runProjectCtl(args, input = null) {
     throw new Error((res.stderr || res.stdout || `projectctl ${args.join(' ')}`).trim());
   }
   return (res.stdout || '').trim();
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (!Number.isFinite(value) || value <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
+}
+
+function getSystemStats() {
+  const load = os.loadavg();
+  const cores = Math.max(1, os.cpus().length);
+  const total = os.totalmem();
+  const free = os.freemem();
+  const used = total - free;
+  return {
+    load1: load[0],
+    load5: load[1],
+    load15: load[2],
+    cpuCores: cores,
+    cpuLoadPercent: Math.min(999, (load[0] / cores) * 100),
+    memoryTotal: total,
+    memoryFree: free,
+    memoryUsed: used,
+    memoryPercent: (used / total) * 100,
+    uptimeSeconds: os.uptime(),
+  };
 }
 
 function readBody(req) {
@@ -242,6 +355,23 @@ function readBody(req) {
         reject(error);
       }
     });
+    req.on('error', reject);
+  });
+}
+
+function readBinaryBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (chunk) => {
+      chunks.push(chunk);
+      size += chunk.length;
+      if (size > 20 * 1024 * 1024) {
+        reject(new Error('Upload too large'));
+        req.destroy();
+      }
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
 }
@@ -328,6 +458,7 @@ function renderPage() {
     <div>
       <h1>MultiDev Manage</h1>
       <div class="muted">Projects, PM2 controls, logs, and per-domain protection from one page.</div>
+      <div id="systemStats" class="small">Loading machine stats...</div>
     </div>
     <div class="actions">
       <a class="btn ghost" href="/">Portal</a>
@@ -382,6 +513,7 @@ function renderPage() {
               <th>Domain</th>
               <th>PM2</th>
               <th>Port</th>
+              <th>Memory</th>
               <th>Status</th>
               <th>Protected</th>
               <th>Branch</th>
@@ -421,11 +553,33 @@ function renderPage() {
       <div id="dbList" class="kv-list"></div>
     </div>
   </div>
+  <div id="envPanel" class="scripts-panel" hidden>
+    <header>
+      <div>
+        <h2 id="envTitle">Environment Values</h2>
+        <div id="envSubtitle" class="muted"></div>
+      </div>
+      <div class="actions">
+        <a id="envDownloadBtn" class="btn ghost" href="#" download>Download zip</a>
+        <label class="btn ghost" style="cursor:pointer">
+          <input id="envUploadInput" type="file" accept=".zip" hidden>
+          Choose zip
+        </label>
+        <button id="envUploadBtn" class="secondary" type="button">Upload zip</button>
+        <button id="closeEnvBtn" class="ghost" type="button">Close</button>
+      </div>
+    </header>
+    <div class="body">
+      <div id="envFlash" class="flash" hidden></div>
+      <div id="envList" class="kv-list"></div>
+    </div>
+  </div>
   <script>
     const API = 'api';
     const projectsBody = document.getElementById('projectsBody');
     const listResult = document.getElementById('listResult');
     const installResult = document.getElementById('installResult');
+    const systemStats = document.getElementById('systemStats');
     const scriptsPanel = document.getElementById('scriptsPanel');
     const scriptsTitle = document.getElementById('scriptsTitle');
     const scriptsSubtitle = document.getElementById('scriptsSubtitle');
@@ -438,8 +592,18 @@ function renderPage() {
     const dbList = document.getElementById('dbList');
     const dbFlash = document.getElementById('dbFlash');
     const closeDbBtn = document.getElementById('closeDbBtn');
+    const envPanel = document.getElementById('envPanel');
+    const envTitle = document.getElementById('envTitle');
+    const envSubtitle = document.getElementById('envSubtitle');
+    const envList = document.getElementById('envList');
+    const envFlash = document.getElementById('envFlash');
+    const envDownloadBtn = document.getElementById('envDownloadBtn');
+    const envUploadInput = document.getElementById('envUploadInput');
+    const envUploadBtn = document.getElementById('envUploadBtn');
+    const closeEnvBtn = document.getElementById('closeEnvBtn');
     let currentScriptsRef = '';
     let currentDbRef = '';
+    let currentEnvRef = '';
 
     function showMessage(el, value, ok = true) {
       el.hidden = false;
@@ -460,6 +624,16 @@ function renderPage() {
       return Math.floor(hrs / 24) + 'd';
     }
 
+    function refreshSystemStats(stats) {
+      if (!stats) {
+        systemStats.textContent = 'Machine stats unavailable';
+        return;
+      }
+      const cpuLoad = Number(stats.cpuLoadPercent || 0).toFixed(1) + '%';
+      const memory = formatBytes(stats.memoryUsed || 0) + ' / ' + formatBytes(stats.memoryTotal || 0) + ' (' + Number(stats.memoryPercent || 0).toFixed(1) + '%)';
+      systemStats.textContent = 'CPU load: ' + Number(stats.load1 || 0).toFixed(2) + ' (' + cpuLoad + ') · Memory: ' + memory;
+    }
+
     async function api(path, options = {}) {
       const res = await fetch(\`\${API}\${path}\`, {
         headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
@@ -477,8 +651,14 @@ function renderPage() {
     }
 
     async function refresh() {
-      const data = await api('/projects');
+      const [dataResult, statsResult] = await Promise.allSettled([
+        api('/projects'),
+        api('/system'),
+      ]);
+      if (dataResult.status !== 'fulfilled') throw dataResult.reason;
+      const data = dataResult.value;
       renderProjects(data.projects || []);
+      refreshSystemStats(statsResult.status === 'fulfilled' ? statsResult.value.system || null : null);
     }
 
     function statusClass(status) {
@@ -500,6 +680,7 @@ function renderPage() {
           <button class="secondary" data-action="stop" data-ref="\${ref}">Stop</button>
           <button class="danger" data-action="uninstall" data-ref="\${ref}">Kill</button>
           <button class="secondary" data-action="db" data-ref="\${ref}">DB</button>
+          <button class="secondary" data-action="env" data-ref="\${ref}">Env</button>
           <button class="secondary" data-action="scripts" data-ref="\${ref}">Scripts</button>
           <a class="btn ghost" href="\${logOut}">Out log</a>
           <a class="btn ghost" href="\${logErr}">Err log</a>
@@ -518,7 +699,7 @@ function renderPage() {
 
     function renderProjects(projects) {
       if (!projects.length) {
-        projectsBody.innerHTML = '<tr><td colspan="9" class="muted">No projects found.</td></tr>';
+        projectsBody.innerHTML = '<tr><td colspan="10" class="muted">No projects found.</td></tr>';
         return;
       }
       projectsBody.innerHTML = projects.map((project) => \`
@@ -536,6 +717,7 @@ function renderPage() {
             <div class="small">\${escapeHtml(project.scriptPath || '')}</div>
           </td>
           <td>\${escapeHtml(project.port || '')}</td>
+          <td>\${escapeHtml(formatBytes(project.memory || 0))}</td>
           <td><span class="\${statusClass(project.status)}">\${escapeHtml(project.status || '')}</span></td>
           <td>\${project.protected ? 'yes' : 'no'}</td>
           <td>\${escapeHtml(project.branch || '')}</td>
@@ -620,6 +802,39 @@ function renderPage() {
       dbFlash.hidden = true;
     }
 
+    function renderKeyValueList(listEl, entries) {
+      listEl.innerHTML = entries.length
+        ? entries.map(([label, value]) => \`
+          <div class="kv-item">
+            <div class="small">\${escapeHtml(label)}</div>
+            <code>\${escapeHtml(value)}</code>
+          </div>
+        \`).join('')
+        : '<div class="muted">No values found.</div>';
+    }
+
+    function openEnvPanel(ref, details, subtitle) {
+      currentEnvRef = ref;
+      envTitle.textContent = 'Environment Values';
+      envSubtitle.textContent = subtitle || '';
+      envFlash.hidden = true;
+      const entries = Object.entries(details.env || {})
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([key, value]) => [key, String(value)]);
+      renderKeyValueList(envList, entries);
+      envDownloadBtn.href = \`\${API}/projects/\${ref}/env/download\`;
+      envPanel.hidden = false;
+      envPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function closeEnvPanel() {
+      envPanel.hidden = true;
+      currentEnvRef = '';
+      envList.innerHTML = '';
+      envFlash.hidden = true;
+      envUploadInput.value = '';
+    }
+
     async function loadScripts(ref) {
       const data = await api(\`/projects/\${ref}/scripts\`);
       openScriptsModal(ref, data.scripts || [], data.project || ref);
@@ -628,6 +843,29 @@ function renderPage() {
     async function loadDb(ref) {
       const data = await api(\`/projects/\${ref}/db\`);
       openDbPanel(ref, data.db || {}, data.project || ref);
+    }
+
+    async function loadEnv(ref) {
+      const data = await api(\`/projects/\${ref}/env\`);
+      openEnvPanel(ref, data, data.project || ref);
+    }
+
+    async function uploadEnv(ref, file) {
+      const res = await fetch(\`\${API}/projects/\${ref}/env/upload\`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/zip' },
+        credentials: 'same-origin',
+        body: file,
+      });
+      const text = await res.text();
+      let data;
+      try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+      if (!res.ok) {
+        const message = data && typeof data === 'object' ? (data.error || data.message || text) : text;
+        throw new Error(message || \`Upload failed: \${res.status}\`);
+      }
+      showMessage(envFlash, data.message || 'Environment files uploaded');
+      await refresh();
     }
 
     async function runScript(ref, script, mode) {
@@ -689,6 +927,7 @@ function renderPage() {
 
     closeScriptsBtn.addEventListener('click', closeScriptsModal);
     closeDbBtn.addEventListener('click', closeDbPanel);
+    closeEnvBtn.addEventListener('click', closeEnvPanel);
     document.addEventListener('click', async (event) => {
       const btn = event.target.closest('button[data-script-run], button[data-script-activate]');
       if (!btn || !currentScriptsRef) return;
@@ -718,6 +957,41 @@ function renderPage() {
         dbPanel.hidden = false;
       } finally {
         btn.disabled = false;
+      }
+    });
+
+    document.addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-action="env"]');
+      if (!btn) return;
+      const ref = btn.dataset.ref;
+      if (!ref) return;
+      btn.disabled = true;
+      try {
+        await loadEnv(ref);
+      } catch (error) {
+        showMessage(envFlash, error.message, false);
+        envPanel.hidden = false;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    envUploadBtn.addEventListener('click', async () => {
+      if (!currentEnvRef) return;
+      const file = envUploadInput.files && envUploadInput.files[0];
+      if (!file) {
+        showMessage(envFlash, 'Choose a zip file first.', false);
+        envPanel.hidden = false;
+        return;
+      }
+      envUploadBtn.disabled = true;
+      try {
+        await uploadEnv(currentEnvRef, file);
+      } catch (error) {
+        showMessage(envFlash, error.message, false);
+        envPanel.hidden = false;
+      } finally {
+        envUploadBtn.disabled = false;
       }
     });
 
@@ -807,6 +1081,11 @@ async function handleRequest(req, res) {
       return;
     }
 
+    if (req.method === 'GET' && pathname === '/api/system') {
+      sendJson(res, 200, { system: getSystemStats() });
+      return;
+    }
+
     if (req.method === 'POST' && pathname === '/api/projects') {
       const body = await readBody(req);
       const repo = repoRefFromArg(body.repo || '');
@@ -847,6 +1126,43 @@ async function handleRequest(req, res) {
         db,
       });
       return;
+    }
+
+    const envMatch = pathname.match(/^\/api\/projects\/(.+?)\/env(?:\/(download|upload))?$/);
+    if (envMatch) {
+      const ref = decodeURIComponent(envMatch[1]);
+      const mode = envMatch[2] || '';
+      const meta = parseEnvFile(metaPathForRef(ref));
+      const projectPath = meta.APP_DIR || '';
+      const { files, env } = pickEnvDetails(projectPath);
+
+      if (req.method === 'GET' && !mode) {
+        sendJson(res, 200, {
+          project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
+          files,
+          env,
+        });
+        return;
+      }
+
+      if (req.method === 'GET' && mode === 'download') {
+        const zipBuffer = createEnvZip(projectPath);
+        sendText(res, 200, zipBuffer, {
+          'Content-Type': 'application/zip',
+          'Content-Disposition': `attachment; filename="${slugFromRef(ref)}-env.zip"`,
+        });
+        return;
+      }
+
+      if (req.method === 'POST' && mode === 'upload') {
+        const body = await readBinaryBody(req);
+        if (!body || !body.length) {
+          throw new Error('Missing zip upload body');
+        }
+        replaceEnvZip(projectPath, body);
+        sendJson(res, 200, { ok: true, message: `Environment files updated for ${ref}` });
+        return;
+      }
     }
 
     const scriptsMatch = pathname.match(/^\/api\/projects\/(.+?)\/scripts(?:\/(run|activate))?$/);
