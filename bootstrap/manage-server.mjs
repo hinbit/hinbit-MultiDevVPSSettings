@@ -582,7 +582,7 @@ function renderPage() {
     </div>
   </div>
   <script>
-    const API = 'api';
+    const API = '/manage/api';
     const projectsBody = document.getElementById('projectsBody');
     const listResult = document.getElementById('listResult');
     const installResult = document.getElementById('installResult');
