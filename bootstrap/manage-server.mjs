@@ -2,7 +2,7 @@
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
-import { execFileSync, spawnSync } from 'child_process';
+import { execFileSync, spawn, spawnSync } from 'child_process';
 import os from 'os';
 import { fileURLToPath } from 'url';
 
@@ -311,6 +311,46 @@ function runProjectCtl(args, input = null) {
   return (res.stdout || '').trim();
 }
 
+function streamProjectCtl(res, args) {
+  const child = spawn(PROJECTCTL, args, {
+    cwd: '/',
+    env: process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  res.writeHead(200, {
+    'Content-Type': 'text/plain; charset=utf-8',
+    'Cache-Control': 'no-store',
+    'X-Accel-Buffering': 'no',
+  });
+
+  const writeChunk = (chunk) => {
+    if (!res.writableEnded) {
+      res.write(chunk);
+    }
+  };
+
+  child.stdout.on('data', (chunk) => writeChunk(chunk));
+  child.stderr.on('data', (chunk) => writeChunk(chunk));
+
+  child.on('close', (code) => {
+    if (!res.writableEnded) {
+      if (code === 0) {
+        res.end('\n[done]\n');
+      } else {
+        res.end(`\n[error] projectctl exited with code ${code}\n`);
+      }
+    }
+  });
+
+  child.on('error', (error) => {
+    if (!res.writableEnded) {
+      res.statusCode = 500;
+      res.end(`[error] ${error.message || String(error)}\n`);
+    }
+  });
+}
+
 function formatBytes(bytes) {
   const value = Number(bytes || 0);
   if (!Number.isFinite(value) || value <= 0) return '0 B';
@@ -581,6 +621,37 @@ function renderPage() {
       <div id="envList" class="kv-list"></div>
     </div>
   </div>
+  <div id="progressPanel" class="scripts-panel" hidden>
+    <header>
+      <div>
+        <h2 id="progressTitle">Pull Progress</h2>
+        <div id="progressSubtitle" class="muted"></div>
+      </div>
+      <button id="closeProgressBtn" class="ghost" type="button">Close</button>
+    </header>
+    <div class="body">
+      <div id="progressFlash" class="flash" hidden></div>
+      <pre id="progressBody" class="kv-item" style="margin:0; max-height: 60vh; overflow:auto; white-space: pre-wrap;"></pre>
+    </div>
+  </div>
+  <div id="logPanel" class="scripts-panel" hidden>
+    <header>
+      <div>
+        <h2 id="logTitle">Live Log</h2>
+        <div id="logSubtitle" class="muted"></div>
+      </div>
+      <div class="actions">
+        <button id="logOutBtn" class="secondary" type="button">Out</button>
+        <button id="logErrBtn" class="secondary" type="button">Err</button>
+        <button id="logRefreshBtn" class="secondary" type="button">Refresh</button>
+        <button id="closeLogBtn" class="ghost" type="button">Close</button>
+      </div>
+    </header>
+    <div class="body">
+      <div id="logFlash" class="flash" hidden></div>
+      <pre id="logBody" class="kv-item" style="margin:0; max-height: 60vh; overflow:auto; white-space: pre-wrap;"></pre>
+    </div>
+  </div>
   <script>
     const API = '/manage/api';
     const projectsBody = document.getElementById('projectsBody');
@@ -608,9 +679,28 @@ function renderPage() {
     const envUploadInput = document.getElementById('envUploadInput');
     const envUploadBtn = document.getElementById('envUploadBtn');
     const closeEnvBtn = document.getElementById('closeEnvBtn');
+    const progressPanel = document.getElementById('progressPanel');
+    const progressTitle = document.getElementById('progressTitle');
+    const progressSubtitle = document.getElementById('progressSubtitle');
+    const progressBody = document.getElementById('progressBody');
+    const progressFlash = document.getElementById('progressFlash');
+    const closeProgressBtn = document.getElementById('closeProgressBtn');
+    const logPanel = document.getElementById('logPanel');
+    const logTitle = document.getElementById('logTitle');
+    const logSubtitle = document.getElementById('logSubtitle');
+    const logBody = document.getElementById('logBody');
+    const logFlash = document.getElementById('logFlash');
+    const logOutBtn = document.getElementById('logOutBtn');
+    const logErrBtn = document.getElementById('logErrBtn');
+    const logRefreshBtn = document.getElementById('logRefreshBtn');
+    const closeLogBtn = document.getElementById('closeLogBtn');
     let currentScriptsRef = '';
     let currentDbRef = '';
     let currentEnvRef = '';
+    let currentLogRef = '';
+    let currentLogType = 'out';
+    let progressAbort = null;
+    let logTimer = null;
 
     function showMessage(el, value, ok = true) {
       el.hidden = false;
@@ -670,6 +760,18 @@ function renderPage() {
       return data;
     }
 
+    async function fetchText(path, options = {}) {
+      const res = await fetch(\`\${API}\${path}\`, {
+        credentials: 'same-origin',
+        ...options,
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        throw new Error(text || \`Request failed: \${res.status}\`);
+      }
+      return text;
+    }
+
     async function refresh() {
       const [dataResult, statsResult] = await Promise.allSettled([
         api('/projects'),
@@ -691,8 +793,6 @@ function renderPage() {
 
     function rowActions(project) {
       const ref = encodeURIComponent(project.repo);
-      const logOut = \`\${API}/projects/\${ref}/logs?type=out&download=1\`;
-      const logErr = \`\${API}/projects/\${ref}/logs?type=error&download=1\`;
       return \`
         <div class="actions">
           <button class="secondary" data-action="update" data-ref="\${ref}">Pull</button>
@@ -702,8 +802,7 @@ function renderPage() {
           <button class="secondary" data-action="db" data-ref="\${ref}">DB</button>
           <button class="secondary" data-action="env" data-ref="\${ref}">Env</button>
           <button class="secondary" data-action="scripts" data-ref="\${ref}">Scripts</button>
-          <a class="btn ghost" href="\${logOut}">Out log</a>
-          <a class="btn ghost" href="\${logErr}">Err log</a>
+          <button class="secondary" data-action="log" data-ref="\${ref}">Log</button>
           <span class="pill">\${project.protected ? 'protected' : 'open'}</span>
         </div>
         <div class="space"></div>
@@ -855,6 +954,93 @@ function renderPage() {
       envUploadInput.value = '';
     }
 
+    function openProgressPanel(ref, subtitle) {
+      progressTitle.textContent = 'Pull Progress';
+      progressSubtitle.textContent = subtitle || ref || '';
+      progressBody.textContent = '';
+      progressFlash.hidden = true;
+      progressPanel.hidden = false;
+      progressPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function closeProgressPanel() {
+      if (progressAbort) {
+        progressAbort.abort();
+        progressAbort = null;
+      }
+      progressPanel.hidden = true;
+      progressBody.textContent = '';
+      progressFlash.hidden = true;
+    }
+
+    function openLogPanel(ref, type) {
+      currentLogRef = ref;
+      currentLogType = type || 'out';
+      logTitle.textContent = 'Live Log';
+      logSubtitle.textContent = ref + ' · ' + (currentLogType === 'error' ? 'error' : 'output');
+      logBody.textContent = '';
+      logFlash.hidden = true;
+      logPanel.hidden = false;
+      logPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function closeLogPanel() {
+      currentLogRef = '';
+      currentLogType = 'out';
+      logBody.textContent = '';
+      logFlash.hidden = true;
+      logPanel.hidden = true;
+      if (logTimer) {
+        clearInterval(logTimer);
+        logTimer = null;
+      }
+    }
+
+    async function loadLog(ref, type = 'out') {
+      const text = await fetchText('/projects/' + ref + '/logs?type=' + encodeURIComponent(type) + '&lines=400');
+      logBody.textContent = text || '(no log data)\n';
+      logSubtitle.textContent = decodeURIComponent(ref) + ' · ' + (type === 'error' ? 'error' : 'output');
+      logBody.scrollTop = logBody.scrollHeight;
+    }
+
+    async function runPullWithProgress(ref) {
+      if (progressAbort) {
+        progressAbort.abort();
+      }
+      progressAbort = new AbortController();
+      openProgressPanel(decodeURIComponent(ref), 'Pulling ' + decodeURIComponent(ref));
+      try {
+        const res = await fetch(API + '/projects/' + ref + '/update-stream', {
+          method: 'POST',
+          credentials: 'same-origin',
+          signal: progressAbort.signal,
+        });
+        if (!res.ok || !res.body) {
+          const text = await res.text();
+          throw new Error(text || 'Request failed: ' + res.status);
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          progressBody.textContent = buffer;
+          progressBody.scrollTop = progressBody.scrollHeight;
+        }
+        buffer += decoder.decode();
+        if (buffer.trim()) {
+          progressBody.textContent = buffer;
+        }
+      } catch (error) {
+        showMessage(progressFlash, error.message, false);
+        progressFlash.hidden = false;
+      } finally {
+        progressAbort = null;
+      }
+    }
+
     async function loadScripts(ref) {
       const data = await api(\`/projects/\${ref}/scripts\`);
       openScriptsModal(ref, data.scripts || [], data.project || ref);
@@ -923,6 +1109,39 @@ function renderPage() {
       if (action === 'db' || action === 'env') {
         return;
       }
+      if (action === 'log') {
+        btn.disabled = true;
+        try {
+          openLogPanel(ref, currentLogType);
+          await loadLog(ref, currentLogType);
+          if (logTimer) clearInterval(logTimer);
+          logTimer = setInterval(() => {
+            if (currentLogRef) {
+              loadLog(currentLogRef, currentLogType).catch((error) => {
+                showMessage(logFlash, error.message, false);
+              });
+            }
+          }, 3000);
+        } catch (error) {
+          showMessage(logFlash, error.message, false);
+          logPanel.hidden = false;
+        } finally {
+          btn.disabled = false;
+        }
+        return;
+      }
+      if (action === 'update') {
+        btn.disabled = true;
+        try {
+          await runPullWithProgress(ref);
+        } catch (error) {
+          showMessage(progressFlash, error.message, false);
+          progressPanel.hidden = false;
+        } finally {
+          btn.disabled = false;
+        }
+        return;
+      }
       if (action === 'scripts') {
         btn.disabled = true;
         try {
@@ -951,6 +1170,34 @@ function renderPage() {
     closeScriptsBtn.addEventListener('click', closeScriptsModal);
     closeDbBtn.addEventListener('click', closeDbPanel);
     closeEnvBtn.addEventListener('click', closeEnvPanel);
+    closeProgressBtn.addEventListener('click', closeProgressPanel);
+    closeLogBtn.addEventListener('click', closeLogPanel);
+    logOutBtn.addEventListener('click', async () => {
+      if (!currentLogRef) return;
+      currentLogType = 'out';
+      try {
+        await loadLog(currentLogRef, currentLogType);
+      } catch (error) {
+        showMessage(logFlash, error.message, false);
+      }
+    });
+    logErrBtn.addEventListener('click', async () => {
+      if (!currentLogRef) return;
+      currentLogType = 'error';
+      try {
+        await loadLog(currentLogRef, currentLogType);
+      } catch (error) {
+        showMessage(logFlash, error.message, false);
+      }
+    });
+    logRefreshBtn.addEventListener('click', async () => {
+      if (!currentLogRef) return;
+      try {
+        await loadLog(currentLogRef, currentLogType);
+      } catch (error) {
+        showMessage(logFlash, error.message, false);
+      }
+    });
     document.addEventListener('click', async (event) => {
       const btn = event.target.closest('button[data-script-run], button[data-script-activate]');
       if (!btn || !currentScriptsRef) return;
@@ -1199,6 +1446,18 @@ async function handleRequest(req, res) {
         sendJson(res, 200, { ok: true, message: `Environment files updated for ${ref}` });
         return;
       }
+    }
+
+    const updateStreamMatch = pathname.match(/^\/api\/projects\/(.+?)\/update-stream$/);
+    if (updateStreamMatch) {
+      const ref = decodeURIComponent(updateStreamMatch[1]);
+      if (req.method !== 'POST') {
+        res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Method not allowed');
+        return;
+      }
+      streamProjectCtl(res, ['update', ref]);
+      return;
     }
 
     const scriptsMatch = pathname.match(/^\/api\/projects\/(.+?)\/scripts(?:\/(run|activate))?$/);
