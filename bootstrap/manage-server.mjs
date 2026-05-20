@@ -1160,12 +1160,17 @@ async function handleRequest(req, res) {
         return;
       }
 
-      if (req.method === 'GET' && mode === 'download') {
+      if ((req.method === 'GET' || req.method === 'HEAD') && mode === 'download') {
         const zipBuffer = createEnvZip(projectPath);
-        sendText(res, 200, zipBuffer, {
+        res.writeHead(200, {
           'Content-Type': 'application/zip',
           'Content-Disposition': `attachment; filename="${slugFromRef(ref)}-env.zip"`,
         });
+        if (req.method === 'HEAD') {
+          res.end();
+          return;
+        }
+        res.end(zipBuffer);
         return;
       }
 
