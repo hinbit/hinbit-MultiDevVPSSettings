@@ -44,6 +44,7 @@ cat > "${SYSTEM_PORTAL_WEBROOT}/index.html" <<EOF
     <p class="muted">System services and deployed apps for ${SYSTEM_DOMAIN}</p>
     <h2>Admin</h2>
     <ul>
+      <li><a href="/manage/">Manage projects</a></li>
       <li><a href="/phpmyadmin/">phpMyAdmin</a></li>
     </ul>
     <h2>Apps</h2>
@@ -67,6 +68,20 @@ server {
 
     location = /phpmyadmin {
         return 301 /phpmyadmin/;
+    }
+
+    location = /manage {
+        return 301 /manage/;
+    }
+
+    location /manage/ {
+        proxy_pass http://127.0.0.1:8090/;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_redirect off;
     }
 
     location /phpmyadmin/ {
@@ -112,6 +127,20 @@ server {
 
     location = /phpmyadmin {
         return 301 /phpmyadmin/;
+    }
+
+    location = /manage {
+        return 301 /manage/;
+    }
+
+    location /manage/ {
+        proxy_pass http://127.0.0.1:8090/;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_redirect off;
     }
 
     location /phpmyadmin/ {

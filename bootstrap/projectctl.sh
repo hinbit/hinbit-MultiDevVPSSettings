@@ -4,6 +4,8 @@ set -euo pipefail
 META_DIR="/etc/vps-projects"
 APP_ROOT="/var/www"
 APP_MAP="/etc/app-map.csv"
+AUTH_DIR="/etc/nginx/project-auth"
+AUTH_USER="project"
 PORT_MIN="${PROJECT_PORT_START:-3000}"
 PORT_MAX="${PROJECT_PORT_END:-9999}"
 
@@ -18,7 +20,10 @@ Usage:
   projectctl install [--domain example.com] [--https yes|no] [--branch main] [--pm2-name name] [--port N] [--env-file path] [--entrypoint path] owner/repo
   projectctl update owner/repo
   projectctl restart owner/repo
+  projectctl stop owner/repo
   projectctl status owner/repo
+  projectctl script [--pm2] owner/repo package-script
+  projectctl password [--password secret|--clear] owner/repo
   projectctl uninstall owner/repo
   projectctl list
 
@@ -30,6 +35,8 @@ Defaults:
   - port is auto-assigned if not provided
   - domain is optional, but when provided it is added to /etc/app-map.csv and synced to nginx
   - when a domain is provided, VITE_ALLOWED_HOSTS and CORS_ORIGIN are exported for the PM2 runtime
+  - `projectctl script` runs a package.json script, with optional `--pm2` for runtime scripts
+  - `projectctl password` enables or clears nginx basic auth for a project's domain
 EOF
 }
 
@@ -86,6 +93,10 @@ meta_path_for_slug() {
 
 ensure_meta_dir() {
   mkdir -p "${META_DIR}"
+}
+
+ensure_auth_dir() {
+  mkdir -p "${AUTH_DIR}"
 }
 
 ensure_app_map() {
@@ -350,6 +361,27 @@ sync_app_map() {
   fi
 }
 
+auth_file_for_domain() {
+  local domain="$1"
+  printf '%s/%s.htpasswd' "${AUTH_DIR}" "${domain}"
+}
+
+project_auth_enabled() {
+  local domain="$1"
+  [[ -n "${domain}" ]] && [[ -s "$(auth_file_for_domain "${domain}")" ]]
+}
+
+package_script_runner() {
+  local script="$1"
+  case "${PACKAGE_MANAGER:-npm}" in
+    pnpm) printf 'pnpm run %q' "${script}" ;;
+    corepack-pnpm) printf 'corepack pnpm run %q' "${script}" ;;
+    yarn) printf 'yarn %q' "${script}" ;;
+    corepack-yarn) printf 'corepack yarn %q' "${script}" ;;
+    *) printf 'npm run %q' "${script}" ;;
+  esac
+}
+
 clone_or_pull() {
   if [[ -d "${APP_DIR}/.git" ]]; then
     git -C "${APP_DIR}" remote set-url origin "${REPO_URL}" >/dev/null 2>&1 || true
@@ -541,6 +573,23 @@ do_restart() {
   printf '[projectctl] restarted %s\n' "${REPO_REF}"
 }
 
+do_stop() {
+  local ref="$1"
+  local slug
+  local meta
+
+  slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
+  meta="$(meta_path_for_slug "${slug}")"
+  load_meta "${meta}"
+
+  if pm2 describe "${PM2_NAME}" >/dev/null 2>&1; then
+    pm2 stop "${PM2_NAME}" >/dev/null 2>&1 || true
+    pm2 save || true
+  fi
+
+  printf '[projectctl] stopped %s\n' "${REPO_REF}"
+}
+
 do_status() {
   local ref="$1"
   local slug
@@ -552,8 +601,81 @@ do_status() {
 
   printf 'repo: %s\npath: %s\npm2: %s\nport: %s\ndomain: %s\nhttps: %s\nkind: %s\n' \
     "${REPO_REF}" "${APP_DIR}" "${PM2_NAME}" "${APP_PORT}" "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}" "${START_KIND}"
+  printf 'protected: %s\n' "$(project_auth_enabled "${APP_DOMAIN:-}" && printf yes || printf no)"
   (cd "${APP_DIR}" && git status -sb) || true
   pm2 describe "${PM2_NAME}" || true
+}
+
+do_script() {
+  local ref="$1"
+  local script="$2"
+  local pm2_mode="${3:-no}"
+  local slug
+  local meta
+  local runner
+  local pm2_script_name
+
+  slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
+  meta="$(meta_path_for_slug "${slug}")"
+  load_meta "${meta}"
+
+  [[ -d "${APP_DIR}" ]] || die "Missing app directory: ${APP_DIR}"
+  [[ -n "${script}" ]] || die "Missing package script name"
+  [[ "${script}" =~ ^[A-Za-z0-9:_-]+$ ]] || die "Invalid script name: ${script}"
+
+  runner="$(package_script_runner "${script}")"
+  pm2_script_name="${PM2_NAME}-${script}"
+
+  if [[ "${pm2_mode}" == "yes" ]]; then
+    (
+      cd "${APP_DIR}"
+      pm2 delete "${pm2_script_name}" >/dev/null 2>&1 || true
+      env PORT="${APP_PORT}" pm2 start /bin/bash --name "${pm2_script_name}" --no-autorestart -- -lc "${runner}"
+    )
+    pm2 save
+    printf '[projectctl] activated %s script %s as %s\n' "${REPO_REF}" "${script}" "${pm2_script_name}"
+    return
+  fi
+
+  (
+    cd "${APP_DIR}"
+    /bin/bash -lc "${runner}"
+  )
+  printf '[projectctl] ran %s script %s\n' "${REPO_REF}" "${script}"
+}
+
+do_password() {
+  local ref="$1"
+  local password="${2:-}"
+  local clear="${3:-no}"
+  local slug
+  local meta
+  local auth_file
+
+  slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
+  meta="$(meta_path_for_slug "${slug}")"
+  load_meta "${meta}"
+
+  [[ -n "${APP_DOMAIN:-}" ]] || die "Project has no domain; password protection needs a domain"
+  auth_file="$(auth_file_for_domain "${APP_DOMAIN}")"
+
+  ensure_auth_dir
+
+  if [[ "${clear}" == "yes" ]]; then
+    rm -f "${auth_file}"
+    sync_app_map
+    printf '[projectctl] cleared password for %s\n' "${REPO_REF}"
+    return
+  fi
+
+  [[ -n "${password}" ]] || die "Missing project password"
+  command -v openssl >/dev/null 2>&1 || die "openssl is required to set project passwords"
+  {
+    printf '%s:%s\n' "${AUTH_USER}" "$(openssl passwd -apr1 "${password}")"
+  } > "${auth_file}"
+  chmod 0640 "${auth_file}"
+  sync_app_map
+  printf '[projectctl] set password for %s\n' "${REPO_REF}"
 }
 
 do_uninstall() {
@@ -569,6 +691,10 @@ do_uninstall() {
   if pm2 describe "${PM2_NAME}" >/dev/null 2>&1; then
     pm2 delete "${PM2_NAME}" >/dev/null 2>&1 || true
     pm2 save || true
+  fi
+
+  if [[ -n "${APP_DOMAIN:-}" ]]; then
+    rm -f "$(auth_file_for_domain "${APP_DOMAIN}")"
   fi
 
   if [[ -n "${APP_DOMAIN:-}" ]] && [[ -f "${APP_MAP}" ]]; then
@@ -590,7 +716,7 @@ do_list() {
     [[ -e "${meta}" ]] || continue
     # shellcheck disable=SC1090
     source "${meta}"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${PROJECT_SLUG:-}" "${APP_PORT:-}" "${APP_DOMAIN:-}" "${PM2_NAME:-}" "${BRANCH:-}" "${APP_DIR:-}"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${PROJECT_SLUG:-}" "${REPO_REF:-}" "${APP_PORT:-}" "${APP_DOMAIN:-}" "${PM2_NAME:-}" "${BRANCH:-}" "${APP_DIR:-}"
   done
 }
 
@@ -659,9 +785,58 @@ main() {
       [[ $# -eq 1 ]] || { usage; exit 1; }
       do_restart "$1"
       ;;
+    stop)
+      [[ $# -eq 1 ]] || { usage; exit 1; }
+      do_stop "$1"
+      ;;
     status)
       [[ $# -eq 1 ]] || { usage; exit 1; }
       do_status "$1"
+      ;;
+    script)
+      local pm2_mode="no"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --pm2)
+            pm2_mode="yes"
+            shift
+            ;;
+          --help|-h)
+            usage
+            exit 0
+            ;;
+          *)
+            break
+            ;;
+        esac
+      done
+      [[ $# -eq 2 ]] || { usage; exit 1; }
+      do_script "$1" "$2" "${pm2_mode}"
+      ;;
+    password)
+      local password=""
+      local clear="no"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --password)
+            password="${2:-}"
+            shift 2
+            ;;
+          --clear)
+            clear="yes"
+            shift
+            ;;
+          --help|-h)
+            usage
+            exit 0
+            ;;
+          *)
+            break
+            ;;
+        esac
+      done
+      [[ $# -eq 1 ]] || { usage; exit 1; }
+      do_password "$1" "${password}" "${clear}"
       ;;
     uninstall)
       [[ $# -eq 1 ]] || { usage; exit 1; }

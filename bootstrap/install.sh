@@ -14,10 +14,13 @@ PHPMA_FILE="/etc/nginx/sites-available/phpmyadmin.local"
 SYSTEM_PORTAL_FILE="/etc/nginx/sites-available/system-portal.conf"
 SYSTEM_PORTAL_WEBROOT="/var/www/system-portal"
 SYSTEM_DOMAIN_FILE="/etc/vps-system-domain"
+SYSTEM_ENV_FILE="/etc/vps-system.env"
+MANAGE_SERVICE="/etc/systemd/system/vps-manage.service"
 SSH_HARDEN_FILE="/etc/ssh/sshd_config.d/99-vps-bootstrap.conf"
 PHP_FPM_VERSION=""
 PHP_FPM_SERVICE=""
 PHP_FPM_SOCKET=""
+NODE_BIN=""
 
 log() {
   printf '[vps-bootstrap] %s\n' "$*"
@@ -74,6 +77,7 @@ EOF
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
     apt-get install -y nodejs
   fi
+  NODE_BIN="$(command -v node)"
 
   if ! command -v pm2 >/dev/null 2>&1; then
     log "Installing PM2"
@@ -578,6 +582,38 @@ systemctl reload nginx
 EOF
   chmod 0755 "${BIN_DIR}/system-sync.sh"
 
+  install -m 0755 "${ROOT_DIR}/bootstrap/app-sync.sh" "${BIN_DIR}/app-sync.sh"
+  install -m 0755 "${ROOT_DIR}/bootstrap/system-sync.sh" "${BIN_DIR}/system-sync.sh"
+  install -m 0755 "${ROOT_DIR}/bootstrap/projectctl.sh" "${BIN_DIR}/projectctl"
+  install -m 0755 "${ROOT_DIR}/bootstrap/manage-server.mjs" "${BIN_DIR}/manage-server.mjs"
+
+  if [[ -n "${MANAGE_PASSWORD:-}" ]]; then
+    cat > "${SYSTEM_ENV_FILE}" <<EOF
+MANAGE_PASSWORD=${MANAGE_PASSWORD}
+EOF
+    chmod 0600 "${SYSTEM_ENV_FILE}"
+  fi
+
+  cat > "${MANAGE_SERVICE}" <<EOF
+[Unit]
+Description=MultiDev manage panel
+After=network.target nginx.service pm2-root.service
+Requires=pm2-root.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+EnvironmentFile=-${SYSTEM_ENV_FILE}
+Environment=MANAGE_PORT=8090
+ExecStart=${NODE_BIN} ${BIN_DIR}/manage-server.mjs
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
   cat > "${PM2_SERVICE}" <<'EOF'
 [Unit]
 Description=PM2 process manager
@@ -648,6 +684,7 @@ EOF
 
   systemctl daemon-reload
   systemctl enable --now pm2-root
+  systemctl enable --now vps-manage
 
   if [[ -n "${SYSTEM_DOMAIN:-}" ]]; then
     /usr/local/bin/system-sync.sh
