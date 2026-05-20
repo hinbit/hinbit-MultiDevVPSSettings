@@ -920,6 +920,9 @@ function renderPage() {
       const action = btn.dataset.action;
       const ref = btn.dataset.ref;
       if (!action || !ref) return;
+      if (action === 'db' || action === 'env') {
+        return;
+      }
       if (action === 'scripts') {
         btn.disabled = true;
         try {
