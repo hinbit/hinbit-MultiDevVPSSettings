@@ -1069,7 +1069,7 @@ function renderPage() {
 
     async function loadLog(ref, type = 'out') {
       const text = await fetchText('/projects/' + ref + '/logs?type=' + encodeURIComponent(type) + '&lines=400');
-      logBody.textContent = text || '(no log data)\n';
+      logBody.textContent = text || '(no log data)\\n';
       logSubtitle.textContent = decodeURIComponent(ref) + ' · ' + (type === 'error' ? 'error' : 'output');
       logBody.scrollTop = logBody.scrollHeight;
     }
