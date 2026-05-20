@@ -38,6 +38,7 @@ Install a new GitHub project and map it to a domain:
 
 ```bash
 projectctl install --domain example.com --branch main --pm2-name example-app owner/repo
+projectctl install --domain example.com --branch main --pm2-name example-app --env-file /root/app.env --entrypoint server/index.js owner/repo
 ```
 
 Pull updates and restart PM2 for an existing project:
@@ -55,6 +56,9 @@ Optional environment variables:
 - `ADMIN_SSH_PUBKEY` to install an SSH public key for that user
 - `PROJECT_PORT_START` / `PROJECT_PORT_END` to change the auto-assigned port range
 - `--branch` and `--pm2-name` on `projectctl install` to override repo branch and PM2 process name
+- `--env-file` to inject a repo `.env` before build/start
+- `--entrypoint` to force the PM2-managed runtime file or command when auto-detection is not enough
+- when a domain is set, `VITE_ALLOWED_HOSTS` and `CORS_ORIGIN` are exported into the PM2 runtime
 
 ## Runtime layout
 

@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SYSTEM_DOMAIN_FILE="/etc/vps-system-domain"
+SYSTEM_DOMAIN="${SYSTEM_DOMAIN:-}"
+SYSTEM_PORTAL_WEBROOT="/var/www/system-portal"
+SYSTEM_PORTAL_FILE="/etc/nginx/sites-available/system-portal.conf"
+ACME_ROOT="/var/www/html"
+
+if [[ -z "${SYSTEM_DOMAIN}" && -f "${SYSTEM_DOMAIN_FILE}" ]]; then
+  SYSTEM_DOMAIN="$(cat "${SYSTEM_DOMAIN_FILE}")"
+fi
+
+if [[ -z "${SYSTEM_DOMAIN}" ]]; then
+  echo "[system-sync] SYSTEM_DOMAIN not set" >&2
+  exit 1
+fi
+
+mkdir -p "${SYSTEM_PORTAL_WEBROOT}"
+
+app_links="$(
+  awk -F, 'NR > 1 && $1 !~ /^#/ && $1 != "" { printf("<li><a href=\"https://%s/\">%s</a></li>\n", $1, $1) }' /etc/app-map.csv
+)"
+
+cat > "${SYSTEM_PORTAL_WEBROOT}/index.html" <<EOF
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MultiDev Control Panel</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 40px; background: #0b1020; color: #e6edf3; }
+    a { color: #7dd3fc; }
+    .card { max-width: 900px; background: #111936; border: 1px solid #24304f; border-radius: 16px; padding: 24px; }
+    h1 { margin-top: 0; }
+    ul { line-height: 1.8; }
+    .muted { color: #93a4bf; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>MultiDev Control Panel</h1>
+    <p class="muted">System services and deployed apps for ${SYSTEM_DOMAIN}</p>
+    <h2>Admin</h2>
+    <ul>
+      <li><a href="/phpmyadmin/">phpMyAdmin</a></li>
+    </ul>
+    <h2>Apps</h2>
+    <ul>
+${app_links}
+    </ul>
+  </div>
+</body>
+</html>
+EOF
+
+render_http() {
+  cat <<EOF
+server {
+    listen 80;
+    server_name ${SYSTEM_DOMAIN};
+
+    location /.well-known/acme-challenge/ {
+        root ${ACME_ROOT};
+    }
+
+    location = /phpmyadmin {
+        return 301 /phpmyadmin/;
+    }
+
+    location /phpmyadmin/ {
+        proxy_pass http://127.0.0.1:8081/;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_redirect off;
+    }
+
+    location / {
+        root ${SYSTEM_PORTAL_WEBROOT};
+        index index.html;
+        try_files \$uri /index.html;
+    }
+}
+EOF
+}
+
+render_https() {
+  cat <<EOF
+server {
+    listen 80;
+    server_name ${SYSTEM_DOMAIN};
+
+    location /.well-known/acme-challenge/ {
+        root ${ACME_ROOT};
+    }
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name ${SYSTEM_DOMAIN};
+
+    ssl_certificate /etc/letsencrypt/live/${SYSTEM_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${SYSTEM_DOMAIN}/privkey.pem;
+
+    location = /phpmyadmin {
+        return 301 /phpmyadmin/;
+    }
+
+    location /phpmyadmin/ {
+        proxy_pass http://127.0.0.1:8081/;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_redirect off;
+    }
+
+    location / {
+        root ${SYSTEM_PORTAL_WEBROOT};
+        index index.html;
+        try_files \$uri /index.html;
+    }
+}
+EOF
+}
+
+if [[ -s "/etc/letsencrypt/live/${SYSTEM_DOMAIN}/fullchain.pem" ]]; then
+  render_https > "${SYSTEM_PORTAL_FILE}"
+else
+  if certbot certonly --webroot -w "${ACME_ROOT}" -d "${SYSTEM_DOMAIN}" --non-interactive --agree-tos --register-unsafely-without-email; then
+    render_https > "${SYSTEM_PORTAL_FILE}"
+  else
+    render_http > "${SYSTEM_PORTAL_FILE}"
+  fi
+fi
+
+ln -sfn "${SYSTEM_PORTAL_FILE}" /etc/nginx/sites-enabled/system-portal.conf
+nginx -t
+systemctl reload nginx

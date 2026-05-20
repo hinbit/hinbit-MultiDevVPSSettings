@@ -15,7 +15,7 @@ die() {
 usage() {
   cat <<'EOF'
 Usage:
-  projectctl install [--domain example.com] [--https yes|no] [--branch main] [--pm2-name name] [--port N] owner/repo
+  projectctl install [--domain example.com] [--https yes|no] [--branch main] [--pm2-name name] [--port N] [--env-file path] [--entrypoint path] owner/repo
   projectctl update owner/repo
   projectctl restart owner/repo
   projectctl status owner/repo
@@ -29,6 +29,7 @@ Defaults:
   - default branch is the repo's current branch or "main"
   - port is auto-assigned if not provided
   - domain is optional, but when provided it is added to /etc/app-map.csv and synced to nginx
+  - when a domain is provided, VITE_ALLOWED_HOSTS and CORS_ORIGIN are exported for the PM2 runtime
 EOF
 }
 
@@ -194,6 +195,11 @@ detect_start_kind() {
     fi
   done
 
+  if [[ -f server/index.js ]]; then
+    printf 'node:server/index.js'
+    return
+  fi
+
   if [[ -f package.json ]]; then
     if package_has_script start; then
       printf 'npm-start'
@@ -296,7 +302,7 @@ APP_PORT=${APP_PORT}
 APP_DOMAIN=${APP_DOMAIN}
 APP_HTTPS=${APP_HTTPS}
 APP_TYPE=${APP_TYPE}
-PACKAGE_MANAGER=${PACKAGE_MANAGER}
+PACKAGE_MANAGER=${PACKAGE_MANAGER:-}
 BRANCH=${BRANCH}
 GIT_REMOTE=${GIT_REMOTE}
 START_KIND=${START_KIND}
@@ -355,35 +361,54 @@ clone_or_pull() {
 }
 
 start_pm2() {
+  local -a runtime_env=()
+
+  if [[ -n "${APP_DOMAIN:-}" ]]; then
+    runtime_env+=("VITE_ALLOWED_HOSTS=${APP_DOMAIN}")
+    runtime_env+=("CORS_ORIGIN=https://${APP_DOMAIN}")
+  fi
+
+  if [[ "${START_KIND}" == "node:server/index.js" ]]; then
+    runtime_env+=("NODE_ENV=production")
+  fi
+
+  start_with_env() {
+    if [[ ${#runtime_env[@]} -gt 0 ]]; then
+      env "${runtime_env[@]}" "$@"
+    else
+      "$@"
+    fi
+  }
+
   (
     cd "${APP_DIR}"
     case "${START_KIND}" in
       ecosystem)
-        pm2 start "${START_TARGET}" --name "${PM2_NAME}" --update-env
+        start_with_env pm2 start "${START_TARGET}" --name "${PM2_NAME}" --update-env
         ;;
       npm-start)
         case "${PACKAGE_MANAGER:-npm}" in
-          pnpm) PORT="${APP_PORT}" pm2 start pnpm --name "${PM2_NAME}" -- start ;;
-          corepack-pnpm) PORT="${APP_PORT}" pm2 start corepack --name "${PM2_NAME}" -- pnpm start ;;
-          yarn) PORT="${APP_PORT}" pm2 start yarn --name "${PM2_NAME}" -- start ;;
-          corepack-yarn) PORT="${APP_PORT}" pm2 start corepack --name "${PM2_NAME}" -- yarn start ;;
-          *) PORT="${APP_PORT}" pm2 start npm --name "${PM2_NAME}" -- start ;;
+          pnpm) start_with_env env PORT="${APP_PORT}" pm2 start pnpm --name "${PM2_NAME}" -- start ;;
+          corepack-pnpm) start_with_env env PORT="${APP_PORT}" pm2 start corepack --name "${PM2_NAME}" -- pnpm start ;;
+          yarn) start_with_env env PORT="${APP_PORT}" pm2 start yarn --name "${PM2_NAME}" -- start ;;
+          corepack-yarn) start_with_env env PORT="${APP_PORT}" pm2 start corepack --name "${PM2_NAME}" -- yarn start ;;
+          *) start_with_env env PORT="${APP_PORT}" pm2 start npm --name "${PM2_NAME}" -- start ;;
         esac
         ;;
       npm-dev)
         case "${PACKAGE_MANAGER:-npm}" in
-          pnpm) PORT="${APP_PORT}" pm2 start pnpm --name "${PM2_NAME}" -- dev ;;
-          corepack-pnpm) PORT="${APP_PORT}" pm2 start corepack --name "${PM2_NAME}" -- pnpm dev ;;
-          yarn) PORT="${APP_PORT}" pm2 start yarn --name "${PM2_NAME}" -- dev ;;
-          corepack-yarn) PORT="${APP_PORT}" pm2 start corepack --name "${PM2_NAME}" -- yarn dev ;;
-          *) PORT="${APP_PORT}" pm2 start npm --name "${PM2_NAME}" -- run dev ;;
+          pnpm) start_with_env env PORT="${APP_PORT}" pm2 start pnpm --name "${PM2_NAME}" -- dev ;;
+          corepack-pnpm) start_with_env env PORT="${APP_PORT}" pm2 start corepack --name "${PM2_NAME}" -- pnpm dev ;;
+          yarn) start_with_env env PORT="${APP_PORT}" pm2 start yarn --name "${PM2_NAME}" -- dev ;;
+          corepack-yarn) start_with_env env PORT="${APP_PORT}" pm2 start corepack --name "${PM2_NAME}" -- yarn dev ;;
+          *) start_with_env env PORT="${APP_PORT}" pm2 start npm --name "${PM2_NAME}" -- run dev ;;
         esac
         ;;
       node:*)
-        PORT="${APP_PORT}" pm2 start "${START_TARGET}" --name "${PM2_NAME}" --update-env
+        start_with_env env PORT="${APP_PORT}" pm2 start "${START_TARGET}" --name "${PM2_NAME}" --update-env
         ;;
       serve:*)
-        pm2 serve "${START_TARGET}" "${APP_PORT}" --name "${PM2_NAME}" --spa
+        start_with_env pm2 serve "${START_TARGET}" "${APP_PORT}" --name "${PM2_NAME}" --spa
         ;;
       *)
         die "Unsupported start kind: ${START_KIND}"
@@ -410,6 +435,8 @@ do_install() {
   local branch="${4:-}"
   local pm2_name="${5:-}"
   local forced_port="${6:-}"
+  local env_file="${7:-}"
+  local entrypoint="${8:-}"
 
   REPO_REF="$(repo_ref_from_arg "${ref}")"
   REPO_URL="$(repo_url_from_ref "${REPO_REF}")"
@@ -439,12 +466,31 @@ do_install() {
 
   git -C "${APP_DIR}" checkout "${BRANCH}" >/dev/null 2>&1 || git -C "${APP_DIR}" checkout -b "${BRANCH}" "origin/${BRANCH}"
 
-  START_KIND="$(detect_start_kind)"
+  if [[ -n "${env_file}" ]]; then
+    [[ -f "${env_file}" ]] || die "Missing env file: ${env_file}"
+    install -m 0600 "${env_file}" "${APP_DIR}/.env"
+    git -C "${APP_DIR}" update-index --skip-worktree .env >/dev/null 2>&1 || true
+  fi
+
+  PACKAGE_MANAGER="$(cd "${APP_DIR}" && detect_package_manager)"
+
+  if [[ -n "${entrypoint}" ]]; then
+    if [[ "${entrypoint}" == *.js || "${entrypoint}" == *.cjs || "${entrypoint}" == *.mjs ]]; then
+      START_KIND="node:${entrypoint}"
+    else
+      START_KIND="${entrypoint}"
+    fi
+  else
+    START_KIND="$(cd "${APP_DIR}" && detect_start_kind)"
+  fi
   START_TARGET="$(start_kind_target "${START_KIND}")"
   APP_TYPE="$(start_kind_family "${START_KIND}")"
 
-  install_deps
-  maybe_build
+  (
+    cd "${APP_DIR}"
+    install_deps
+    maybe_build
+  )
 
   meta="$(meta_path_for_slug "${PROJECT_SLUG}")"
   write_meta "${meta}"
@@ -561,6 +607,8 @@ main() {
       local https="yes"
       local branch=""
       local pm2_name=""
+      local env_file=""
+      local entrypoint=""
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --domain)
@@ -583,6 +631,14 @@ main() {
             port="${2:-}"
             shift 2
             ;;
+          --env-file)
+            env_file="${2:-}"
+            shift 2
+            ;;
+          --entrypoint)
+            entrypoint="${2:-}"
+            shift 2
+            ;;
           --help|-h)
             usage
             exit 0
@@ -593,7 +649,7 @@ main() {
         esac
       done
       [[ $# -eq 1 ]] || { usage; exit 1; }
-      do_install "$1" "${domain}" "${https}" "${branch}" "${pm2_name}" "${port}"
+      do_install "$1" "${domain}" "${https}" "${branch}" "${pm2_name}" "${port}" "${env_file}" "${entrypoint}"
       ;;
     update)
       [[ $# -eq 1 ]] || { usage; exit 1; }
