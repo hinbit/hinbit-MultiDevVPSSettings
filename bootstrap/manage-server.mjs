@@ -512,6 +512,9 @@ function renderPage() {
       width: min(1100px, calc(100vw - 48px));
       box-sizing: border-box;
     }
+    .modal-panel[hidden] {
+      display: none !important;
+    }
     .modal-panel > header {
       padding: 18px 20px 0;
     }
