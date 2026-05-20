@@ -82,6 +82,29 @@ function parseEnvFile(filePath) {
   return data;
 }
 
+function readProjectEnv(projectPath) {
+  const merged = {};
+  const files = [];
+  const candidates = [
+    '.env',
+    '.env.local',
+    '.env.production',
+    '.env.credentials',
+    '.env.machine',
+    '.env.production.local',
+    '.env.development',
+  ];
+
+  for (const name of candidates) {
+    const filePath = path.join(projectPath, name);
+    if (!fs.existsSync(filePath)) continue;
+    files.push(filePath);
+    Object.assign(merged, parseEnvFile(filePath));
+  }
+
+  return { merged, files };
+}
+
 function readPackageScripts(projectPath) {
   try {
     const pkgPath = path.join(projectPath, 'package.json');
@@ -112,6 +135,35 @@ function readProjects() {
       scripts: readPackageScripts(meta.APP_DIR || ''),
     };
   }).sort((a, b) => String(a.APP_DOMAIN || a.PROJECT_SLUG).localeCompare(String(b.APP_DOMAIN || b.PROJECT_SLUG)));
+}
+
+function pickDbDetails(projectPath) {
+  const { merged, files } = readProjectEnv(projectPath);
+  const keys = [
+    'DB_SUPPLIER',
+    'DB_NAME',
+    'DB_DATABASE',
+    'DB_USER',
+    'DB_PASSWORD',
+    'DB_HOST',
+    'DB_PORT',
+    'MYSQL_DATABASE',
+    'MYSQL_USER',
+    'MYSQL_PASSWORD',
+    'MYSQL_HOST',
+    'MYSQL_PORT',
+    'POSTGRES_DB',
+    'POSTGRES_USER',
+    'POSTGRES_PASSWORD',
+    'POSTGRES_HOST',
+    'POSTGRES_PORT',
+    'DATABASE_URL',
+  ];
+  const db = {};
+  for (const key of keys) {
+    if (merged[key]) db[key] = merged[key];
+  }
+  return { files, db };
 }
 
 function getPm2List() {
@@ -266,6 +318,9 @@ function renderPage() {
     .script-list { display: grid; gap: 10px; }
     .script-row { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: start; padding: 12px; border: 1px solid #22304a; border-radius: 12px; background: #0b1220; }
     .script-row code { white-space: pre-wrap; }
+    .kv-list { display: grid; gap: 10px; }
+    .kv-item { display: grid; gap: 4px; padding: 12px; border: 1px solid #22304a; border-radius: 12px; background: #0b1220; }
+    .kv-item code { white-space: pre-wrap; word-break: break-word; }
   </style>
 </head>
 <body>
@@ -353,6 +408,19 @@ function renderPage() {
       <div id="scriptsList" class="script-list"></div>
     </div>
   </div>
+  <div id="dbPanel" class="scripts-panel" hidden>
+    <header>
+      <div>
+        <h2 id="dbTitle">Database Details</h2>
+        <div id="dbSubtitle" class="muted"></div>
+      </div>
+      <button id="closeDbBtn" class="ghost" type="button">Close</button>
+    </header>
+    <div class="body">
+      <div id="dbFlash" class="flash" hidden></div>
+      <div id="dbList" class="kv-list"></div>
+    </div>
+  </div>
   <script>
     const API = 'api';
     const projectsBody = document.getElementById('projectsBody');
@@ -364,7 +432,14 @@ function renderPage() {
     const scriptsList = document.getElementById('scriptsList');
     const scriptsFlash = document.getElementById('scriptsFlash');
     const closeScriptsBtn = document.getElementById('closeScriptsBtn');
+    const dbPanel = document.getElementById('dbPanel');
+    const dbTitle = document.getElementById('dbTitle');
+    const dbSubtitle = document.getElementById('dbSubtitle');
+    const dbList = document.getElementById('dbList');
+    const dbFlash = document.getElementById('dbFlash');
+    const closeDbBtn = document.getElementById('closeDbBtn');
     let currentScriptsRef = '';
+    let currentDbRef = '';
 
     function showMessage(el, value, ok = true) {
       el.hidden = false;
@@ -424,6 +499,7 @@ function renderPage() {
           <button class="secondary" data-action="restart" data-ref="\${ref}">Restart</button>
           <button class="secondary" data-action="stop" data-ref="\${ref}">Stop</button>
           <button class="danger" data-action="uninstall" data-ref="\${ref}">Kill</button>
+          <button class="secondary" data-action="db" data-ref="\${ref}">DB</button>
           <button class="secondary" data-action="scripts" data-ref="\${ref}">Scripts</button>
           <a class="btn ghost" href="\${logOut}">Out log</a>
           <a class="btn ghost" href="\${logErr}">Err log</a>
@@ -506,9 +582,52 @@ function renderPage() {
       scriptsFlash.hidden = true;
     }
 
+    function openDbPanel(ref, details, subtitle) {
+      currentDbRef = ref;
+      dbTitle.textContent = 'Database Details';
+      dbSubtitle.textContent = subtitle || '';
+      dbFlash.hidden = true;
+      const rows = [
+        ['DB supplier', details.DB_SUPPLIER || 'n/a'],
+        ['Database name', details.DB_NAME || details.DB_DATABASE || details.MYSQL_DATABASE || details.POSTGRES_DB || 'n/a'],
+        ['Database user', details.DB_USER || details.MYSQL_USER || details.POSTGRES_USER || 'n/a'],
+        ['Database password', details.DB_PASSWORD || details.MYSQL_PASSWORD || details.POSTGRES_PASSWORD || 'n/a'],
+        ['Database host', details.DB_HOST || details.MYSQL_HOST || details.POSTGRES_HOST || 'n/a'],
+        ['Database port', details.DB_PORT || details.MYSQL_PORT || details.POSTGRES_PORT || 'n/a'],
+        ['DATABASE_URL', details.DATABASE_URL || 'n/a'],
+      ];
+      const sourceFiles = (details.files || []).map((file) => escapeHtml(file)).join('<br>');
+      dbList.innerHTML = \`
+        \${rows.map(([label, value]) => \`
+          <div class="kv-item">
+            <div class="small">\${escapeHtml(label)}</div>
+            <code>\${escapeHtml(value)}</code>
+          </div>
+        \`).join('')}
+        <div class="kv-item">
+          <div class="small">Source files</div>
+          <div class="small">\${sourceFiles || 'n/a'}</div>
+        </div>
+      \`;
+      dbPanel.hidden = false;
+      dbPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function closeDbPanel() {
+      dbPanel.hidden = true;
+      currentDbRef = '';
+      dbList.innerHTML = '';
+      dbFlash.hidden = true;
+    }
+
     async function loadScripts(ref) {
       const data = await api(\`/projects/\${ref}/scripts\`);
       openScriptsModal(ref, data.scripts || [], data.project || ref);
+    }
+
+    async function loadDb(ref) {
+      const data = await api(\`/projects/\${ref}/db\`);
+      openDbPanel(ref, data.db || {}, data.project || ref);
     }
 
     async function runScript(ref, script, mode) {
@@ -569,6 +688,7 @@ function renderPage() {
     });
 
     closeScriptsBtn.addEventListener('click', closeScriptsModal);
+    closeDbBtn.addEventListener('click', closeDbPanel);
     document.addEventListener('click', async (event) => {
       const btn = event.target.closest('button[data-script-run], button[data-script-activate]');
       if (!btn || !currentScriptsRef) return;
@@ -580,6 +700,22 @@ function renderPage() {
         await runScript(currentScriptsRef, script, mode);
       } catch (error) {
         showMessage(scriptsFlash, error.message, false);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-action="db"]');
+      if (!btn) return;
+      const ref = btn.dataset.ref;
+      if (!ref) return;
+      btn.disabled = true;
+      try {
+        await loadDb(ref);
+      } catch (error) {
+        showMessage(dbFlash, error.message, false);
+        dbPanel.hidden = false;
       } finally {
         btn.disabled = false;
       }
@@ -697,6 +833,19 @@ async function handleRequest(req, res) {
         runProjectCtl(['password', '--password', String(body.accessPassword).trim(), repo]);
       }
       sendJson(res, 200, { ok: true, message: output || 'Installed project' });
+      return;
+    }
+
+    const dbMatch = pathname.match(/^\/api\/projects\/(.+?)\/db$/);
+    if (dbMatch) {
+      const ref = decodeURIComponent(dbMatch[1]);
+      const meta = parseEnvFile(metaPathForRef(ref));
+      const { files, db } = pickDbDetails(meta.APP_DIR || '');
+      sendJson(res, 200, {
+        project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
+        files,
+        db,
+      });
       return;
     }
 
