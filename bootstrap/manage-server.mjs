@@ -490,6 +490,34 @@ function renderPage() {
     .table-wrap { overflow: auto; }
     .flash { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #0b1220; border: 1px solid #22304a; white-space: pre-wrap; }
     .scripts-panel { background: #08111f; border: 1px solid #22304a; border-radius: 18px; box-shadow: 0 30px 80px rgba(0,0,0,0.35); margin: 0 24px 24px; }
+    .modal-panel {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      margin: 0;
+      padding: 24px;
+      background: rgba(2, 6, 23, 0.76);
+      backdrop-filter: blur(12px);
+      border: 0;
+      border-radius: 0;
+      box-shadow: none;
+      overflow: auto;
+      display: grid;
+      gap: 16px;
+      align-content: start;
+      justify-items: center;
+    }
+    .modal-panel > header,
+    .modal-panel > .body {
+      width: min(1100px, calc(100vw - 48px));
+      box-sizing: border-box;
+    }
+    .modal-panel > header {
+      padding: 18px 20px 0;
+    }
+    .modal-panel > .body {
+      padding: 18px 20px 20px;
+    }
     .scripts-panel header { padding: 18px 20px 0; display: flex; justify-content: space-between; align-items: center; gap: 16px; }
     .scripts-panel .body { padding: 18px 20px 20px; }
     .script-list { display: grid; gap: 10px; }
@@ -574,7 +602,7 @@ function renderPage() {
       <div id="listResult" class="flash" hidden></div>
     </section>
   </main>
-  <div id="scriptsPanel" class="scripts-panel" hidden>
+  <div id="scriptsPanel" class="scripts-panel modal-panel" hidden>
     <header>
       <div>
         <h2 id="scriptsTitle">Package Scripts</h2>
@@ -587,7 +615,7 @@ function renderPage() {
       <div id="scriptsList" class="script-list"></div>
     </div>
   </div>
-  <div id="dbPanel" class="scripts-panel" hidden>
+  <div id="dbPanel" class="scripts-panel modal-panel" hidden>
     <header>
       <div>
         <h2 id="dbTitle">Database Details</h2>
@@ -600,7 +628,7 @@ function renderPage() {
       <div id="dbList" class="kv-list"></div>
     </div>
   </div>
-  <div id="envPanel" class="scripts-panel" hidden>
+  <div id="envPanel" class="scripts-panel modal-panel" hidden>
     <header>
       <div>
         <h2 id="envTitle">Environment Values</h2>
@@ -621,7 +649,7 @@ function renderPage() {
       <div id="envList" class="kv-list"></div>
     </div>
   </div>
-  <div id="progressPanel" class="scripts-panel" hidden>
+  <div id="progressPanel" class="scripts-panel modal-panel" hidden>
     <header>
       <div>
         <h2 id="progressTitle">Pull Progress</h2>
@@ -634,7 +662,7 @@ function renderPage() {
       <pre id="progressBody" class="kv-item" style="margin:0; max-height: 60vh; overflow:auto; white-space: pre-wrap;"></pre>
     </div>
   </div>
-  <div id="logPanel" class="scripts-panel" hidden>
+  <div id="logPanel" class="scripts-panel modal-panel" hidden>
     <header>
       <div>
         <h2 id="logTitle">Live Log</h2>
@@ -701,6 +729,7 @@ function renderPage() {
     let currentLogType = 'out';
     let progressAbort = null;
     let logTimer = null;
+    let modalLockCount = 0;
 
     function showMessage(el, value, ok = true) {
       el.hidden = false;
@@ -732,6 +761,20 @@ function renderPage() {
         unit += 1;
       }
       return (size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)) + ' ' + units[unit];
+    }
+
+    function setModalLocked(locked) {
+      if (locked) {
+        modalLockCount += 1;
+        if (modalLockCount === 1) {
+          document.body.style.overflow = 'hidden';
+        }
+        return;
+      }
+      modalLockCount = Math.max(0, modalLockCount - 1);
+      if (!modalLockCount) {
+        document.body.style.overflow = '';
+      }
     }
 
     function refreshSystemStats(stats) {
@@ -854,6 +897,10 @@ function renderPage() {
     }
 
     function openScriptsModal(ref, scripts, subtitle) {
+      closeDbPanel();
+      closeEnvPanel();
+      closeProgressPanel();
+      closeLogPanel();
       currentScriptsRef = ref;
       scriptsTitle.textContent = 'Package Scripts';
       scriptsSubtitle.textContent = subtitle || '';
@@ -873,7 +920,7 @@ function renderPage() {
         \`).join('')
         : '<div class="muted">No package scripts found.</div>';
       scriptsPanel.hidden = false;
-      scriptsPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setModalLocked(true);
     }
 
     function closeScriptsModal() {
@@ -881,9 +928,14 @@ function renderPage() {
       currentScriptsRef = '';
       scriptsList.innerHTML = '';
       scriptsFlash.hidden = true;
+      setModalLocked(false);
     }
 
     function openDbPanel(ref, details, subtitle) {
+      closeScriptsModal();
+      closeEnvPanel();
+      closeProgressPanel();
+      closeLogPanel();
       currentDbRef = ref;
       dbTitle.textContent = 'Database Details';
       dbSubtitle.textContent = subtitle || '';
@@ -911,7 +963,7 @@ function renderPage() {
         </div>
       \`;
       dbPanel.hidden = false;
-      dbPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setModalLocked(true);
     }
 
     function closeDbPanel() {
@@ -919,6 +971,7 @@ function renderPage() {
       currentDbRef = '';
       dbList.innerHTML = '';
       dbFlash.hidden = true;
+      setModalLocked(false);
     }
 
     function renderKeyValueList(listEl, entries) {
@@ -933,6 +986,10 @@ function renderPage() {
     }
 
     function openEnvPanel(ref, details, subtitle) {
+      closeScriptsModal();
+      closeDbPanel();
+      closeProgressPanel();
+      closeLogPanel();
       currentEnvRef = ref;
       envTitle.textContent = 'Environment Values';
       envSubtitle.textContent = subtitle || '';
@@ -943,7 +1000,7 @@ function renderPage() {
       renderKeyValueList(envList, entries);
       envDownloadBtn.href = \`\${API}/projects/\${ref}/env/download\`;
       envPanel.hidden = false;
-      envPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setModalLocked(true);
     }
 
     function closeEnvPanel() {
@@ -952,15 +1009,20 @@ function renderPage() {
       envList.innerHTML = '';
       envFlash.hidden = true;
       envUploadInput.value = '';
+      setModalLocked(false);
     }
 
     function openProgressPanel(ref, subtitle) {
+      closeScriptsModal();
+      closeDbPanel();
+      closeEnvPanel();
+      closeLogPanel();
       progressTitle.textContent = 'Pull Progress';
       progressSubtitle.textContent = subtitle || ref || '';
       progressBody.textContent = '';
       progressFlash.hidden = true;
       progressPanel.hidden = false;
-      progressPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setModalLocked(true);
     }
 
     function closeProgressPanel() {
@@ -971,9 +1033,14 @@ function renderPage() {
       progressPanel.hidden = true;
       progressBody.textContent = '';
       progressFlash.hidden = true;
+      setModalLocked(false);
     }
 
     function openLogPanel(ref, type) {
+      closeScriptsModal();
+      closeDbPanel();
+      closeEnvPanel();
+      closeProgressPanel();
       currentLogRef = ref;
       currentLogType = type || 'out';
       logTitle.textContent = 'Live Log';
@@ -981,7 +1048,7 @@ function renderPage() {
       logBody.textContent = '';
       logFlash.hidden = true;
       logPanel.hidden = false;
-      logPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setModalLocked(true);
     }
 
     function closeLogPanel() {
@@ -994,6 +1061,7 @@ function renderPage() {
         clearInterval(logTimer);
         logTimer = null;
       }
+      setModalLocked(false);
     }
 
     async function loadLog(ref, type = 'out') {
