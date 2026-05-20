@@ -416,31 +416,31 @@ start_pm2() {
     cd "${APP_DIR}"
     case "${START_KIND}" in
       ecosystem)
-        start_with_env pm2 start "${START_TARGET}" --name "${PM2_NAME}" --update-env
+        start_with_env pm2 start "${START_TARGET}" --name "${PM2_NAME}" --update-env --time
         ;;
       npm-start)
         case "${PACKAGE_MANAGER:-npm}" in
-          pnpm) start_with_env env PORT="${APP_PORT}" pm2 start pnpm --name "${PM2_NAME}" -- start ;;
-          corepack-pnpm) start_with_env env PORT="${APP_PORT}" pm2 start corepack --name "${PM2_NAME}" -- pnpm start ;;
-          yarn) start_with_env env PORT="${APP_PORT}" pm2 start yarn --name "${PM2_NAME}" -- start ;;
-          corepack-yarn) start_with_env env PORT="${APP_PORT}" pm2 start corepack --name "${PM2_NAME}" -- yarn start ;;
-          *) start_with_env env PORT="${APP_PORT}" pm2 start npm --name "${PM2_NAME}" -- start ;;
+          pnpm) start_with_env env PORT="${APP_PORT}" pm2 start pnpm --name "${PM2_NAME}" --time -- start ;;
+          corepack-pnpm) start_with_env env PORT="${APP_PORT}" pm2 start corepack --name "${PM2_NAME}" --time -- pnpm start ;;
+          yarn) start_with_env env PORT="${APP_PORT}" pm2 start yarn --name "${PM2_NAME}" --time -- start ;;
+          corepack-yarn) start_with_env env PORT="${APP_PORT}" pm2 start corepack --name "${PM2_NAME}" --time -- yarn start ;;
+          *) start_with_env env PORT="${APP_PORT}" pm2 start npm --name "${PM2_NAME}" --time -- start ;;
         esac
         ;;
       npm-dev)
         case "${PACKAGE_MANAGER:-npm}" in
-          pnpm) start_with_env env PORT="${APP_PORT}" pm2 start pnpm --name "${PM2_NAME}" -- dev ;;
-          corepack-pnpm) start_with_env env PORT="${APP_PORT}" pm2 start corepack --name "${PM2_NAME}" -- pnpm dev ;;
-          yarn) start_with_env env PORT="${APP_PORT}" pm2 start yarn --name "${PM2_NAME}" -- dev ;;
-          corepack-yarn) start_with_env env PORT="${APP_PORT}" pm2 start corepack --name "${PM2_NAME}" -- yarn dev ;;
-          *) start_with_env env PORT="${APP_PORT}" pm2 start npm --name "${PM2_NAME}" -- run dev ;;
+          pnpm) start_with_env env PORT="${APP_PORT}" pm2 start pnpm --name "${PM2_NAME}" --time -- dev ;;
+          corepack-pnpm) start_with_env env PORT="${APP_PORT}" pm2 start corepack --name "${PM2_NAME}" --time -- pnpm dev ;;
+          yarn) start_with_env env PORT="${APP_PORT}" pm2 start yarn --name "${PM2_NAME}" --time -- dev ;;
+          corepack-yarn) start_with_env env PORT="${APP_PORT}" pm2 start corepack --name "${PM2_NAME}" --time -- yarn dev ;;
+          *) start_with_env env PORT="${APP_PORT}" pm2 start npm --name "${PM2_NAME}" --time -- run dev ;;
         esac
         ;;
       node:*)
-        start_with_env env PORT="${APP_PORT}" pm2 start "${START_TARGET}" --name "${PM2_NAME}" --update-env
+        start_with_env env PORT="${APP_PORT}" pm2 start "${START_TARGET}" --name "${PM2_NAME}" --update-env --time
         ;;
       serve:*)
-        start_with_env pm2 serve "${START_TARGET}" "${APP_PORT}" --name "${PM2_NAME}" --spa
+        start_with_env pm2 serve "${START_TARGET}" "${APP_PORT}" --name "${PM2_NAME}" --spa --time
         ;;
       *)
         die "Unsupported start kind: ${START_KIND}"
@@ -452,9 +452,7 @@ start_pm2() {
 
 restart_pm2() {
   if pm2 describe "${PM2_NAME}" >/dev/null 2>&1; then
-    pm2 restart "${PM2_NAME}" --update-env
-    pm2 save
-    return
+    pm2 delete "${PM2_NAME}" >/dev/null 2>&1 || true
   fi
 
   start_pm2
@@ -630,7 +628,7 @@ do_script() {
     (
       cd "${APP_DIR}"
       pm2 delete "${pm2_script_name}" >/dev/null 2>&1 || true
-      env PORT="${APP_PORT}" pm2 start /bin/bash --name "${pm2_script_name}" --no-autorestart -- -lc "${runner}"
+      env PORT="${APP_PORT}" pm2 start /bin/bash --name "${pm2_script_name}" --no-autorestart --time -- -lc "${runner}"
     )
     pm2 save
     printf '[projectctl] activated %s script %s as %s\n' "${REPO_REF}" "${script}" "${pm2_script_name}"

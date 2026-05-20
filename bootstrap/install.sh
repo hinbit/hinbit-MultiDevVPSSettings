@@ -91,6 +91,11 @@ EOF
   PHP_FPM_SOCKET="/run/php/php${PHP_FPM_VERSION}-fpm.sock"
 }
 
+configure_timezone() {
+  log "Setting timezone to Asia/Jerusalem"
+  timedatectl set-timezone Asia/Jerusalem || true
+}
+
 configure_firewall() {
   log "Configuring UFW"
   ufw --force reset
@@ -695,6 +700,7 @@ main() {
   require_root
   mkdir -p "${STATE_DIR}"
   install_packages
+  configure_timezone
   configure_firewall
   configure_fail2ban
   configure_unattended_upgrades

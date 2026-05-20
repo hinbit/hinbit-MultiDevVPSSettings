@@ -674,6 +674,8 @@ function renderPage() {
       <div class="actions">
         <button id="logOutBtn" class="secondary" type="button">Out</button>
         <button id="logErrBtn" class="secondary" type="button">Err</button>
+        <button id="logClearOutBtn" class="danger" type="button">Clear out</button>
+        <button id="logClearErrBtn" class="danger" type="button">Clear err</button>
         <button id="logRefreshBtn" class="secondary" type="button">Refresh</button>
         <button id="closeLogBtn" class="ghost" type="button">Close</button>
       </div>
@@ -723,6 +725,8 @@ function renderPage() {
     const logFlash = document.getElementById('logFlash');
     const logOutBtn = document.getElementById('logOutBtn');
     const logErrBtn = document.getElementById('logErrBtn');
+    const logClearOutBtn = document.getElementById('logClearOutBtn');
+    const logClearErrBtn = document.getElementById('logClearErrBtn');
     const logRefreshBtn = document.getElementById('logRefreshBtn');
     const closeLogBtn = document.getElementById('closeLogBtn');
     let currentScriptsRef = '';
@@ -1074,6 +1078,16 @@ function renderPage() {
       logBody.scrollTop = logBody.scrollHeight;
     }
 
+    async function clearLog(ref, type = 'out') {
+      const label = type === 'error' ? 'error' : 'output';
+      const res = await api('/projects/' + ref + '/logs/clear', {
+        method: 'POST',
+        body: JSON.stringify({ type }),
+      });
+      showMessage(logFlash, res.message || 'Cleared ' + label + ' log');
+      await loadLog(ref, currentLogType);
+    }
+
     async function runPullWithProgress(ref) {
       if (progressAbort) {
         progressAbort.abort();
@@ -1269,6 +1283,28 @@ function renderPage() {
         showMessage(logFlash, error.message, false);
       }
     });
+    logClearOutBtn.addEventListener('click', async () => {
+      if (!currentLogRef) return;
+      logClearOutBtn.disabled = true;
+      try {
+        await clearLog(currentLogRef, 'out');
+      } catch (error) {
+        showMessage(logFlash, error.message, false);
+      } finally {
+        logClearOutBtn.disabled = false;
+      }
+    });
+    logClearErrBtn.addEventListener('click', async () => {
+      if (!currentLogRef) return;
+      logClearErrBtn.disabled = true;
+      try {
+        await clearLog(currentLogRef, 'error');
+      } catch (error) {
+        showMessage(logFlash, error.message, false);
+      } finally {
+        logClearErrBtn.disabled = false;
+      }
+    });
     document.addEventListener('click', async (event) => {
       const btn = event.target.closest('button[data-script-run], button[data-script-activate]');
       if (!btn || !currentScriptsRef) return;
@@ -1409,6 +1445,16 @@ function logTail(filePath, lines = 200) {
   return split.slice(Math.max(0, split.length - lines)).join('\n');
 }
 
+function clearLogFile(filePath) {
+  if (!filePath) return false;
+  if (!fs.existsSync(filePath)) {
+    fs.writeFileSync(filePath, '');
+    return true;
+  }
+  fs.truncateSync(filePath, 0);
+  return true;
+}
+
 async function handleRequest(req, res) {
   if (!requireAuth(req, res)) return;
 
@@ -1528,6 +1574,36 @@ async function handleRequest(req, res) {
         return;
       }
       streamProjectCtl(res, ['update', ref]);
+      return;
+    }
+
+    const logClearMatch = pathname.match(/^\/api\/projects\/(.+?)\/logs\/clear$/);
+    if (logClearMatch) {
+      const ref = decodeURIComponent(logClearMatch[1]);
+      if (req.method !== 'POST') {
+        res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Method not allowed');
+        return;
+      }
+
+      const body = await readBody(req);
+      const type = String(body.type || 'out');
+      const meta = parseEnvFile(metaPathForRef(ref));
+      const pm2Name = meta.PM2_NAME || slugFromRef(ref);
+      const target = getPm2List().find((proc) => (proc?.name || proc?.pm2_env?.name) === pm2Name);
+      const outLog = target?.pm2_env?.pm_out_log_path || '';
+      const errLog = target?.pm2_env?.pm_err_log_path || '';
+
+      if (type === 'all') {
+        clearLogFile(outLog);
+        clearLogFile(errLog);
+      } else if (type === 'error' || type === 'err') {
+        clearLogFile(errLog);
+      } else {
+        clearLogFile(outLog);
+      }
+
+      sendJson(res, 200, { ok: true, message: `${ref} log(s) cleared` });
       return;
     }
 
