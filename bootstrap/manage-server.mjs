@@ -458,6 +458,7 @@ function renderPage() {
   <style>
     :root { color-scheme: dark; }
     body { margin: 0; font-family: Inter, system-ui, sans-serif; background: radial-gradient(circle at top, #11213d 0, #08111f 50%, #05070c 100%); color: #e5eef8; }
+    body { padding-top: 84px; }
     header, main { max-width: 1400px; margin: 0 auto; padding: 24px; }
     header { display: flex; justify-content: space-between; align-items: end; gap: 16px; }
     h1, h2 { margin: 0 0 12px; }
@@ -529,9 +530,42 @@ function renderPage() {
     .kv-list { display: grid; gap: 10px; }
     .kv-item { display: grid; gap: 4px; padding: 12px; border: 1px solid #22304a; border-radius: 12px; background: #0b1220; }
     .kv-item code { white-space: pre-wrap; word-break: break-word; }
+    .hinbit-brand {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      z-index: 80;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(8, 15, 29, 0.82);
+      border: 1px solid rgba(148,163,184,0.22);
+      box-shadow: 0 12px 32px rgba(0,0,0,0.25);
+      text-decoration: none;
+      color: #e5eef8;
+      backdrop-filter: blur(12px);
+    }
+    .hinbit-brand img {
+      width: 22px;
+      height: 22px;
+      display: block;
+      object-fit: contain;
+    }
+    .hinbit-brand span {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
   </style>
 </head>
 <body>
+  <a class="hinbit-brand" href="https://hinbit.com" target="_blank" rel="noreferrer">
+    <img src="https://hinbit.com/hebrew_site/hinbit-logo-symbol.png" alt="Hinbit">
+    <span>Powered by Hinbit Development</span>
+  </a>
   <header class="sticky">
     <div>
       <h1>MultiDev Manage</h1>

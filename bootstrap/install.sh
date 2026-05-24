@@ -469,15 +469,48 @@ cat > "\${SYSTEM_PORTAL_WEBROOT}/index.html" <<EOF2
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MultiDev Control Panel</title>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 40px; background: #0b1020; color: #e6edf3; }
+    body { font-family: system-ui, sans-serif; margin: 40px; padding-top: 60px; background: #0b1020; color: #e6edf3; }
     a { color: #7dd3fc; }
     .card { max-width: 900px; background: #111936; border: 1px solid #24304f; border-radius: 16px; padding: 24px; }
     h1 { margin-top: 0; }
     ul { line-height: 1.8; }
     .muted { color: #93a4bf; }
+    .hinbit-brand {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      z-index: 80;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(17, 25, 54, 0.88);
+      border: 1px solid #24304f;
+      box-shadow: 0 12px 32px rgba(0,0,0,0.25);
+      text-decoration: none;
+      color: #e6edf3;
+      backdrop-filter: blur(12px);
+    }
+    .hinbit-brand img {
+      width: 22px;
+      height: 22px;
+      display: block;
+      object-fit: contain;
+    }
+    .hinbit-brand span {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
   </style>
 </head>
 <body>
+  <a class="hinbit-brand" href="https://hinbit.com" target="_blank" rel="noreferrer">
+    <img src="https://hinbit.com/hebrew_site/hinbit-logo-symbol.png" alt="Hinbit">
+    <span>Powered by Hinbit Development</span>
+  </a>
   <div class="card">
     <h1>MultiDev Control Panel</h1>
     <p class="muted">System services and deployed apps for \${SYSTEM_DOMAIN}</p>
