@@ -804,38 +804,6 @@ function renderPage() {
       return (size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)) + ' ' + units[unit];
     }
 
-    function formatJerusalemDate(date) {
-      const parts = new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'Asia/Jerusalem',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        hour12: false,
-      }).formatToParts(date);
-      const values = Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, part.value]));
-      return values.year + '-' + values.month + '-' + values.day + ' ' + values.hour + ':' + values.minute + ':' + values.second;
-    }
-
-    function normalizeLogLine(line) {
-      const match = String(line || '').match(/^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)[: ]\s*(.*)$/);
-      if (!match) return line;
-      const stamp = match[1];
-      const payload = match[2];
-      const date = new Date(/[Zz]|[+-]\d{2}:?\d{2}$/.test(stamp) ? stamp : stamp + 'Z');
-      if (!Number.isFinite(date.getTime())) return line;
-      return formatJerusalemDate(date) + ' · ' + payload;
-    }
-
-    function formatLogText(text) {
-      return String(text || '')
-        .split(/\r?\n/)
-        .map(normalizeLogLine)
-        .join('\n');
-    }
-
     function setModalLocked(locked) {
       if (locked) {
         modalLockCount += 1;
@@ -1139,7 +1107,7 @@ function renderPage() {
 
     async function loadLog(ref, type = 'out') {
       const text = await fetchText('/projects/' + ref + '/logs?type=' + encodeURIComponent(type) + '&lines=400');
-      logBody.textContent = formatLogText(text || '(no log data)');
+      logBody.textContent = text || '(no log data)\\n';
       logSubtitle.textContent = decodeURIComponent(ref) + ' · ' + (type === 'error' ? 'error' : 'output') + ' · Asia/Jerusalem';
       logBody.scrollTop = logBody.scrollHeight;
     }
