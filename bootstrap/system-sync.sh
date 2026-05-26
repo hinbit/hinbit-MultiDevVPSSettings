@@ -79,7 +79,7 @@ cat > "${SYSTEM_PORTAL_WEBROOT}/index.html" <<EOF
     <ul>
       <li><a href="/manage/">Manage projects</a></li>
     </ul>
-    <h2>MySQL</h2>
+    <h2>DB Management</h2>
     <ul>
       <li><a href="/phpmyadmin/">phpMyAdmin</a></li>
       <li><a href="/manage/vault/">DB Vault</a></li>
