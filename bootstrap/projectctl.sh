@@ -863,10 +863,14 @@ sync_mysql_permissions() {
   fi
 
   desired["localhost"]=1
+  desired["127.0.0.1"]=1
+  desired["::1"]=1
   mysql_exec "CREATE DATABASE IF NOT EXISTS ${db_ident} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-  mysql_exec "CREATE USER IF NOT EXISTS ${user_q}@'localhost' IDENTIFIED BY ${pass_q};"
-  mysql_exec "ALTER USER ${user_q}@'localhost' IDENTIFIED BY ${pass_q};"
-  mysql_exec "GRANT ALL PRIVILEGES ON ${db_ident}.* TO ${user_q}@'localhost';"
+  for host in localhost 127.0.0.1 ::1; do
+    mysql_exec "CREATE USER IF NOT EXISTS ${user_q}@$(sql_quote "${host}") IDENTIFIED BY ${pass_q};"
+    mysql_exec "ALTER USER ${user_q}@$(sql_quote "${host}") IDENTIFIED BY ${pass_q};"
+    mysql_exec "GRANT ALL PRIVILEGES ON ${db_ident}.* TO ${user_q}@$(sql_quote "${host}");"
+  done
 
   if [[ -n "${new_ips}" ]]; then
     desired["%"]=1
