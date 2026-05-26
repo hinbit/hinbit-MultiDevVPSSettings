@@ -15,6 +15,16 @@ const PM2 = 'pm2';
 const BASIC_USER = 'manage';
 const PORT = Number(process.env.MANAGE_PORT || 8090);
 const PASSWORD = process.env.MANAGE_PASSWORD || '';
+const LOCAL_DB_MACHINE_ID = 'local-current';
+const LOCAL_DB_MACHINE = {
+  id: LOCAL_DB_MACHINE_ID,
+  name: 'localhost (current)',
+  host: '127.0.0.1',
+  rootUser: 'root',
+  rootPassword: '',
+  port: '3306',
+  notes: 'Current VPS local DB on this VPS',
+};
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ENV_CANDIDATES = [
@@ -206,14 +216,34 @@ function pickEnvDetails(projectPath) {
   return { files, env: merged };
 }
 
-function readMysqlAccounts(dbUser) {
-  if (!dbUser) return [];
-  try {
-    const out = execFileSync(
+function mysqlExecForMachine(machineId, query) {
+  const machines = readDbMachines();
+  const machine = machines.find((item) => String(item.id) === String(machineId)) || machines.find((item) => String(item.id) === LOCAL_DB_MACHINE_ID) || LOCAL_DB_MACHINE;
+  const host = String(machine.host || '127.0.0.1').trim();
+  const port = String(machine.port || '3306').trim() || '3306';
+  const user = String(machine.rootUser || 'root').trim() || 'root';
+  const password = String(machine.rootPassword || '').trim();
+  if (!password && (host === 'localhost' || host === '127.0.0.1' || host === '::1')) {
+    return execFileSync(
       'mysql',
-      ['--protocol=socket', '-uroot', '--batch', '--skip-column-names', '-e', `SELECT CONCAT(User, '@', Host) FROM mysql.user WHERE User='${String(dbUser).replace(/'/g, "''")}' ORDER BY Host;`],
+      ['--protocol=socket', '-uroot', '--batch', '--skip-column-names', '-e', query],
       { encoding: 'utf8' },
     );
+  }
+  return execFileSync(
+    'mysql',
+    ['--protocol=tcp', '-h', host, '-P', port, '-u', user, '--batch', '--skip-column-names', '-e', query],
+    {
+      encoding: 'utf8',
+      env: { ...process.env, MYSQL_PWD: password },
+    },
+  );
+}
+
+function readMysqlAccounts(dbUser, machineId = LOCAL_DB_MACHINE_ID) {
+  if (!dbUser) return [];
+  try {
+    const out = mysqlExecForMachine(machineId, `SELECT CONCAT(User, '@', Host) FROM mysql.user WHERE User='${String(dbUser).replace(/'/g, "''")}' ORDER BY Host;`);
     return out.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   } catch {
     return [];
@@ -225,7 +255,7 @@ function readDbMachines() {
     if (!fs.existsSync(DB_MACHINES_FILE)) return [];
     const data = JSON.parse(fs.readFileSync(DB_MACHINES_FILE, 'utf8'));
     if (!Array.isArray(data)) return [];
-    return data.map((machine, index) => ({
+    const machines = data.map((machine, index) => ({
       id: String(machine.id || `${Date.now().toString(36)}-${index}`),
       name: String(machine.name || machine.label || '').trim(),
       host: String(machine.host || '').trim(),
@@ -234,13 +264,21 @@ function readDbMachines() {
       port: String(machine.port || '3306').trim() || '3306',
       notes: String(machine.notes || '').trim(),
     })).filter((machine) => machine.name || machine.host || machine.rootUser || machine.rootPassword);
+    if (!machines.some((machine) => machine.id === LOCAL_DB_MACHINE_ID)) {
+      machines.unshift({ ...LOCAL_DB_MACHINE });
+    }
+    return machines;
   } catch {
-    return [];
+    return [{ ...LOCAL_DB_MACHINE }];
   }
 }
 
 function writeDbMachines(machines) {
-  fs.writeFileSync(DB_MACHINES_FILE, `${JSON.stringify(machines, null, 2)}\n`);
+  const list = Array.isArray(machines) ? machines.slice() : [];
+  if (!list.some((machine) => machine.id === LOCAL_DB_MACHINE_ID)) {
+    list.unshift({ ...LOCAL_DB_MACHINE });
+  }
+  fs.writeFileSync(DB_MACHINES_FILE, `${JSON.stringify(list, null, 2)}\n`);
   fs.chmodSync(DB_MACHINES_FILE, 0o600);
 }
 
@@ -255,7 +293,6 @@ function normalizeDbMachine(input, existing = {}) {
   if (!name) throw new Error('DB machine name is required');
   if (!host) throw new Error('DB machine host is required');
   if (!rootUser) throw new Error('DB root user is required');
-  if (!rootPassword) throw new Error('DB root password is required');
   if (!/^[A-Za-z0-9._:-]+$/.test(host)) throw new Error(`Invalid DB machine host: ${host}`);
   if (!/^[0-9]+$/.test(port)) {
     port = '3306';
@@ -263,6 +300,9 @@ function normalizeDbMachine(input, existing = {}) {
   const portNum = Number(port);
   if (!Number.isFinite(portNum) || portNum < 1 || portNum > 65535) {
     throw new Error(`Invalid DB port: ${port}`);
+  }
+  if (!rootPassword && !['localhost', '127.0.0.1', '::1'].includes(host)) {
+    throw new Error('DB root password is required');
   }
 
   return {
@@ -292,6 +332,9 @@ function saveDbMachine(payload) {
 }
 
 function deleteDbMachine(id) {
+  if (String(id || '') === LOCAL_DB_MACHINE_ID) {
+    return;
+  }
   const machines = readDbMachines();
   const next = machines.filter((machine) => machine.id !== String(id || ''));
   writeDbMachines(next);
@@ -414,6 +457,7 @@ function projectView() {
       type: project.APP_TYPE || '',
       packageManager: project.PACKAGE_MANAGER || '',
       mysqlAllowedIps: project.MYSQL_ALLOWED_IPS || '',
+      dbMachineId: project.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID,
       sshUser: project.SSH_UPLOAD_USER || '',
       sshPassword: project.SSH_UPLOAD_PASSWORD || '',
       disk,
@@ -694,6 +738,7 @@ function renderDbMachineRows(machines) {
   }
   return machines.map((machine) => {
     const ref = escapeHtml(machine.id || '');
+    const masked = machine.rootPassword ? '••••••••' : 'n/a';
     return `
       <tr>
         <td>
@@ -702,7 +747,12 @@ function renderDbMachineRows(machines) {
         </td>
         <td><code>${escapeHtml(machine.host || '')}</code></td>
         <td><code>${escapeHtml(machine.rootUser || '')}</code></td>
-        <td><code>${escapeHtml(machine.rootPassword || '')}</code></td>
+        <td>
+          <div class="password-cell">
+            <code data-machine-password="${ref}">${escapeHtml(masked)}</code>
+            <button class="ghost" type="button" data-machine-password-toggle="${ref}" data-secret="${escapeHtml(machine.rootPassword || '')}" aria-label="Show password">👁</button>
+          </div>
+        </td>
         <td><code>${escapeHtml(machine.port || '3306')}</code></td>
         <td>
           <div class="copy-actions">
@@ -712,6 +762,15 @@ function renderDbMachineRows(machines) {
         </td>
       </tr>
     `;
+  }).join('');
+}
+
+function renderDbMachineOptions(machines, selectedId = LOCAL_DB_MACHINE_ID) {
+  const list = Array.isArray(machines) && machines.length ? machines : [{ ...LOCAL_DB_MACHINE }];
+  return list.map((machine) => {
+    const id = String(machine.id || '');
+    const label = `${machine.name || id}${machine.host ? ` · ${machine.host}` : ''}`;
+    return `<option value="${escapeHtml(id)}"${id === String(selectedId || '') ? ' selected' : ''}>${escapeHtml(label)}</option>`;
   }).join('');
 }
 
@@ -734,6 +793,13 @@ function renderDbMachinesPage() {
     .panel { background: rgba(8, 15, 29, 0.88); border: 1px solid rgba(148,163,184,0.2); border-radius: 18px; padding: 20px; box-shadow: 0 12px 40px rgba(0,0,0,0.35); }
     .grid { display: grid; gap: 16px; }
     .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .password-field { display: grid; gap: 6px; }
+    .password-wrap { display: flex; align-items: stretch; gap: 8px; }
+    .password-wrap input { flex: 1; }
+    .password-wrap button { flex: 0 0 auto; min-width: 48px; padding: 10px 12px; }
+    .password-cell { display: flex; align-items: center; gap: 8px; }
+    .password-cell code { flex: 1; }
+    .password-cell button { flex: 0 0 auto; min-width: 42px; padding: 8px 10px; }
     label { display: grid; gap: 6px; font-size: 13px; color: #cbd5e1; }
     input, textarea { width: 100%; box-sizing: border-box; background: #0b1220; color: #e5eef8; border: 1px solid #22304a; border-radius: 10px; padding: 10px 12px; }
     textarea { min-height: 96px; resize: vertical; }
@@ -810,9 +876,13 @@ function renderDbMachinesPage() {
         <label>DB root user
           <input id="machineRootUser" placeholder="root">
         </label>
-        <label>DB root password
-          <input id="machineRootPassword" type="password" placeholder="password">
-        </label>
+        <div class="password-field">
+          <label for="machineRootPassword">DB root password</label>
+          <div class="password-wrap">
+            <input id="machineRootPassword" type="password" placeholder="password">
+            <button id="toggleRootPasswordBtn" class="ghost" type="button" aria-label="Show password">👁</button>
+          </div>
+        </div>
         <label>DB port
           <input id="machinePort" value="3306" placeholder="3306">
         </label>
@@ -858,6 +928,7 @@ function renderDbMachinesPage() {
     const machineHost = document.getElementById('machineHost');
     const machineRootUser = document.getElementById('machineRootUser');
     const machineRootPassword = document.getElementById('machineRootPassword');
+    const toggleRootPasswordBtn = document.getElementById('toggleRootPasswordBtn');
     const machinePort = document.getElementById('machinePort');
     const machineNotes = document.getElementById('machineNotes');
     const saveBtn = document.getElementById('saveBtn');
@@ -901,16 +972,21 @@ function renderDbMachinesPage() {
           <tr>
             <td>
               <div><strong>\${escapeHtml(machine.name || '')}</strong></div>
-              <div class="small">\${escapeHtml(machine.notes || '')}</div>
+              <div class="small">\${machine.id === '${LOCAL_DB_MACHINE_ID}' ? 'Built-in current VPS DB' : escapeHtml(machine.notes || '')}</div>
             </td>
             <td><code>\${escapeHtml(machine.host || '')}</code></td>
             <td><code>\${escapeHtml(machine.rootUser || '')}</code></td>
-            <td><code>\${escapeHtml(machine.rootPassword || '')}</code></td>
+            <td>
+              <div class="password-cell">
+                <code data-machine-password="\${escapeHtml(machine.id || '')}">\${machine.rootPassword ? '••••••••' : 'n/a'}</code>
+                <button class="ghost" data-machine-password-toggle="\${escapeHtml(machine.id || '')}" data-secret="\${escapeHtml(machine.rootPassword || '')}" type="button" aria-label="Show password">👁</button>
+              </div>
+            </td>
             <td><code>\${escapeHtml(machine.port || '3306')}</code></td>
             <td>
               <div class="actions">
                 <button class="secondary" data-machine-edit="\${escapeHtml(machine.id || '')}" type="button">Edit</button>
-                <button class="danger" data-machine-delete="\${escapeHtml(machine.id || '')}" type="button">Delete</button>
+                \${machine.id === '${LOCAL_DB_MACHINE_ID}' ? '<span class="pill">reserved</span>' : '<button class="danger" data-machine-delete="' + escapeHtml(machine.id || '') + '" type="button">Delete</button>'}
               </div>
             </td>
           </tr>
@@ -973,6 +1049,18 @@ function renderDbMachinesPage() {
         if (machine) fillForm(machine);
         return;
       }
+      const revealBtn = event.target.closest('button[data-machine-password-toggle]');
+      if (revealBtn) {
+        const code = Array.from(machinesBody.querySelectorAll('code[data-machine-password]'))
+          .find((el) => String(el.dataset.machinePassword || '') === String(revealBtn.dataset.machinePassword || ''));
+        if (!code) return;
+        const hidden = code.dataset.revealed !== 'yes';
+        code.textContent = hidden ? (revealBtn.dataset.secret || '') : '••••••••';
+        code.dataset.revealed = hidden ? 'yes' : 'no';
+        revealBtn.textContent = hidden ? '🙈' : '👁';
+        revealBtn.setAttribute('aria-label', hidden ? 'Hide password' : 'Show password');
+        return;
+      }
       const deleteBtn = event.target.closest('button[data-machine-delete]');
       if (deleteBtn) {
         const id = deleteBtn.dataset.machineDelete;
@@ -996,6 +1084,12 @@ function renderDbMachinesPage() {
     });
 
     clearBtn.addEventListener('click', clearForm);
+    toggleRootPasswordBtn.addEventListener('click', () => {
+      const showing = machineRootPassword.type === 'text';
+      machineRootPassword.type = showing ? 'password' : 'text';
+      toggleRootPasswordBtn.textContent = showing ? '👁' : '🙈';
+      toggleRootPasswordBtn.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+    });
     refreshBtn.addEventListener('click', async () => {
       try {
         await refresh();
@@ -1162,6 +1256,8 @@ function escapeHtml(value) {
 }
 
 function renderPage() {
+  const dbMachines = readDbMachines();
+  const dbMachineOptions = renderDbMachineOptions(dbMachines, LOCAL_DB_MACHINE_ID);
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1180,6 +1276,10 @@ function renderPage() {
     .grid { display: grid; gap: 16px; }
     .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .password-field { display: grid; gap: 6px; }
+    .password-wrap { display: flex; align-items: stretch; gap: 8px; }
+    .password-wrap input { flex: 1; }
+    .password-wrap button { flex: 0 0 auto; min-width: 48px; padding: 10px 12px; }
     label { display: grid; gap: 6px; font-size: 13px; color: #cbd5e1; }
     input, textarea, select { width: 100%; box-sizing: border-box; background: #0b1220; color: #e5eef8; border: 1px solid #22304a; border-radius: 10px; padding: 10px 12px; }
     textarea { min-height: 120px; resize: vertical; }
@@ -1198,6 +1298,13 @@ function renderPage() {
     .status-launching { color: #38bdf8; }
     .small { font-size: 12px; color: #94a3b8; }
     .stack { display: grid; gap: 10px; }
+    .password-field { display: grid; gap: 6px; }
+    .password-wrap { display: flex; align-items: stretch; gap: 8px; }
+    .password-wrap input { flex: 1; }
+    .password-wrap button { flex: 0 0 auto; min-width: 48px; padding: 10px 12px; }
+    .password-cell { display: flex; align-items: center; gap: 8px; }
+    .password-cell code { flex: 1; }
+    .password-cell button { flex: 0 0 auto; min-width: 42px; padding: 8px 10px; }
     .sticky { position: sticky; top: 0; z-index: 5; backdrop-filter: blur(12px); }
     .space { height: 12px; }
     .pill { display: inline-flex; padding: 3px 8px; border-radius: 999px; background: #102338; border: 1px solid #23405f; font-size: 12px; }
@@ -1318,15 +1425,22 @@ function renderPage() {
         <label>Entrypoint
           <input id="entrypoint" placeholder="server/index.js">
         </label>
+        <label>DB machine
+          <select id="dbMachineId">${dbMachineOptions}</select>
+        </label>
       </div>
       <div class="space"></div>
       <div class="grid two">
         <label>Env file contents
           <textarea id="envText" placeholder="Paste .env contents here if needed"></textarea>
         </label>
-        <label>Project access password
-          <textarea id="accessPassword" placeholder="Optional: set a password for the project domain after install"></textarea>
-        </label>
+        <div class="password-field">
+          <label for="accessPassword">Project access password</label>
+          <div class="password-wrap">
+            <input id="accessPassword" type="password" placeholder="Optional: set a password for the project domain after install">
+            <button id="toggleAccessPasswordBtn" class="ghost" type="button" aria-label="Show password">👁</button>
+          </div>
+        </div>
       </div>
       <div class="space"></div>
       <button id="installBtn" type="button">Install project</button>
@@ -1397,12 +1511,15 @@ function renderPage() {
       <div class="grid two">
         <div class="kv-list" id="mysqlDetails"></div>
         <div class="stack">
+          <label>DB machine
+            <select id="mysqlMachineSelect"></select>
+          </label>
           <label>Allowed IPs / CIDRs
             <textarea id="mysqlIpsInput" placeholder="198.51.100.10,203.0.113.0/24"></textarea>
           </label>
           <div class="actions">
             <a id="mysqlPhpMyAdminBtn" class="btn ghost" href="/phpmyadmin/" target="_blank" rel="noreferrer">phpMyAdmin</a>
-            <button id="mysqlSaveBtn" class="secondary" type="button">Save permissions</button>
+            <button id="mysqlSaveBtn" class="secondary" type="button">Save & move</button>
           </div>
           <div id="mysqlAccounts" class="kv-list"></div>
         </div>
@@ -1498,6 +1615,8 @@ function renderPage() {
     const listResult = document.getElementById('listResult');
     const installResult = document.getElementById('installResult');
     const systemStats = document.getElementById('systemStats');
+    const dbMachineSelect = document.getElementById('dbMachineId');
+    const toggleAccessPasswordBtn = document.getElementById('toggleAccessPasswordBtn');
     const scriptsPanel = document.getElementById('scriptsPanel');
     const scriptsTitle = document.getElementById('scriptsTitle');
     const scriptsSubtitle = document.getElementById('scriptsSubtitle');
@@ -1515,6 +1634,7 @@ function renderPage() {
     const mysqlSubtitle = document.getElementById('mysqlSubtitle');
     const mysqlDetails = document.getElementById('mysqlDetails');
     const mysqlFlash = document.getElementById('mysqlFlash');
+    const mysqlMachineSelect = document.getElementById('mysqlMachineSelect');
     const mysqlIpsInput = document.getElementById('mysqlIpsInput');
     const mysqlAccounts = document.getElementById('mysqlAccounts');
     const mysqlPhpMyAdminBtn = document.getElementById('mysqlPhpMyAdminBtn');
@@ -1563,6 +1683,7 @@ function renderPage() {
     let currentLogRef = '';
     let currentLogType = 'out';
     let currentProjects = [];
+    let currentDbMachines = [];
     let progressAbort = null;
     let logTimer = null;
     let modalLockCount = 0;
@@ -1597,6 +1718,24 @@ function renderPage() {
         unit += 1;
       }
       return (size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)) + ' ' + units[unit];
+    }
+
+    function renderDbMachineSelectOptions(machines, selectedId) {
+      const list = Array.isArray(machines) && machines.length ? machines : [{ id: '${LOCAL_DB_MACHINE_ID}', name: 'localhost (current)', host: '127.0.0.1' }];
+      return list.map((machine) => {
+        const id = String(machine.id || '');
+        const label = (machine.name || id) + (machine.host ? ' · ' + machine.host : '');
+        return '<option value="' + escapeHtml(id) + '"' + (id === String(selectedId || '') ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+      }).join('');
+    }
+
+    function syncDbMachineSelects(selectedId) {
+      if (dbMachineSelect) {
+        dbMachineSelect.innerHTML = renderDbMachineSelectOptions(currentDbMachines, selectedId || dbMachineSelect.value || '${LOCAL_DB_MACHINE_ID}');
+      }
+      if (mysqlMachineSelect) {
+        mysqlMachineSelect.innerHTML = renderDbMachineSelectOptions(currentDbMachines, selectedId || mysqlMachineSelect.value || '${LOCAL_DB_MACHINE_ID}');
+      }
     }
 
     function setModalLocked(locked) {
@@ -1652,14 +1791,17 @@ function renderPage() {
     }
 
     async function refresh() {
-      const [dataResult, statsResult] = await Promise.allSettled([
+      const [dataResult, statsResult, machinesResult] = await Promise.allSettled([
         api('/projects'),
         api('/system'),
+        api('/db-machines'),
       ]);
       if (dataResult.status !== 'fulfilled') throw dataResult.reason;
       const data = dataResult.value;
       currentProjects = data.projects || [];
       renderProjects(currentProjects);
+      currentDbMachines = machinesResult.status === 'fulfilled' ? (machinesResult.value.machines || []) : [];
+      syncDbMachineSelects(dbMachineSelect ? dbMachineSelect.value : '${LOCAL_DB_MACHINE_ID}');
       refreshSystemStats(statsResult.status === 'fulfilled' ? statsResult.value.system || null : null);
     }
 
@@ -1836,11 +1978,17 @@ function renderPage() {
       mysqlFlash.hidden = true;
       mysqlPhpMyAdminBtn.href = '/phpmyadmin/';
       mysqlIpsInput.value = details.allowedIps || '';
+      currentDbMachines = Array.isArray(details.machines) && details.machines.length ? details.machines : currentDbMachines;
+      if (mysqlMachineSelect) {
+        mysqlMachineSelect.innerHTML = renderDbMachineSelectOptions(currentDbMachines, details.dbMachineId || '${LOCAL_DB_MACHINE_ID}');
+        mysqlMachineSelect.value = details.dbMachineId || '${LOCAL_DB_MACHINE_ID}';
+      }
       const rows = [
         ['DB supplier', details.db?.DB_SUPPLIER || 'n/a'],
         ['Database name', details.db?.DB_NAME || details.db?.DB_DATABASE || details.db?.MYSQL_DATABASE || details.db?.POSTGRES_DB || 'n/a'],
         ['Database user', details.db?.DB_USER || details.db?.MYSQL_USER || details.db?.POSTGRES_USER || 'n/a'],
         ['Database password', details.db?.DB_PASSWORD || details.db?.MYSQL_PASSWORD || details.db?.POSTGRES_PASSWORD || 'n/a'],
+        ['DB machine', details.dbMachineId || 'local-current'],
         ['Database host', details.db?.DB_HOST || details.db?.MYSQL_HOST || details.db?.POSTGRES_HOST || 'n/a'],
         ['Database port', details.db?.DB_PORT || details.db?.MYSQL_PORT || details.db?.POSTGRES_PORT || 'n/a'],
         ['Allowed IPs', details.allowedIps || 'local only'],
@@ -2111,9 +2259,10 @@ function renderPage() {
     }
 
     async function saveMysql(ref, ips) {
+      const machineId = mysqlMachineSelect ? mysqlMachineSelect.value : '';
       const res = await api(\`/projects/\${ref}/mysql\`, {
         method: 'POST',
-        body: JSON.stringify({ ips }),
+        body: JSON.stringify({ ips, machineId }),
       });
       await loadMysql(ref);
       showMessage(mysqlFlash, res.message || 'MySQL permissions updated');
@@ -2408,6 +2557,7 @@ function renderPage() {
         branch: document.getElementById('branch').value.trim(),
         pm2Name: document.getElementById('pm2Name').value.trim(),
         port: document.getElementById('port').value.trim(),
+        dbMachineId: dbMachineSelect ? dbMachineSelect.value : '${LOCAL_DB_MACHINE_ID}',
         entrypoint: document.getElementById('entrypoint').value.trim(),
         envText: document.getElementById('envText').value,
         accessPassword: document.getElementById('accessPassword').value,
@@ -2430,6 +2580,17 @@ function renderPage() {
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
+    }
+
+    if (toggleAccessPasswordBtn) {
+      toggleAccessPasswordBtn.addEventListener('click', () => {
+        const input = document.getElementById('accessPassword');
+        if (!input) return;
+        const showing = input.type === 'text';
+        input.type = showing ? 'password' : 'text';
+        toggleAccessPasswordBtn.textContent = showing ? '👁' : '🙈';
+        toggleAccessPasswordBtn.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+      });
     }
 
     refresh().catch((error) => showMessage(listResult, error.message, false));
@@ -2562,6 +2723,7 @@ async function handleRequest(req, res) {
       if (body.branch) args.push('--branch', String(body.branch).trim());
       if (body.pm2Name) args.push('--pm2-name', String(body.pm2Name).trim());
       if (body.port) args.push('--port', String(body.port).trim());
+      if (body.dbMachineId) args.push('--db-machine', String(body.dbMachineId).trim());
       if (body.entrypoint) args.push('--entrypoint', String(body.entrypoint).trim());
       let tempEnv = '';
       if (body.envText && String(body.envText).trim()) {
@@ -2606,7 +2768,9 @@ async function handleRequest(req, res) {
       const dbName = db.DB_NAME || db.DB_DATABASE || db.MYSQL_DATABASE || db.POSTGRES_DB || '';
       const dbPassword = db.DB_PASSWORD || db.MYSQL_PASSWORD || db.POSTGRES_PASSWORD || '';
       const allowedIps = meta.MYSQL_ALLOWED_IPS || '';
-      const accounts = readMysqlAccounts(dbUser);
+      const projectMachineId = meta.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID;
+      const accounts = readMysqlAccounts(dbUser, projectMachineId);
+      const machines = readDbMachines();
 
       if (req.method === 'GET') {
         sendJson(res, 200, {
@@ -2617,6 +2781,8 @@ async function handleRequest(req, res) {
           dbUser,
           dbPassword,
           allowedIps,
+          dbMachineId: projectMachineId,
+          machines,
           accounts,
         });
         return;
@@ -2625,7 +2791,11 @@ async function handleRequest(req, res) {
       if (req.method === 'POST') {
         const body = await readBody(req);
         const ips = String(body.ips || '').trim();
-        const output = runProjectCtl(['mysql', '--ips', ips, ref]);
+        const machineId = String(body.machineId || projectMachineId || LOCAL_DB_MACHINE_ID).trim();
+        const args = ['mysql'];
+        if (machineId) args.push('--machine', machineId);
+        args.push('--ips', ips, ref);
+        const output = runProjectCtl(args);
         const refreshedMeta = parseEnvFile(metaPathForRef(ref));
         const refreshedDb = pickDbDetails(projectPath).db;
         sendJson(res, 200, {
@@ -2638,7 +2808,9 @@ async function handleRequest(req, res) {
           dbUser: refreshedDb.DB_USER || refreshedDb.MYSQL_USER || refreshedDb.POSTGRES_USER || '',
           dbPassword: refreshedDb.DB_PASSWORD || refreshedDb.MYSQL_PASSWORD || refreshedDb.POSTGRES_PASSWORD || '',
           allowedIps: refreshedMeta.MYSQL_ALLOWED_IPS || ips,
-          accounts: readMysqlAccounts(refreshedDb.DB_USER || refreshedDb.MYSQL_USER || refreshedDb.POSTGRES_USER || ''),
+          dbMachineId: refreshedMeta.DB_MACHINE_ID || projectMachineId || LOCAL_DB_MACHINE_ID,
+          machines: readDbMachines(),
+          accounts: readMysqlAccounts(refreshedDb.DB_USER || refreshedDb.MYSQL_USER || refreshedDb.POSTGRES_USER || '', refreshedMeta.DB_MACHINE_ID || machineId || projectMachineId),
         });
         return;
       }

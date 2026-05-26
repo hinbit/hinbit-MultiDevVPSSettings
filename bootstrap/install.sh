@@ -217,7 +217,17 @@ EOF
 
   if [[ ! -f "${DB_MACHINES_FILE}" ]]; then
     cat > "${DB_MACHINES_FILE}" <<'EOF'
-[]
+[
+  {
+    "id": "local-current",
+    "name": "localhost (current)",
+    "host": "127.0.0.1",
+    "rootUser": "root",
+    "rootPassword": "",
+    "port": "3306",
+    "notes": "Current VPS local DB on this VPS"
+  }
+]
 EOF
     chmod 0600 "${DB_MACHINES_FILE}"
   fi

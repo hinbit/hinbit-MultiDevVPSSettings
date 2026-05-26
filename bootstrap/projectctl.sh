@@ -5,9 +5,12 @@ META_DIR="/etc/vps-projects"
 APP_ROOT="/var/www"
 APP_MAP="/etc/app-map.csv"
 AUTH_DIR="/etc/nginx/project-auth"
+DB_MACHINES_FILE="/etc/vps-db-machines.json"
 AUTH_USER="project"
 PORT_MIN="${PROJECT_PORT_START:-3000}"
 PORT_MAX="${PROJECT_PORT_END:-9999}"
+LOCAL_DB_MACHINE_ID="local-current"
+LOCAL_DB_MACHINE_HOST="127.0.0.1"
 ENV_CANDIDATES=(
   .env
   .env.local
@@ -26,14 +29,14 @@ die() {
 usage() {
   cat <<'EOF'
 Usage:
-  projectctl install [--domain example.com] [--https yes|no] [--branch main] [--pm2-name name] [--port N] [--env-file path] [--entrypoint path] owner/repo
+  projectctl install [--domain example.com] [--https yes|no] [--branch main] [--pm2-name name] [--port N] [--db-machine id] [--env-file path] [--entrypoint path] owner/repo
   projectctl update owner/repo
   projectctl restart owner/repo
   projectctl stop owner/repo
   projectctl status owner/repo
   projectctl script [--pm2] owner/repo package-script
   projectctl password [--password secret|--clear] owner/repo
-  projectctl mysql [--ips ip1,ip2] owner/repo
+  projectctl mysql [--machine id] [--ips ip1,ip2] owner/repo
   projectctl ssh [--password secret|--generate] owner/repo
   projectctl uninstall owner/repo
   projectctl list
@@ -48,7 +51,7 @@ Defaults:
   - when a domain is provided, VITE_ALLOWED_HOSTS and CORS_ORIGIN are exported for the PM2 runtime
   - `projectctl script` runs a package.json script, with optional `--pm2` for runtime scripts
   - `projectctl password` enables or clears nginx basic auth for a project's domain
-  - `projectctl mysql` manages MySQL access IPs for a project's DB user
+  - `projectctl mysql` manages MySQL access IPs and DB machine placement for a project's DB user
   - `projectctl ssh` shows or rotates the project's SSH/SFTP upload credentials
 EOF
 }
@@ -202,6 +205,248 @@ for token in re.split(r'[\s,]+', raw.strip()):
         seen.append(token)
 print(",".join(seen))
 PY
+}
+
+db_machine_record() {
+  local machine_id="${1:-}"
+  local field="${2:-}"
+
+  python3 - "${DB_MACHINES_FILE}" "${machine_id}" "${field}" <<'PY'
+import json
+import os
+import sys
+
+path, machine_id, field = sys.argv[1:4]
+local_default = {
+    "id": "local-current",
+    "name": "localhost (current)",
+    "host": "127.0.0.1",
+    "rootUser": "root",
+    "rootPassword": "",
+    "port": "3306",
+    "notes": "Current VPS local DB on this VPS",
+}
+
+machines = []
+try:
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+            if isinstance(data, list):
+                machines = data
+except Exception:
+    machines = []
+
+record = None
+for item in machines:
+    if str(item.get("id", "")) == machine_id:
+        record = item
+        break
+
+if record is None and machine_id == local_default["id"]:
+    record = local_default
+
+if record is None:
+    sys.exit(1)
+
+normalized = {
+    "id": str(record.get("id", machine_id or "")),
+    "name": str(record.get("name", "")),
+    "host": str(record.get("host", "")),
+    "rootUser": str(record.get("rootUser", record.get("user", ""))),
+    "rootPassword": str(record.get("rootPassword", record.get("password", ""))),
+    "port": str(record.get("port", "3306") or "3306"),
+    "notes": str(record.get("notes", "")),
+}
+
+if field:
+    print(normalized.get(field, ""))
+else:
+    for item in [
+        normalized["id"],
+        normalized["name"],
+        normalized["host"],
+        normalized["rootUser"],
+        normalized["rootPassword"],
+        normalized["port"],
+        normalized["notes"],
+    ]:
+        print(item)
+PY
+}
+
+write_db_machine_record() {
+  local machine_id="$1"
+  local name="$2"
+  local host="$3"
+  local root_user="$4"
+  local root_password="$5"
+  local port="$6"
+  local notes="$7"
+
+  python3 - "${DB_MACHINES_FILE}" "${machine_id}" "${name}" "${host}" "${root_user}" "${root_password}" "${port}" "${notes}" <<'PY'
+import json
+import os
+import sys
+
+path, machine_id, name, host, root_user, root_password, port, notes = sys.argv[1:9]
+entry = {
+    "id": machine_id,
+    "name": name,
+    "host": host,
+    "rootUser": root_user,
+    "rootPassword": root_password,
+    "port": port or "3306",
+    "notes": notes,
+}
+
+machines = []
+if os.path.exists(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+            if isinstance(data, list):
+                machines = data
+    except Exception:
+        machines = []
+
+updated = False
+for index, item in enumerate(machines):
+    if str(item.get("id", "")) == machine_id:
+        machines[index] = entry
+        updated = True
+        break
+
+if not updated:
+    machines.append(entry)
+
+if not any(str(item.get("id", "")) == "local-current" for item in machines):
+    machines.insert(0, {
+        "id": "local-current",
+        "name": "localhost (current)",
+        "host": "127.0.0.1",
+        "rootUser": "root",
+        "rootPassword": "",
+        "port": "3306",
+        "notes": "Current VPS local DB on this VPS",
+    })
+
+machines.sort(key=lambda item: str(item.get("name", "")))
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(machines, handle, indent=2)
+    handle.write("\n")
+os.chmod(path, 0o600)
+PY
+}
+
+ensure_local_db_machine_password() {
+  local current
+  local local_name
+  local local_host
+  local local_root_user
+  local local_root_password
+  local local_port
+  local local_notes
+  local password
+
+  mapfile -t local_fields < <(db_machine_record "${LOCAL_DB_MACHINE_ID}" 2>/dev/null || true)
+  local_name="${local_fields[1]:-}"
+  local_host="${local_fields[2]:-}"
+  local_root_user="${local_fields[3]:-}"
+  local_root_password="${local_fields[4]:-}"
+  local_port="${local_fields[5]:-}"
+  local_notes="${local_fields[6]:-}"
+  local_host="${local_host:-127.0.0.1}"
+  local_root_user="${local_root_user:-root}"
+  local_port="${local_port:-3306}"
+  local_notes="${local_notes:-Current VPS local DB on this VPS}"
+  if [[ ! "${local_port}" =~ ^[0-9]+$ ]]; then
+    local_port="3306"
+  fi
+
+  if [[ -n "${local_root_password:-}" && "${local_host}" == "127.0.0.1" ]]; then
+    if [[ "${local_port}" != "3306" ]]; then
+      write_db_machine_record "${LOCAL_DB_MACHINE_ID}" "localhost (current)" "127.0.0.1" "${local_root_user}" "${local_root_password}" "${local_port}" "${local_notes}"
+    fi
+    return 0
+  fi
+
+  password="$(generate_secret)"
+
+  mysql_exec "CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY $(sql_quote "${password}");"
+  mysql_exec "ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY $(sql_quote "${password}");"
+  mysql_exec "GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;"
+  mysql_exec "CREATE USER IF NOT EXISTS 'root'@'::1' IDENTIFIED BY $(sql_quote "${password}");"
+  mysql_exec "ALTER USER 'root'@'::1' IDENTIFIED BY $(sql_quote "${password}");"
+  mysql_exec "GRANT ALL PRIVILEGES ON *.* TO 'root'@'::1' WITH GRANT OPTION;"
+  mysql_exec "FLUSH PRIVILEGES;"
+
+  write_db_machine_record "${LOCAL_DB_MACHINE_ID}" "localhost (current)" "127.0.0.1" "${local_root_user}" "${password}" "${local_port}" "${local_notes}"
+}
+
+resolve_db_machine() {
+  local machine_id="${1:-${LOCAL_DB_MACHINE_ID}}"
+  local machine
+
+  mapfile -t machine_fields < <(db_machine_record "${machine_id}") || die "Unknown DB machine: ${machine_id}"
+  DB_MACHINE_ID="${machine_fields[0]:-${LOCAL_DB_MACHINE_ID}}"
+  DB_MACHINE_NAME="${machine_fields[1]:-}"
+  DB_MACHINE_HOST="${machine_fields[2]:-127.0.0.1}"
+  DB_MACHINE_ROOT_USER="${machine_fields[3]:-root}"
+  DB_MACHINE_ROOT_PASSWORD="${machine_fields[4]:-}"
+  DB_MACHINE_PORT="${machine_fields[5]:-3306}"
+  DB_MACHINE_NOTES="${machine_fields[6]:-}"
+
+  if [[ "${DB_MACHINE_ID}" == "${LOCAL_DB_MACHINE_ID}" ]]; then
+    ensure_local_db_machine_password
+    mapfile -t machine_fields < <(db_machine_record "${LOCAL_DB_MACHINE_ID}") || die "Unknown DB machine: ${LOCAL_DB_MACHINE_ID}"
+    DB_MACHINE_ID="${machine_fields[0]:-${LOCAL_DB_MACHINE_ID}}"
+    DB_MACHINE_NAME="${machine_fields[1]:-}"
+    DB_MACHINE_HOST="${machine_fields[2]:-127.0.0.1}"
+    DB_MACHINE_ROOT_USER="${machine_fields[3]:-root}"
+    DB_MACHINE_ROOT_PASSWORD="${machine_fields[4]:-}"
+    DB_MACHINE_PORT="${machine_fields[5]:-3306}"
+    DB_MACHINE_NOTES="${machine_fields[6]:-}"
+  fi
+}
+
+mysql_exec_machine() {
+  local query="$1"
+  [[ -n "${DB_MACHINE_HOST:-}" ]] || die "Missing DB machine host"
+  [[ -n "${DB_MACHINE_ROOT_USER:-}" ]] || die "Missing DB machine root user"
+  MYSQL_PWD="${DB_MACHINE_ROOT_PASSWORD:-}" mysql --protocol=tcp -h "${DB_MACHINE_HOST}" -P "${DB_MACHINE_PORT:-3306}" -u "${DB_MACHINE_ROOT_USER}" --batch --skip-column-names -e "${query}"
+}
+
+project_db_machine_id() {
+  local machine_id=""
+  machine_id="$(project_db_value DB_MACHINE_ID)"
+  printf '%s' "${machine_id:-${LOCAL_DB_MACHINE_ID}}"
+}
+
+sync_project_db_machine_env() {
+  local machine_id="${1:-${LOCAL_DB_MACHINE_ID}}"
+  local machine_host="${2:-127.0.0.1}"
+  local machine_port="${3:-3306}"
+  local env_file="${APP_DIR}/.env.machine"
+
+  touch "${env_file}"
+  chmod 0600 "${env_file}"
+  update_meta_value "${env_file}" "DB_MACHINE_ID" "${machine_id}"
+  update_meta_value "${env_file}" "DB_HOST" "${machine_host}"
+  update_meta_value "${env_file}" "DB_PORT" "${machine_port}"
+  update_meta_value "${env_file}" "MYSQL_HOST" "${machine_host}"
+  update_meta_value "${env_file}" "MYSQL_PORT" "${machine_port}"
+}
+
+read_project_db_machine_accounts() {
+  local db_user="$1"
+  local machine_id="${2:-${LOCAL_DB_MACHINE_ID}}"
+  local user_q
+
+  [[ -n "${db_user}" ]] || return 0
+  resolve_db_machine "${machine_id}"
+  user_q="$(sql_quote "${db_user}")"
+  mysql_exec_machine "SELECT CONCAT(User, '@', Host) FROM mysql.user WHERE User=${user_q} ORDER BY Host;" 2>/dev/null || true
 }
 
 update_meta_value() {
@@ -454,6 +699,7 @@ BRANCH=${BRANCH}
 GIT_REMOTE=${GIT_REMOTE}
 START_KIND=${START_KIND}
 START_TARGET=${START_TARGET}
+DB_MACHINE_ID=${DB_MACHINE_ID:-${LOCAL_DB_MACHINE_ID}}
 MYSQL_ALLOWED_IPS=${MYSQL_ALLOWED_IPS:-}
 SSH_UPLOAD_USER=${SSH_UPLOAD_USER:-}
 SSH_UPLOAD_PASSWORD=${SSH_UPLOAD_PASSWORD:-}
@@ -745,8 +991,9 @@ do_install() {
   local branch="${4:-}"
   local pm2_name="${5:-}"
   local forced_port="${6:-}"
-  local env_file="${7:-}"
-  local entrypoint="${8:-}"
+  local db_machine_id="${7:-}"
+  local env_file="${8:-}"
+  local entrypoint="${9:-}"
 
   REPO_REF="$(repo_ref_from_arg "${ref}")"
   REPO_URL="$(repo_url_from_ref "${REPO_REF}")"
@@ -761,6 +1008,7 @@ do_install() {
   GIT_REMOTE="origin"
   SSH_UPLOAD_USER="$(ssh_upload_user_from_slug "${PROJECT_SLUG}")"
   SSH_UPLOAD_PASSWORD="$(generate_secret)"
+  DB_MACHINE_ID="${db_machine_id:-${LOCAL_DB_MACHINE_ID}}"
 
   case "${APP_HTTPS,,}" in
     yes|no) ;;
@@ -806,10 +1054,6 @@ do_install() {
     maybe_build
   )
 
-  meta="$(meta_path_for_slug "${PROJECT_SLUG}")"
-  write_meta "${meta}"
-  chmod 0644 "${meta}"
-
   local db_name=""
   local db_user=""
   local db_password=""
@@ -817,8 +1061,14 @@ do_install() {
   db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
   db_password="$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)"
   if [[ -n "${db_name}" && -n "${db_user}" && -n "${db_password}" ]]; then
-    sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" ""
+    sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "" "${DB_MACHINE_ID}"
   fi
+
+  meta="$(meta_path_for_slug "${PROJECT_SLUG}")"
+  resolve_db_machine "${DB_MACHINE_ID}"
+  write_meta "${meta}"
+  chmod 0644 "${meta}"
+  sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}"
 
   ensure_project_ssh_user "${SSH_UPLOAD_USER}" "${SSH_UPLOAD_PASSWORD}" "${APP_DIR}"
   refresh_project_ssh_config
@@ -843,6 +1093,11 @@ do_update() {
   slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
+  if [[ -z "${DB_MACHINE_ID:-}" ]]; then
+    DB_MACHINE_ID="$(project_db_machine_id)"
+  fi
+  resolve_db_machine "${DB_MACHINE_ID:-${LOCAL_DB_MACHINE_ID}}"
+  sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}"
 
   [[ -d "${APP_DIR}/.git" ]] || die "Missing git repo at ${APP_DIR}"
 
@@ -912,11 +1167,15 @@ do_status() {
   load_meta "${meta}"
   db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
   db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
+  if [[ -z "${DB_MACHINE_ID:-}" ]]; then
+    DB_MACHINE_ID="$(project_db_machine_id)"
+  fi
 
   printf 'repo: %s\npath: %s\npm2: %s\nport: %s\ndomain: %s\nhttps: %s\nkind: %s\n' \
     "${REPO_REF}" "${APP_DIR}" "${PM2_NAME}" "${APP_PORT}" "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}" "${START_KIND}"
   printf 'protected: %s\n' "$(project_auth_enabled "${APP_DOMAIN:-}" && printf yes || printf no)"
   printf 'mysql_allowed_ips: %s\n' "${MYSQL_ALLOWED_IPS:-}"
+  printf 'db_machine_id: %s\n' "${DB_MACHINE_ID:-${LOCAL_DB_MACHINE_ID}}"
   printf 'ssh_user: %s\n' "${SSH_UPLOAD_USER:-}"
   printf 'db: %s\nuser: %s\n' "${db_name}" "${db_user}"
   (cd "${APP_DIR}" && git status -sb) || true
@@ -1064,6 +1323,7 @@ sync_mysql_permissions() {
   local db_password="$3"
   local new_ips="${4:-}"
   local old_ips="${5:-}"
+  local machine_id="${6:-${LOCAL_DB_MACHINE_ID}}"
   local db_ident
   local user_q
   local pass_q
@@ -1079,6 +1339,8 @@ sync_mysql_permissions() {
   db_ident="$(sql_ident "${db_name}")"
   user_q="$(sql_quote "${db_user}")"
   pass_q="$(sql_quote "${db_password}")"
+  resolve_db_machine "${machine_id}"
+  mysql_exec_machine "SELECT 1;"
 
   if [[ -n "${new_ips}" ]]; then
     IFS=, read -r -a desired_list <<< "${new_ips}"
@@ -1087,44 +1349,47 @@ sync_mysql_permissions() {
   desired["localhost"]=1
   desired["127.0.0.1"]=1
   desired["::1"]=1
-  mysql_exec "CREATE DATABASE IF NOT EXISTS ${db_ident} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+  mysql_exec_machine "CREATE DATABASE IF NOT EXISTS ${db_ident} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
   for host in localhost 127.0.0.1 ::1; do
-    mysql_exec "CREATE USER IF NOT EXISTS ${user_q}@$(sql_quote "${host}") IDENTIFIED BY ${pass_q};"
-    mysql_exec "ALTER USER ${user_q}@$(sql_quote "${host}") IDENTIFIED BY ${pass_q};"
-    mysql_exec "GRANT ALL PRIVILEGES ON ${db_ident}.* TO ${user_q}@$(sql_quote "${host}");"
+    mysql_exec_machine "CREATE USER IF NOT EXISTS ${user_q}@$(sql_quote "${host}") IDENTIFIED BY ${pass_q};"
+    mysql_exec_machine "ALTER USER ${user_q}@$(sql_quote "${host}") IDENTIFIED BY ${pass_q};"
+    mysql_exec_machine "GRANT ALL PRIVILEGES ON ${db_ident}.* TO ${user_q}@$(sql_quote "${host}");"
   done
 
   if [[ -n "${new_ips}" ]]; then
     desired["%"]=1
-    mysql_exec "CREATE USER IF NOT EXISTS ${user_q}@'%' IDENTIFIED BY ${pass_q};"
-    mysql_exec "ALTER USER ${user_q}@'%' IDENTIFIED BY ${pass_q};"
-    mysql_exec "GRANT ALL PRIVILEGES ON ${db_ident}.* TO ${user_q}@'%';"
+    mysql_exec_machine "CREATE USER IF NOT EXISTS ${user_q}@'%' IDENTIFIED BY ${pass_q};"
+    mysql_exec_machine "ALTER USER ${user_q}@'%' IDENTIFIED BY ${pass_q};"
+    mysql_exec_machine "GRANT ALL PRIVILEGES ON ${db_ident}.* TO ${user_q}@'%';"
   fi
 
-  current_hosts="$(mysql_exec "SELECT Host FROM mysql.user WHERE User=${user_q};" 2>/dev/null || true)"
+  current_hosts="$(mysql_exec_machine "SELECT Host FROM mysql.user WHERE User=${user_q};" 2>/dev/null || true)"
   while IFS= read -r host; do
     [[ -n "${host}" ]] || continue
     if [[ -z "${desired[$host]:-}" ]]; then
-      mysql_exec "DROP USER IF EXISTS ${user_q}@$(sql_quote "${host}");" >/dev/null 2>&1 || true
+      mysql_exec_machine "DROP USER IF EXISTS ${user_q}@$(sql_quote "${host}");" >/dev/null 2>&1 || true
     fi
   done <<< "${current_hosts}"
 
-  mysql_exec "FLUSH PRIVILEGES;"
+  mysql_exec_machine "FLUSH PRIVILEGES;"
   sync_mysql_firewall_rules "${new_ips}" "${old_ips}"
 }
 
 read_mysql_accounts() {
   local db_user="$1"
+  local machine_id="${2:-${LOCAL_DB_MACHINE_ID}}"
   local user_q
 
   [[ -n "${db_user}" ]] || return 0
+  resolve_db_machine "${machine_id}"
   user_q="$(sql_quote "${db_user}")"
-  mysql_exec "SELECT CONCAT(User, '@', Host) FROM mysql.user WHERE User=${user_q} ORDER BY Host;" 2>/dev/null || true
+  mysql_exec_machine "SELECT CONCAT(User, '@', Host) FROM mysql.user WHERE User=${user_q} ORDER BY Host;" 2>/dev/null || true
 }
 
 do_mysql() {
   local ref="$1"
   local ips="${2-__unset__}"
+  local machine_id="${3:-__unset__}"
   local slug
   local meta
   local old_ips
@@ -1132,37 +1397,75 @@ do_mysql() {
   local db_name
   local db_user
   local db_password
+  local active_machine_id
+  local active_machine_host
+  local active_machine_port
+  local active_machine_name
+  local active_machine_root_user
+  local active_machine_root_password
+  local current_machine_id
+  local mutate="no"
 
   slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
 
   old_ips="${MYSQL_ALLOWED_IPS:-}"
+  current_machine_id="$(project_db_machine_id)"
+  active_machine_id="${current_machine_id}"
+  if [[ "${machine_id}" != "__unset__" && -n "${machine_id}" ]]; then
+    active_machine_id="${machine_id}"
+    if [[ "${active_machine_id}" != "${current_machine_id}" ]]; then
+      mutate="yes"
+    fi
+  fi
+  if [[ "${ips}" != "__unset__" ]]; then
+    mutate="yes"
+  fi
 
-  if [[ "${ips}" == "__unset__" ]]; then
+  if [[ "${mutate}" != "yes" ]]; then
     db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
     db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
     db_password="$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)"
+    resolve_db_machine "${active_machine_id}"
+    active_machine_name="${DB_MACHINE_NAME}"
+    active_machine_host="${DB_MACHINE_HOST}"
+    active_machine_port="${DB_MACHINE_PORT}"
+    active_machine_root_user="${DB_MACHINE_ROOT_USER}"
+    active_machine_root_password="${DB_MACHINE_ROOT_PASSWORD}"
     printf 'repo: %s\npath: %s\ndb: %s\nuser: %s\npassword: %s\nallowed_ips: %s\n' \
       "${REPO_REF}" "${APP_DIR}" \
       "${db_name}" \
       "${db_user}" \
       "${db_password}" \
       "${MYSQL_ALLOWED_IPS:-}"
+    printf 'db_machine: %s\n' "${active_machine_name}"
+    printf 'db_machine_id: %s\n' "${active_machine_id}"
+    printf 'db_machine_host: %s\n' "${active_machine_host}"
+    printf 'db_machine_port: %s\n' "${active_machine_port}"
+    printf 'db_machine_root_user: %s\n' "${active_machine_root_user}"
+    printf 'db_machine_root_password: %s\n' "${active_machine_root_password}"
     if [[ -n "${db_user}" ]]; then
-      printf 'mysql_accounts:\n%s\n' "$(read_mysql_accounts "${db_user}")"
+      printf 'mysql_accounts:\n%s\n' "$(read_mysql_accounts "${db_user}" "${active_machine_id}")"
     fi
     return
   fi
 
-  new_ips="$(normalize_mysql_ips "${ips}")"
+  if [[ "${ips}" == "__unset__" ]]; then
+    new_ips="${old_ips}"
+  else
+    new_ips="$(normalize_mysql_ips "${ips}")"
+  fi
   db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
   db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
   db_password="$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)"
 
   MYSQL_ALLOWED_IPS="${new_ips}"
+  sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS}" "${old_ips}" "${active_machine_id}"
+  resolve_db_machine "${active_machine_id}"
+  sync_project_db_machine_env "${active_machine_id}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}"
   update_meta_value "${meta}" "MYSQL_ALLOWED_IPS" "${MYSQL_ALLOWED_IPS}"
-  sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS}" "${old_ips}"
+  update_meta_value "${meta}" "DB_MACHINE_ID" "${active_machine_id}"
   printf '[projectctl] mysql permissions updated for %s (%s)\n' "${REPO_REF}" "${MYSQL_ALLOWED_IPS:-local only}"
 }
 
@@ -1171,6 +1474,7 @@ remove_mysql_permissions() {
   local db_user="$2"
   local db_password="$3"
   local old_ips="${4:-}"
+  local machine_id="${5:-${LOCAL_DB_MACHINE_ID}}"
   local user_q
   local current_hosts
   local host
@@ -1179,16 +1483,17 @@ remove_mysql_permissions() {
   [[ -n "${db_user}" ]] || return 0
   [[ -n "${db_password}" ]] || return 0
 
+  resolve_db_machine "${machine_id}"
   user_q="$(sql_quote "${db_user}")"
 
-  current_hosts="$(mysql_exec "SELECT Host FROM mysql.user WHERE User=${user_q};" 2>/dev/null || true)"
+  current_hosts="$(mysql_exec_machine "SELECT Host FROM mysql.user WHERE User=${user_q};" 2>/dev/null || true)"
   while IFS= read -r host; do
     [[ -n "${host}" ]] || continue
-    mysql_exec "DROP USER IF EXISTS ${user_q}@$(sql_quote "${host}");" >/dev/null 2>&1 || true
+    mysql_exec_machine "DROP USER IF EXISTS ${user_q}@$(sql_quote "${host}");" >/dev/null 2>&1 || true
   done <<< "${current_hosts}"
 
   sync_mysql_firewall_rules "" "${old_ips}"
-  mysql_exec "FLUSH PRIVILEGES;" >/dev/null 2>&1 || true
+  mysql_exec_machine "FLUSH PRIVILEGES;" >/dev/null 2>&1 || true
 }
 
 do_uninstall() {
@@ -1206,6 +1511,9 @@ do_uninstall() {
   db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
   db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
   db_password="$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)"
+  if [[ -z "${DB_MACHINE_ID:-}" ]]; then
+    DB_MACHINE_ID="$(project_db_machine_id)"
+  fi
 
   if pm2 describe "${PM2_NAME}" >/dev/null 2>&1; then
     pm2 delete "${PM2_NAME}" >/dev/null 2>&1 || true
@@ -1225,7 +1533,7 @@ do_uninstall() {
     fi
   fi
 
-  remove_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}"
+  remove_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "${DB_MACHINE_ID:-${LOCAL_DB_MACHINE_ID}}"
   remove_project_ssh_user "${SSH_UPLOAD_USER:-}"
 
   rm -rf "${APP_DIR}" "${meta}"
@@ -1256,6 +1564,7 @@ main() {
       local https="yes"
       local branch=""
       local pm2_name=""
+      local db_machine_id=""
       local env_file=""
       local entrypoint=""
       while [[ $# -gt 0 ]]; do
@@ -1280,6 +1589,10 @@ main() {
             port="${2:-}"
             shift 2
             ;;
+          --db-machine)
+            db_machine_id="${2:-}"
+            shift 2
+            ;;
           --env-file)
             env_file="${2:-}"
             shift 2
@@ -1298,7 +1611,7 @@ main() {
         esac
       done
       [[ $# -eq 1 ]] || { usage; exit 1; }
-      do_install "$1" "${domain}" "${https}" "${branch}" "${pm2_name}" "${port}" "${env_file}" "${entrypoint}"
+      do_install "$1" "${domain}" "${https}" "${branch}" "${pm2_name}" "${port}" "${db_machine_id}" "${env_file}" "${entrypoint}"
       ;;
     update)
       [[ $# -eq 1 ]] || { usage; exit 1; }
@@ -1363,10 +1676,15 @@ main() {
       ;;
     mysql)
       local ips="__unset__"
+      local machine_id="__unset__"
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --ips)
             ips="${2:-}"
+            shift 2
+            ;;
+          --machine)
+            machine_id="${2:-}"
             shift 2
             ;;
           --help|-h)
@@ -1379,7 +1697,7 @@ main() {
         esac
       done
       [[ $# -eq 1 ]] || { usage; exit 1; }
-      do_mysql "$1" "${ips}"
+      do_mysql "$1" "${ips}" "${machine_id}"
       ;;
     ssh)
       local password=""
