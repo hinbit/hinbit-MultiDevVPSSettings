@@ -1727,6 +1727,8 @@ async function handleRequest(req, res) {
       const projectPath = meta.APP_DIR || '';
       const { files, db } = pickDbDetails(projectPath);
       const dbUser = db.DB_USER || db.MYSQL_USER || db.POSTGRES_USER || '';
+      const dbName = db.DB_NAME || db.DB_DATABASE || db.MYSQL_DATABASE || db.POSTGRES_DB || '';
+      const dbPassword = db.DB_PASSWORD || db.MYSQL_PASSWORD || db.POSTGRES_PASSWORD || '';
       const allowedIps = meta.MYSQL_ALLOWED_IPS || '';
       const accounts = readMysqlAccounts(dbUser);
 
@@ -1735,6 +1737,9 @@ async function handleRequest(req, res) {
           project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
           files,
           db,
+          dbName,
+          dbUser,
+          dbPassword,
           allowedIps,
           accounts,
         });
@@ -1753,6 +1758,9 @@ async function handleRequest(req, res) {
           project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
           files,
           db: refreshedDb,
+          dbName: refreshedDb.DB_NAME || refreshedDb.DB_DATABASE || refreshedDb.MYSQL_DATABASE || refreshedDb.POSTGRES_DB || '',
+          dbUser: refreshedDb.DB_USER || refreshedDb.MYSQL_USER || refreshedDb.POSTGRES_USER || '',
+          dbPassword: refreshedDb.DB_PASSWORD || refreshedDb.MYSQL_PASSWORD || refreshedDb.POSTGRES_PASSWORD || '',
           allowedIps: refreshedMeta.MYSQL_ALLOWED_IPS || ips,
           accounts: readMysqlAccounts(refreshedDb.DB_USER || refreshedDb.MYSQL_USER || refreshedDb.POSTGRES_USER || ''),
         });
