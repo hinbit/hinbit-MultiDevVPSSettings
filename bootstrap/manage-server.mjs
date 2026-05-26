@@ -104,6 +104,41 @@ function readProjectEnv(projectPath) {
   return { merged, files };
 }
 
+function readProjectDiskUsage(projectPath) {
+  if (!projectPath || !fs.existsSync(projectPath)) return 0;
+  try {
+    const out = execFileSync('du', ['-s', '-B1', projectPath], { encoding: 'utf8' }).trim();
+    const size = Number.parseInt(out.split(/\s+/)[0], 10);
+    return Number.isFinite(size) && size > 0 ? size : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function readProjectSslStatus(project) {
+  const domain = String(project?.APP_DOMAIN || '').trim();
+  const https = String(project?.APP_HTTPS || '').toLowerCase();
+  if (!domain) {
+    return { label: 'no domain', className: 'neutral', active: false };
+  }
+  if (https !== 'yes') {
+    return { label: 'HTTP only', className: 'warn', active: false };
+  }
+
+  const confPath = `/etc/nginx/sites-available/${domain}.conf`;
+  const certPath = `/etc/letsencrypt/live/${domain}/fullchain.pem`;
+  const certReady = fs.existsSync(certPath) && fs.statSync(certPath).size > 0;
+  const confReady = fs.existsSync(confPath) && /listen\s+443\s+ssl/.test(fs.readFileSync(confPath, 'utf8'));
+
+  if (certReady && confReady) {
+    return { label: 'SSL active', className: 'good', active: true };
+  }
+  if (certReady || confReady) {
+    return { label: 'SSL pending', className: 'warn', active: false };
+  }
+  return { label: 'SSL missing', className: 'warn', active: false };
+}
+
 function readPackageScripts(projectPath) {
   try {
     const pkgPath = path.join(projectPath, 'package.json');
@@ -286,6 +321,8 @@ function projectView() {
     const proc = byName.get(project.PM2_NAME || project.PROJECT_SLUG);
     const env = proc?.pm2_env || {};
     const { db } = pickDbDetails(project.APP_DIR || '');
+    const disk = readProjectDiskUsage(project.APP_DIR || '');
+    const ssl = readProjectSslStatus(project);
     return {
       repo: project.REPO_REF || '',
       slug: project.PROJECT_SLUG || '',
@@ -299,10 +336,15 @@ function projectView() {
       type: project.APP_TYPE || '',
       packageManager: project.PACKAGE_MANAGER || '',
       mysqlAllowedIps: project.MYSQL_ALLOWED_IPS || '',
+      disk,
+      diskHuman: formatBytes(disk),
       dbName: db.DB_NAME || db.DB_DATABASE || db.MYSQL_DATABASE || db.POSTGRES_DB || '',
       dbUser: db.DB_USER || db.MYSQL_USER || db.POSTGRES_USER || '',
       dbPassword: db.DB_PASSWORD || db.MYSQL_PASSWORD || db.POSTGRES_PASSWORD || '',
       protected: Boolean(project.protected),
+      sslActive: ssl.active,
+      sslStatus: ssl.label,
+      sslStatusClass: ssl.className,
       status: env.status || 'stopped',
       restarts: env.restart_time ?? proc?.pm2_env?.restart_time ?? 0,
       uptime: proc?.pm2_env?.pm_uptime || 0,
@@ -507,6 +549,9 @@ function renderPage() {
     .sticky { position: sticky; top: 0; z-index: 5; backdrop-filter: blur(12px); }
     .space { height: 12px; }
     .pill { display: inline-flex; padding: 3px 8px; border-radius: 999px; background: #102338; border: 1px solid #23405f; font-size: 12px; }
+    .pill.good { background: #0f3a24; border-color: #14532d; color: #86efac; }
+    .pill.warn { background: #3f2d0c; border-color: #7c2d12; color: #fde68a; }
+    .pill.neutral { background: #1f2937; border-color: #334155; color: #cbd5e1; }
     .table-wrap { overflow: auto; }
     .flash { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #0b1220; border: 1px solid #22304a; white-space: pre-wrap; }
     .scripts-panel { background: #08111f; border: 1px solid #22304a; border-radius: 18px; box-shadow: 0 30px 80px rgba(0,0,0,0.35); margin: 0 24px 24px; }
@@ -667,10 +712,12 @@ function renderPage() {
               <th>Repo</th>
               <th>Domain</th>
               <th>PM2</th>
-              <th>Port</th>
-              <th>Memory</th>
+          <th>Port</th>
+              <th>RAM</th>
+              <th>Disk</th>
               <th>Status</th>
               <th>Protected</th>
+              <th>SSL</th>
               <th>Branch</th>
               <th>Details</th>
               <th>Actions</th>
@@ -1049,7 +1096,7 @@ function renderPage() {
 
     function renderProjects(projects) {
       if (!projects.length) {
-        projectsBody.innerHTML = '<tr><td colspan="10" class="muted">No projects found.</td></tr>';
+        projectsBody.innerHTML = '<tr><td colspan="11" class="muted">No projects found.</td></tr>';
         return;
       }
       projectsBody.innerHTML = projects.map((project) => \`
@@ -1060,7 +1107,7 @@ function renderPage() {
           </td>
           <td>
             <div>\${project.domain ? \`<a href="https://\${escapeHtml(project.domain)}/" target="_blank" rel="noreferrer">\${escapeHtml(project.domain)}</a>\` : '<span class="muted">n/a</span>'}</div>
-            <div class="small">\${project.https === 'yes' ? 'HTTPS' : 'HTTP only'}</div>
+            <div class="small">\${project.https === 'yes' ? 'HTTPS' : 'HTTP only'} · <span class="pill \${escapeHtml(project.sslStatusClass || 'neutral')}">\${escapeHtml(project.sslStatus || 'n/a')}</span></div>
           </td>
           <td>
             <div><code>\${escapeHtml(project.pm2 || '')}</code></div>
@@ -1068,8 +1115,10 @@ function renderPage() {
           </td>
           <td>\${escapeHtml(project.port || '')}</td>
           <td>\${escapeHtml(formatBytes(project.memory || 0))}</td>
+          <td>\${escapeHtml(project.diskHuman || formatBytes(project.disk || 0))}</td>
           <td><span class="\${statusClass(project.status)}">\${escapeHtml(project.status || '')}</span></td>
           <td>\${project.protected ? 'yes' : 'no'}</td>
+          <td><span class="pill \${escapeHtml(project.sslStatusClass || 'neutral')}">\${escapeHtml(project.sslStatus || 'n/a')}</span></td>
           <td>\${escapeHtml(project.branch || '')}</td>
           <td class="small">
             kind: \${escapeHtml(project.kind || '')}<br>
@@ -1078,6 +1127,8 @@ function renderPage() {
             restarts: \${escapeHtml(String(project.restarts ?? 0))}<br>
             uptime: \${escapeHtml(fmtTime(project.uptime))}<br>
             env: \${escapeHtml(project.nodeEnv || '')}<br>
+            ram: \${escapeHtml(project.memory ? formatBytes(project.memory) : '0 B')}<br>
+            disk: \${escapeHtml(project.diskHuman || formatBytes(project.disk || 0))}<br>
             mysql ips: \${escapeHtml(project.mysqlAllowedIps || 'local only')}
           </td>
           <td>\${rowActions(project)}</td>
