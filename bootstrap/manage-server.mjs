@@ -1962,7 +1962,7 @@ async function handleRequest(req, res) {
   const pathname = url.pathname.replace(/\/+$/, '') || '/';
 
   try {
-    if (req.method === 'GET' && pathname === '/manage/vault') {
+    if (req.method === 'GET' && (pathname === '/vault' || pathname === '/manage/vault')) {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-store',
