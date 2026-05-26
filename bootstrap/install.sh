@@ -55,6 +55,7 @@ EOF
     gnupg \
     lsb-release \
     unzip \
+    acl \
     git \
     build-essential \
     ufw \

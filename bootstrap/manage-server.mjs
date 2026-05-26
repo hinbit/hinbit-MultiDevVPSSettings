@@ -336,6 +336,8 @@ function projectView() {
       type: project.APP_TYPE || '',
       packageManager: project.PACKAGE_MANAGER || '',
       mysqlAllowedIps: project.MYSQL_ALLOWED_IPS || '',
+      sshUser: project.SSH_UPLOAD_USER || '',
+      sshPassword: project.SSH_UPLOAD_PASSWORD || '',
       disk,
       diskHuman: formatBytes(disk),
       dbName: db.DB_NAME || db.DB_DATABASE || db.MYSQL_DATABASE || db.POSTGRES_DB || '',
@@ -844,6 +846,8 @@ function renderPage() {
     .kv-list { display: grid; gap: 10px; }
     .kv-item { display: grid; gap: 4px; padding: 12px; border: 1px solid #22304a; border-radius: 12px; background: #0b1220; }
     .kv-item code { white-space: pre-wrap; word-break: break-word; }
+    .copy-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .copy-actions .btn, .copy-actions button { padding: 8px 10px; font-size: 12px; }
     .hinbit-brand {
       position: fixed;
       top: 16px;
@@ -1006,6 +1010,35 @@ function renderPage() {
       </div>
     </div>
   </div>
+  <div id="sshPanel" class="scripts-panel modal-panel" hidden>
+    <header>
+      <div>
+        <h2 id="sshTitle">SSH Upload Access</h2>
+        <div id="sshSubtitle" class="muted"></div>
+      </div>
+      <button id="closeSshBtn" class="ghost" type="button">Close</button>
+    </header>
+    <div class="body">
+      <div id="sshFlash" class="flash" hidden></div>
+      <div class="grid two">
+        <div class="kv-list" id="sshDetails"></div>
+        <div class="stack">
+          <div class="kv-item">
+            <div class="small">How to connect</div>
+            <div class="small">Use SFTP over port 22 with the upload user and password below.</div>
+          </div>
+          <div class="kv-item">
+            <div class="small">Copy</div>
+            <div class="copy-actions">
+              <button id="sshCopyUserBtn" class="secondary" type="button">Copy user</button>
+              <button id="sshCopyPassBtn" class="secondary" type="button">Copy pass</button>
+              <button id="sshCopyAllBtn" class="ghost" type="button">Copy all</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
   <div id="envPanel" class="scripts-panel modal-panel" hidden>
     <header>
       <div>
@@ -1088,6 +1121,15 @@ function renderPage() {
     const mysqlPhpMyAdminBtn = document.getElementById('mysqlPhpMyAdminBtn');
     const mysqlSaveBtn = document.getElementById('mysqlSaveBtn');
     const closeMysqlBtn = document.getElementById('closeMysqlBtn');
+    const sshPanel = document.getElementById('sshPanel');
+    const sshTitle = document.getElementById('sshTitle');
+    const sshSubtitle = document.getElementById('sshSubtitle');
+    const sshDetails = document.getElementById('sshDetails');
+    const sshFlash = document.getElementById('sshFlash');
+    const closeSshBtn = document.getElementById('closeSshBtn');
+    const sshCopyUserBtn = document.getElementById('sshCopyUserBtn');
+    const sshCopyPassBtn = document.getElementById('sshCopyPassBtn');
+    const sshCopyAllBtn = document.getElementById('sshCopyAllBtn');
     const envPanel = document.getElementById('envPanel');
     const envTitle = document.getElementById('envTitle');
     const envSubtitle = document.getElementById('envSubtitle');
@@ -1117,6 +1159,7 @@ function renderPage() {
     let currentScriptsRef = '';
     let currentDbRef = '';
     let currentMysqlRef = '';
+    let currentSshRef = '';
     let currentEnvRef = '';
     let currentLogRef = '';
     let currentLogType = 'out';
@@ -1239,6 +1282,7 @@ function renderPage() {
           <button class="danger" data-action="uninstall" data-ref="\${ref}">Kill</button>
           <button class="secondary" data-action="db" data-ref="\${ref}">DB</button>
           <button class="secondary" data-action="mysql" data-ref="\${ref}">MySQL</button>
+          <button class="secondary" data-action="ssh" data-ref="\${ref}">SSH</button>
           <button class="secondary" data-action="env" data-ref="\${ref}">Env</button>
           <button class="secondary" data-action="scripts" data-ref="\${ref}">Scripts</button>
           <button class="secondary" data-action="log" data-ref="\${ref}">Log</button>
@@ -1257,7 +1301,7 @@ function renderPage() {
 
     function renderProjects(projects) {
       if (!projects.length) {
-        projectsBody.innerHTML = '<tr><td colspan="11" class="muted">No projects found.</td></tr>';
+        projectsBody.innerHTML = '<tr><td colspan="12" class="muted">No projects found.</td></tr>';
         return;
       }
       projectsBody.innerHTML = projects.map((project) => \`
@@ -1290,6 +1334,7 @@ function renderPage() {
             env: \${escapeHtml(project.nodeEnv || '')}<br>
             ram: \${escapeHtml(project.memory ? formatBytes(project.memory) : '0 B')}<br>
             disk: \${escapeHtml(project.diskHuman || formatBytes(project.disk || 0))}<br>
+            ssh: \${escapeHtml(project.sshUser || 'n/a')}<br>
             mysql ips: \${escapeHtml(project.mysqlAllowedIps || 'local only')}
           </td>
           <td>\${rowActions(project)}</td>
@@ -1430,6 +1475,45 @@ function renderPage() {
       mysqlAccounts.innerHTML = '';
       mysqlIpsInput.value = '';
       mysqlFlash.hidden = true;
+      setModalLocked(false);
+    }
+
+    function openSshPanel(ref, details, subtitle) {
+      closeScriptsModal();
+      closeDbPanel();
+      closeMysqlPanel();
+      closeEnvPanel();
+      closeProgressPanel();
+      closeLogPanel();
+      currentSshRef = ref;
+      sshTitle.textContent = 'SSH Upload Access';
+      sshSubtitle.textContent = subtitle || '';
+      sshFlash.hidden = true;
+      const rows = [
+        ['SSH user', details.user || 'n/a'],
+        ['SSH password', details.password || 'n/a'],
+        ['Home', details.home || 'n/a'],
+        ['Host', details.host || window.location.hostname || 'n/a'],
+        ['Port', details.port || '22'],
+        ['Mode', details.mode || 'sftp-only'],
+      ];
+      sshDetails.innerHTML = \`
+        \${rows.map(([label, value]) => \`
+          <div class="kv-item">
+            <div class="small">\${escapeHtml(label)}</div>
+            <code>\${escapeHtml(value)}</code>
+          </div>
+        \`).join('')}
+      \`;
+      sshPanel.hidden = false;
+      setModalLocked(true);
+    }
+
+    function closeSshPanel() {
+      sshPanel.hidden = true;
+      currentSshRef = '';
+      sshDetails.innerHTML = '';
+      sshFlash.hidden = true;
       setModalLocked(false);
     }
 
@@ -1596,6 +1680,11 @@ function renderPage() {
       openMysqlPanel(ref, data, data.project || ref);
     }
 
+    async function loadSsh(ref) {
+      const data = await api(\`/projects/\${ref}/ssh\`);
+      openSshPanel(ref, data, data.project || ref);
+    }
+
     async function loadEnv(ref) {
       const data = await api(\`/projects/\${ref}/env\`);
       openEnvPanel(ref, data, data.project || ref);
@@ -1664,6 +1753,18 @@ function renderPage() {
       if (action === 'db' || action === 'env' || action === 'mysql') {
         return;
       }
+      if (action === 'ssh') {
+        btn.disabled = true;
+        try {
+          await loadSsh(ref);
+        } catch (error) {
+          showMessage(sshFlash, error.message, false);
+          sshPanel.hidden = false;
+        } finally {
+          btn.disabled = false;
+        }
+        return;
+      }
       if (action === 'log') {
         btn.disabled = true;
         try {
@@ -1725,9 +1826,35 @@ function renderPage() {
     closeScriptsBtn.addEventListener('click', closeScriptsModal);
     closeDbBtn.addEventListener('click', closeDbPanel);
     closeMysqlBtn.addEventListener('click', closeMysqlPanel);
+    closeSshBtn.addEventListener('click', closeSshPanel);
     closeEnvBtn.addEventListener('click', closeEnvPanel);
     closeProgressBtn.addEventListener('click', closeProgressPanel);
     closeLogBtn.addEventListener('click', closeLogPanel);
+    sshCopyUserBtn.addEventListener('click', async () => {
+      const user = sshDetails.querySelector('code');
+      if (!user || !user.textContent) return;
+      await navigator.clipboard.writeText(user.textContent);
+      showMessage(sshFlash, 'SSH user copied');
+    });
+    sshCopyPassBtn.addEventListener('click', async () => {
+      const codes = Array.from(sshDetails.querySelectorAll('code')).map((el) => el.textContent || '');
+      const pass = codes[1] || '';
+      if (!pass) return;
+      await navigator.clipboard.writeText(pass);
+      showMessage(sshFlash, 'SSH password copied');
+    });
+    sshCopyAllBtn.addEventListener('click', async () => {
+      const codes = Array.from(sshDetails.querySelectorAll('code')).map((el) => el.textContent || '');
+      const text = [
+        \`user=\${codes[0] || ''}\`,
+        \`password=\${codes[1] || ''}\`,
+        \`home=\${codes[2] || ''}\`,
+        \`host=\${codes[3] || ''}\`,
+        \`port=\${codes[4] || ''}\`,
+      ].join('\\n');
+      await navigator.clipboard.writeText(text);
+      showMessage(sshFlash, 'SSH details copied');
+    });
     logOutBtn.addEventListener('click', async () => {
       if (!currentLogRef) return;
       currentLogType = 'out';
@@ -2078,6 +2205,22 @@ async function handleRequest(req, res) {
         });
         return;
       }
+    }
+
+    const sshMatch = pathname.match(/^\/api\/projects\/(.+?)\/ssh$/);
+    if (sshMatch) {
+      const ref = decodeURIComponent(sshMatch[1]);
+      const meta = parseEnvFile(metaPathForRef(ref));
+      sendJson(res, 200, {
+        project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
+        user: meta.SSH_UPLOAD_USER || '',
+        password: meta.SSH_UPLOAD_PASSWORD || '',
+        home: meta.APP_DIR || '',
+        host: (req.headers.host || '').replace(/:\d+$/, ''),
+        port: '22',
+        mode: 'sftp-only',
+      });
+      return;
     }
 
     const envMatch = pathname.match(/^\/api\/projects\/(.+?)\/env(?:\/(download|upload))?$/);
