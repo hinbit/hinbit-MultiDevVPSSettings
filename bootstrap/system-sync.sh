@@ -82,6 +82,7 @@ cat > "${SYSTEM_PORTAL_WEBROOT}/index.html" <<EOF
     <h2>MySQL</h2>
     <ul>
       <li><a href="/phpmyadmin/">phpMyAdmin</a></li>
+      <li><a href="/manage/vault/">DB Vault</a></li>
       <li><a href="/manage/">Manage MySQL permissions</a></li>
     </ul>
     <h2>Apps</h2>

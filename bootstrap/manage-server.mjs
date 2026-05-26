@@ -358,6 +358,256 @@ function projectView() {
   });
 }
 
+function renderVaultRows(projects) {
+  if (!projects.length) {
+    return '<tr><td colspan="6" class="muted">No project database credentials found.</td></tr>';
+  }
+  return projects.map((project) => {
+    const ref = encodeURIComponent(project.repo || project.slug || '');
+    const dbName = project.dbName || 'n/a';
+    const dbUser = project.dbUser || 'n/a';
+    const dbPassword = project.dbPassword || 'n/a';
+    const allowedIps = project.mysqlAllowedIps || 'local only';
+    const copyDisabled = (!project.dbUser && !project.dbPassword && !project.mysqlAllowedIps);
+    return `
+      <tr>
+        <td>
+          <div><strong>${escapeHtml(project.repo || project.slug || '')}</strong></div>
+          <div class="small">${escapeHtml(project.domain || '')}</div>
+        </td>
+        <td><code>${escapeHtml(dbName)}</code></td>
+        <td><code>${escapeHtml(dbUser)}</code></td>
+        <td><code>${escapeHtml(dbPassword)}</code></td>
+        <td class="small">${escapeHtml(allowedIps)}</td>
+        <td>
+          <div class="copy-actions">
+            <button class="secondary" type="button" data-copy-kind="user" data-ref="${ref}" ${copyDisabled ? 'disabled' : ''}>User</button>
+            <button class="secondary" type="button" data-copy-kind="password" data-ref="${ref}" ${copyDisabled ? 'disabled' : ''}>Pass</button>
+            <button class="ghost" type="button" data-copy-kind="all" data-ref="${ref}" ${copyDisabled ? 'disabled' : ''}>All</button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function renderVaultPage() {
+  const projects = projectView();
+  const vaultProjects = JSON.stringify(projects).replace(/</g, '\\u003c');
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DB Vault</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font-family: Inter, system-ui, sans-serif; background: radial-gradient(circle at top, #11213d 0, #08111f 50%, #05070c 100%); color: #e5eef8; padding-top: 84px; }
+    header, main { max-width: 1400px; margin: 0 auto; padding: 24px; }
+    header { display: flex; justify-content: space-between; align-items: end; gap: 16px; }
+    h1, h2 { margin: 0 0 12px; }
+    .muted { color: #94a3b8; }
+    .panel { background: rgba(8, 15, 29, 0.88); border: 1px solid rgba(148,163,184,0.2); border-radius: 18px; padding: 20px; box-shadow: 0 12px 40px rgba(0,0,0,0.35); }
+    .table-wrap { overflow: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; vertical-align: top; padding: 10px; border-bottom: 1px solid rgba(148,163,184,0.16); }
+    th { color: #93c5fd; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+    code { background: #0b1220; padding: 2px 6px; border-radius: 6px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    button, .btn { background: linear-gradient(180deg, #38bdf8, #0ea5e9); color: #00111d; border: 0; border-radius: 999px; padding: 10px 14px; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+    button.secondary, .btn.secondary { background: #162033; color: #dbeafe; border: 1px solid #2a3b59; }
+    button.ghost, .btn.ghost { background: transparent; color: #dbeafe; border: 1px solid #2a3b59; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .small { font-size: 12px; color: #94a3b8; }
+    .copy-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .copy-actions .btn, .copy-actions button { padding: 8px 10px; font-size: 12px; }
+    .flash { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #0b1220; border: 1px solid #22304a; white-space: pre-wrap; }
+    .hinbit-brand {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      z-index: 80;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(8, 15, 29, 0.82);
+      border: 1px solid rgba(148,163,184,0.22);
+      box-shadow: 0 12px 32px rgba(0,0,0,0.25);
+      text-decoration: none;
+      color: #e5eef8;
+      backdrop-filter: blur(12px);
+    }
+    .hinbit-brand img {
+      width: 22px;
+      height: 22px;
+      display: block;
+      object-fit: contain;
+    }
+    .hinbit-brand span {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <a class="hinbit-brand" href="https://hinbit.com" target="_blank" rel="noreferrer">
+    <img src="https://hinbit.com/hebrew_site/hinbit-logo-symbol.png" alt="Hinbit">
+    <span>Powered by Hinbit Development</span>
+  </a>
+  <header>
+    <div>
+      <h1>DB Vault</h1>
+      <div class="muted">Project database credentials with copy actions.</div>
+      <div class="small">${escapeHtml(String(projects.length))} projects found</div>
+    </div>
+    <div class="actions">
+      <a class="btn ghost" href="/manage/">Back to manage</a>
+      <a class="btn ghost" href="/phpmyadmin/">phpMyAdmin</a>
+      <button class="secondary" id="refreshBtn" type="button">Refresh</button>
+    </div>
+  </header>
+  <main>
+    <section class="panel">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Project</th>
+              <th>DB Name</th>
+              <th>DB User</th>
+              <th>DB Password</th>
+              <th>Allowed IPs</th>
+              <th>Copy</th>
+            </tr>
+          </thead>
+          <tbody id="vaultBody">${renderVaultRows(projects)}</tbody>
+        </table>
+      </div>
+      <div id="vaultResult" class="flash" hidden></div>
+    </section>
+  </main>
+  <script>
+    const vaultBody = document.getElementById('vaultBody');
+    const vaultResult = document.getElementById('vaultResult');
+    const refreshBtn = document.getElementById('refreshBtn');
+    let currentProjects = ${vaultProjects};
+
+    function showMessage(value, ok = true) {
+      vaultResult.hidden = false;
+      vaultResult.style.borderColor = ok ? '#1d4ed8' : '#7f1d1d';
+      vaultResult.textContent = value;
+    }
+
+    async function copyToClipboard(text) {
+      const value = String(text || '');
+      if (!value) throw new Error('Nothing to copy');
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(value);
+        return;
+      }
+      const area = document.createElement('textarea');
+      area.value = value;
+      area.setAttribute('readonly', 'readonly');
+      area.style.position = 'fixed';
+      area.style.left = '-9999px';
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(area);
+      if (!ok) throw new Error('Clipboard copy failed');
+    }
+
+    function getProject(ref) {
+      return currentProjects.find((item) => encodeURIComponent(item.repo || item.slug || '') === ref);
+    }
+
+    async function refresh() {
+      const res = await fetch('/manage/api/projects', { credentials: 'same-origin' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to load projects');
+      currentProjects = data.projects || [];
+      vaultBody.innerHTML = currentProjects.length
+        ? currentProjects.map((project) => {
+            const ref = encodeURIComponent(project.repo || project.slug || '');
+            const dbName = project.dbName || 'n/a';
+            const dbUser = project.dbUser || 'n/a';
+            const dbPassword = project.dbPassword || 'n/a';
+            const allowedIps = project.mysqlAllowedIps || 'local only';
+            const copyDisabled = (!project.dbUser && !project.dbPassword && !project.mysqlAllowedIps);
+            return \`
+              <tr>
+                <td>
+                  <div><strong>\${project.repo || project.slug || ''}</strong></div>
+                  <div class="small">\${project.domain || ''}</div>
+                </td>
+                <td><code>\${dbName}</code></td>
+                <td><code>\${dbUser}</code></td>
+                <td><code>\${dbPassword}</code></td>
+                <td class="small">\${allowedIps}</td>
+                <td>
+                  <div class="copy-actions">
+                    <button class="secondary" type="button" data-copy-kind="user" data-ref="\${ref}" \${copyDisabled ? 'disabled' : ''}>User</button>
+                    <button class="secondary" type="button" data-copy-kind="password" data-ref="\${ref}" \${copyDisabled ? 'disabled' : ''}>Pass</button>
+                    <button class="ghost" type="button" data-copy-kind="all" data-ref="\${ref}" \${copyDisabled ? 'disabled' : ''}>All</button>
+                  </div>
+                </td>
+              </tr>
+            \`;
+          }).join('')
+        : '<tr><td colspan="6" class="muted">No project database credentials found.</td></tr>';
+    }
+
+    document.addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-copy-kind]');
+      if (!btn) return;
+      const project = getProject(btn.dataset.ref || '');
+      if (!project) return;
+      const kind = btn.dataset.copyKind || '';
+      let value = '';
+      if (kind === 'user') {
+        value = project.dbUser || '';
+      } else if (kind === 'password') {
+        value = project.dbPassword || '';
+      } else {
+        value = [
+          'project=' + (project.repo || project.slug || ''),
+          'db=' + (project.dbName || ''),
+          'user=' + (project.dbUser || ''),
+          'password=' + (project.dbPassword || ''),
+          'allowed_ips=' + (project.mysqlAllowedIps || 'local only'),
+        ].join('\\n');
+      }
+      btn.disabled = true;
+      try {
+        await copyToClipboard(value);
+        showMessage(kind === 'all' ? 'Copied project DB bundle' : 'Copied ' + kind);
+      } catch (error) {
+        showMessage(error.message, false);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    refreshBtn.addEventListener('click', async () => {
+      refreshBtn.disabled = true;
+      try {
+        await refresh();
+        showMessage('Vault refreshed');
+      } catch (error) {
+        showMessage(error.message, false);
+      } finally {
+        refreshBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>`;
+}
+
 function runProjectCtl(args, input = null) {
   const res = spawnSync(PROJECTCTL, args, {
     encoding: 'utf8',
@@ -594,9 +844,6 @@ function renderPage() {
     .kv-list { display: grid; gap: 10px; }
     .kv-item { display: grid; gap: 4px; padding: 12px; border: 1px solid #22304a; border-radius: 12px; background: #0b1220; }
     .kv-item code { white-space: pre-wrap; word-break: break-word; }
-    .vault-table code { white-space: nowrap; }
-    .copy-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-    .copy-actions .btn, .copy-actions button { padding: 8px 10px; font-size: 12px; }
     .hinbit-brand {
       position: fixed;
       top: 16px;
@@ -680,27 +927,6 @@ function renderPage() {
       <div class="space"></div>
       <button id="installBtn" type="button">Install project</button>
       <div id="installResult" class="flash" hidden></div>
-    </section>
-
-    <section class="panel">
-      <h2>DB Vault</h2>
-      <div class="muted">Central view of project database credentials with copy actions.</div>
-      <div class="table-wrap">
-        <table class="vault-table">
-          <thead>
-            <tr>
-              <th>Project</th>
-              <th>DB Name</th>
-              <th>DB User</th>
-              <th>DB Password</th>
-              <th>Allowed IPs</th>
-              <th>Copy</th>
-            </tr>
-          </thead>
-          <tbody id="mysqlVaultBody"></tbody>
-        </table>
-      </div>
-      <div id="vaultResult" class="flash" hidden></div>
     </section>
 
     <section class="panel">
@@ -839,8 +1065,6 @@ function renderPage() {
     const projectsBody = document.getElementById('projectsBody');
     const listResult = document.getElementById('listResult');
     const installResult = document.getElementById('installResult');
-    const mysqlVaultBody = document.getElementById('mysqlVaultBody');
-    const vaultResult = document.getElementById('vaultResult');
     const systemStats = document.getElementById('systemStats');
     const scriptsPanel = document.getElementById('scriptsPanel');
     const scriptsTitle = document.getElementById('scriptsTitle');
@@ -993,7 +1217,6 @@ function renderPage() {
       if (dataResult.status !== 'fulfilled') throw dataResult.reason;
       const data = dataResult.value;
       currentProjects = data.projects || [];
-      renderMysqlVault(currentProjects);
       renderProjects(currentProjects);
       refreshSystemStats(statsResult.status === 'fulfilled' ? statsResult.value.system || null : null);
     }
@@ -1004,68 +1227,6 @@ function renderPage() {
       if (value.includes('launch')) return 'status-launching';
       if (value.includes('error')) return 'status-errored';
       return 'status-stopped';
-    }
-
-    function getProjectDbValue(project, kind) {
-      if (!project) return '';
-      if (kind === 'name') return project.dbName || '';
-      if (kind === 'user') return project.dbUser || '';
-      if (kind === 'password') return project.dbPassword || '';
-      if (kind === 'allowedIps') return project.mysqlAllowedIps || '';
-      return '';
-    }
-
-    function renderMysqlVault(projects) {
-      if (!projects.length) {
-        mysqlVaultBody.innerHTML = '<tr><td colspan="6" class="muted">No project database credentials found.</td></tr>';
-        return;
-      }
-      mysqlVaultBody.innerHTML = projects.map((project) => {
-        const ref = encodeURIComponent(project.repo || project.slug || '');
-        const dbName = project.dbName || 'n/a';
-        const dbUser = project.dbUser || 'n/a';
-        const dbPassword = project.dbPassword || 'n/a';
-        const allowedIps = project.mysqlAllowedIps || 'local only';
-        const copyDisabled = (!project.dbUser && !project.dbPassword && !project.mysqlAllowedIps);
-        return \`
-          <tr>
-            <td>
-              <div><strong>\${escapeHtml(project.repo || project.slug || '')}</strong></div>
-              <div class="small">\${escapeHtml(project.domain || '')}</div>
-            </td>
-            <td><code>\${escapeHtml(dbName)}</code></td>
-            <td><code>\${escapeHtml(dbUser)}</code></td>
-            <td><code>\${escapeHtml(dbPassword)}</code></td>
-            <td class="small">\${escapeHtml(allowedIps)}</td>
-            <td>
-              <div class="copy-actions">
-                <button class="secondary" type="button" data-copy-kind="user" data-ref="\${ref}" \${copyDisabled ? 'disabled' : ''}>User</button>
-                <button class="secondary" type="button" data-copy-kind="password" data-ref="\${ref}" \${copyDisabled ? 'disabled' : ''}>Pass</button>
-                <button class="ghost" type="button" data-copy-kind="all" data-ref="\${ref}" \${copyDisabled ? 'disabled' : ''}>All</button>
-              </div>
-            </td>
-          </tr>
-        \`;
-      }).join('');
-    }
-
-    async function copyToClipboard(text) {
-      const value = String(text || '');
-      if (!value) throw new Error('Nothing to copy');
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        await navigator.clipboard.writeText(value);
-        return;
-      }
-      const area = document.createElement('textarea');
-      area.value = value;
-      area.setAttribute('readonly', 'readonly');
-      area.style.position = 'fixed';
-      area.style.left = '-9999px';
-      document.body.appendChild(area);
-      area.select();
-      const ok = document.execCommand('copy');
-      document.body.removeChild(area);
-      if (!ok) throw new Error('Clipboard copy failed');
     }
 
     function rowActions(project) {
@@ -1711,42 +1872,6 @@ function renderPage() {
       }
     });
 
-    document.addEventListener('click', async (event) => {
-      const btn = event.target.closest('button[data-copy-kind]');
-      if (!btn) return;
-      const ref = btn.dataset.ref || '';
-      const kind = btn.dataset.copyKind || '';
-      const project = currentProjects.find((item) => encodeURIComponent(item.repo || item.slug || '') === ref);
-      if (!project) return;
-      const user = getProjectDbValue(project, 'user');
-      const password = getProjectDbValue(project, 'password');
-      const dbName = getProjectDbValue(project, 'name');
-      const allowedIps = getProjectDbValue(project, 'allowedIps');
-      let value = '';
-      if (kind === 'user') {
-        value = user;
-      } else if (kind === 'password') {
-        value = password;
-      } else {
-        value = [
-          'project=' + (project.repo || project.slug || ''),
-          'db=' + dbName,
-          'user=' + user,
-          'password=' + password,
-          'allowed_ips=' + (allowedIps || 'local only'),
-        ].join('\\n');
-      }
-      btn.disabled = true;
-      try {
-        await copyToClipboard(value);
-        showMessage(vaultResult, kind === 'all' ? 'Copied project DB bundle' : 'Copied ' + kind);
-      } catch (error) {
-        showMessage(vaultResult, error.message, false);
-      } finally {
-        btn.disabled = false;
-      }
-    });
-
     document.getElementById('installBtn').addEventListener('click', async () => {
       const payload = {
         repo: document.getElementById('repo').value.trim(),
@@ -1837,6 +1962,15 @@ async function handleRequest(req, res) {
   const pathname = url.pathname.replace(/\/+$/, '') || '/';
 
   try {
+    if (req.method === 'GET' && pathname === '/manage/vault') {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(renderVaultPage());
+      return;
+    }
+
     if (req.method === 'GET' && (pathname === '/' || pathname === '/manage')) {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
