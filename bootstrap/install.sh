@@ -28,6 +28,16 @@ log() {
   printf '[vps-bootstrap] %s\n' "$*"
 }
 
+generate_secret() {
+  local secret=""
+  secret="$(openssl rand -base64 18 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 18 || true)"
+  if [[ -z "${secret}" ]]; then
+    secret="$(openssl rand -hex 12 2>/dev/null || true)"
+  fi
+  [[ -n "${secret}" ]] || return 1
+  printf '%s' "${secret}"
+}
+
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
     echo "Run this as root." >&2
@@ -177,6 +187,88 @@ bind-address = 0.0.0.0
 mysqlx-bind-address = 127.0.0.1
 skip-name-resolve = ON
 EOF
+}
+
+configure_local_db_machine_credentials() {
+  if [[ ! -f "${DB_MACHINES_FILE}" ]]; then
+    return 0
+  fi
+
+  local current_root_password
+  current_root_password="$(
+    python3 - "${DB_MACHINES_FILE}" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, 'r', encoding='utf-8') as handle:
+        data = json.load(handle)
+except Exception:
+    data = []
+for item in data if isinstance(data, list) else []:
+    if str(item.get('id', '')) == 'local-current':
+        print(str(item.get('rootPassword', '')).strip())
+        break
+PY
+  )"
+
+  if [[ -n "${current_root_password}" ]]; then
+    return 0
+  fi
+
+  local local_password
+  local_password="$(generate_secret)"
+
+  mysql --protocol=socket -uroot -e "CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '${local_password}';"
+  mysql --protocol=socket -uroot -e "ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY '${local_password}';"
+  mysql --protocol=socket -uroot -e "GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;"
+  mysql --protocol=socket -uroot -e "CREATE USER IF NOT EXISTS 'root'@'::1' IDENTIFIED BY '${local_password}';"
+  mysql --protocol=socket -uroot -e "ALTER USER 'root'@'::1' IDENTIFIED BY '${local_password}';"
+  mysql --protocol=socket -uroot -e "GRANT ALL PRIVILEGES ON *.* TO 'root'@'::1' WITH GRANT OPTION;"
+  mysql --protocol=socket -uroot -e "FLUSH PRIVILEGES;"
+
+  python3 - "${DB_MACHINES_FILE}" "${local_password}" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+password = sys.argv[2]
+entry = {
+    "id": "local-current",
+    "name": "localhost (current)",
+    "host": "127.0.0.1",
+    "rootUser": "root",
+    "rootPassword": password,
+    "port": "3306",
+    "notes": "Current VPS local DB on this VPS",
+}
+
+data = []
+try:
+    with open(path, 'r', encoding='utf-8') as handle:
+        loaded = json.load(handle)
+        if isinstance(loaded, list):
+            data = loaded
+except Exception:
+    data = []
+
+updated = False
+for index, item in enumerate(data):
+    if str(item.get('id', '')) == 'local-current':
+        data[index] = entry
+        updated = True
+        break
+if not updated:
+    data.insert(0, entry)
+
+with open(path, 'w', encoding='utf-8') as handle:
+    json.dump(data, handle, indent=2)
+    handle.write('\n')
+os.chmod(path, 0o600)
+PY
 }
 
 install_system_files() {
@@ -784,6 +876,7 @@ main() {
   systemctl restart "${PHP_FPM_SERVICE}"
   systemctl restart nginx
   systemctl restart mysql
+  configure_local_db_machine_credentials
 
   log "Bootstrap complete"
   log "Add domains to /etc/app-map.csv and run /usr/local/bin/app-sync.sh"
