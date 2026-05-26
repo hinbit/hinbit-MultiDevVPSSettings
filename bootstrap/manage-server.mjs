@@ -309,7 +309,8 @@ function getPm2List() {
   }
 }
 
-function projectView() {
+function projectView(options = {}) {
+  const includeMetrics = options.includeMetrics !== false;
   const pm2List = getPm2List();
   const byName = new Map();
   for (const proc of pm2List) {
@@ -321,7 +322,7 @@ function projectView() {
     const proc = byName.get(project.PM2_NAME || project.PROJECT_SLUG);
     const env = proc?.pm2_env || {};
     const { db } = pickDbDetails(project.APP_DIR || '');
-    const disk = readProjectDiskUsage(project.APP_DIR || '');
+    const disk = includeMetrics ? readProjectDiskUsage(project.APP_DIR || '') : 0;
     const ssl = readProjectSslStatus(project);
     return {
       repo: project.REPO_REF || '',
@@ -577,7 +578,7 @@ function escapeHtml(value) {
 }
 
 function renderPage() {
-  const initialProjects = projectView();
+  const initialProjects = projectView({ includeMetrics: false });
   return `<!doctype html>
 <html lang="en">
 <head>
