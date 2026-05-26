@@ -10,6 +10,8 @@ const META_DIR = '/etc/vps-projects';
 const AUTH_DIR = '/etc/nginx/project-auth';
 const SYSTEM_ENV_FILE = '/etc/vps-system.env';
 const DB_MACHINES_FILE = '/etc/vps-db-machines.json';
+const SSH_KEYS_FILE = '/etc/vps-ssh-keys.json';
+const SSH_KEYS_DIR = '/root/.ssh/vps-managed-keys';
 const PROJECTCTL = '/usr/local/bin/projectctl';
 const PM2 = 'pm2';
 const BASIC_USER = 'manage';
@@ -280,6 +282,167 @@ function writeDbMachines(machines) {
   }
   fs.writeFileSync(DB_MACHINES_FILE, `${JSON.stringify(list, null, 2)}\n`);
   fs.chmodSync(DB_MACHINES_FILE, 0o600);
+}
+
+function readSshKeyRegistry() {
+  try {
+    if (!fs.existsSync(SSH_KEYS_FILE)) return [];
+    const data = JSON.parse(fs.readFileSync(SSH_KEYS_FILE, 'utf8'));
+    if (!Array.isArray(data)) return [];
+    return data.map((item) => ({
+      id: String(item.id || item.path || '').trim(),
+      name: String(item.name || path.basename(String(item.path || '')) || '').trim(),
+      memo: String(item.memo || '').trim(),
+      path: String(item.path || item.id || '').trim(),
+      createdAt: Number(item.createdAt || 0) || 0,
+      updatedAt: Number(item.updatedAt || item.createdAt || 0) || 0,
+    })).filter((item) => item.path);
+  } catch {
+    return [];
+  }
+}
+
+function writeSshKeyRegistry(records) {
+  const list = Array.isArray(records) ? records.slice() : [];
+  fs.writeFileSync(SSH_KEYS_FILE, `${JSON.stringify(list, null, 2)}\n`);
+  fs.chmodSync(SSH_KEYS_FILE, 0o600);
+}
+
+function normalizeSshKeyName(name) {
+  return String(name || '')
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+}
+
+function ensureSshKeysDir() {
+  fs.mkdirSync(SSH_KEYS_DIR, { recursive: true, mode: 0o700 });
+}
+
+function isSshKeyCandidate(name) {
+  const lower = String(name || '').toLowerCase();
+  if (!name || lower.endsWith('.pub')) return false;
+  if (['authorized_keys', 'known_hosts', 'known_hosts.old', 'config'].includes(lower)) return false;
+  if (lower.endsWith('.json') || lower.endsWith('.log') || lower.endsWith('.txt')) return false;
+  return true;
+}
+
+function readSshKeyFingerprint(pubPath) {
+  try {
+    return execFileSync('ssh-keygen', ['-lf', pubPath], { encoding: 'utf8' }).trim();
+  } catch {
+    return '';
+  }
+}
+
+function scanSshKeyFiles() {
+  const candidates = new Map();
+  const dirs = ['/root/.ssh', SSH_KEYS_DIR];
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue;
+    for (const name of fs.readdirSync(dir)) {
+      if (!isSshKeyCandidate(name)) continue;
+      const privatePath = path.join(dir, name);
+      const publicPath = `${privatePath}.pub`;
+      if (!fs.existsSync(privatePath) || !fs.existsSync(publicPath)) continue;
+      try {
+        const stat = fs.statSync(privatePath);
+        candidates.set(privatePath, {
+          path: privatePath,
+          publicPath,
+          name,
+          createdAt: stat.birthtimeMs || stat.mtimeMs || 0,
+          updatedAt: stat.mtimeMs || 0,
+        });
+      } catch {
+        // Ignore unreadable keys.
+      }
+    }
+  }
+  return Array.from(candidates.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function readSshKeys() {
+  const registry = readSshKeyRegistry();
+  const registryMap = new Map(registry.map((item) => [item.path, item]));
+  return scanSshKeyFiles().map((item) => {
+    const reg = registryMap.get(item.path) || {};
+    let publicKey = '';
+    try {
+      publicKey = fs.readFileSync(item.publicPath, 'utf8').trim();
+    } catch {
+      publicKey = '';
+    }
+    return {
+      id: item.path,
+      name: reg.name || item.name,
+      memo: reg.memo || '',
+      path: item.path,
+      publicPath: item.publicPath,
+      publicKey,
+      fingerprint: readSshKeyFingerprint(item.publicPath),
+      createdAt: reg.createdAt || item.createdAt || 0,
+      updatedAt: reg.updatedAt || item.updatedAt || 0,
+    };
+  });
+}
+
+function saveSshKeyMemo(payload) {
+  const pathId = String(payload?.id || '').trim();
+  if (!pathId) throw new Error('Missing SSH key id');
+  const memo = String(payload?.memo || '').trim();
+  const name = String(payload?.name || '').trim();
+  const records = readSshKeyRegistry();
+  const existingIndex = records.findIndex((item) => item.path === pathId);
+  const existing = existingIndex >= 0 ? records[existingIndex] : {};
+  const next = {
+    id: pathId,
+    path: pathId,
+    name: name || existing.name || path.basename(pathId),
+    memo,
+    createdAt: existing.createdAt || Date.now(),
+    updatedAt: Date.now(),
+  };
+  if (existingIndex >= 0) records[existingIndex] = next;
+  else records.push(next);
+  writeSshKeyRegistry(records);
+  return next;
+}
+
+function createSshKey(payload) {
+  ensureSshKeysDir();
+  const rawName = normalizeSshKeyName(payload?.name || 'github-key') || 'github-key';
+  const memo = String(payload?.memo || '').trim();
+  const comment = memo || rawName;
+  let base = path.join(SSH_KEYS_DIR, rawName);
+  let keyPath = base;
+  let suffix = 0;
+  while (fs.existsSync(keyPath) || fs.existsSync(`${keyPath}.pub`)) {
+    suffix += 1;
+    keyPath = `${base}-${suffix}`;
+  }
+  execFileSync('ssh-keygen', ['-t', 'ed25519', '-f', keyPath, '-N', '', '-C', comment], { stdio: 'pipe' });
+  fs.chmodSync(keyPath, 0o600);
+  const stat = fs.statSync(keyPath);
+  const record = {
+    id: keyPath,
+    path: keyPath,
+    name: path.basename(keyPath),
+    memo,
+    createdAt: stat.birthtimeMs || stat.mtimeMs || Date.now(),
+    updatedAt: stat.mtimeMs || Date.now(),
+  };
+  const records = readSshKeyRegistry();
+  records.push(record);
+  writeSshKeyRegistry(records);
+  return {
+    ...record,
+    publicPath: `${keyPath}.pub`,
+    publicKey: fs.readFileSync(`${keyPath}.pub`, 'utf8').trim(),
+    fingerprint: readSshKeyFingerprint(`${keyPath}.pub`),
+  };
 }
 
 function normalizeDbMachine(input, existing = {}) {
@@ -1099,6 +1262,284 @@ function renderDbMachinesPage() {
     });
 
     renderRows(currentMachines);
+  </script>
+</body>
+</html>`;
+}
+
+function renderSshKeyRows(keys) {
+  if (!keys.length) {
+    return '<tr><td colspan="6" class="muted">No SSH keys found on this machine.</td></tr>';
+  }
+  return keys.map((key) => {
+    const ref = escapeHtml(key.id || '');
+    return `
+      <tr>
+        <td><strong>${escapeHtml(key.name || path.basename(key.path || ''))}</strong></td>
+        <td>
+          <textarea data-key-memo="${ref}" rows="3" placeholder="Memo for this key">${escapeHtml(key.memo || '')}</textarea>
+        </td>
+        <td><code>${escapeHtml(key.path || '')}</code></td>
+        <td><code>${escapeHtml(key.fingerprint || 'n/a')}</code></td>
+        <td><code class="public-key">${escapeHtml(key.publicKey || '')}</code></td>
+        <td>
+          <div class="actions">
+            <button class="secondary" type="button" data-key-copy="${ref}">Copy public</button>
+            <button class="secondary" type="button" data-key-save="${ref}">Save memo</button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function renderSshKeysPage() {
+  const keys = readSshKeys();
+  const initialKeys = JSON.stringify(keys).replace(/</g, '\\u003c');
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SSH Keys</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font-family: Inter, system-ui, sans-serif; background: radial-gradient(circle at top, #11213d 0, #08111f 50%, #05070c 100%); color: #e5eef8; padding-top: 84px; }
+    header, main { max-width: 1600px; margin: 0 auto; padding: 24px; }
+    header { display: flex; justify-content: space-between; align-items: end; gap: 16px; }
+    h1, h2 { margin: 0 0 12px; }
+    .muted { color: #94a3b8; }
+    .panel { background: rgba(8, 15, 29, 0.88); border: 1px solid rgba(148,163,184,0.2); border-radius: 18px; padding: 20px; box-shadow: 0 12px 40px rgba(0,0,0,0.35); }
+    .grid { display: grid; gap: 16px; }
+    .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    label { display: grid; gap: 6px; font-size: 13px; color: #cbd5e1; }
+    input, textarea { width: 100%; box-sizing: border-box; background: #0b1220; color: #e5eef8; border: 1px solid #22304a; border-radius: 10px; padding: 10px 12px; }
+    textarea { resize: vertical; }
+    button, .btn { background: linear-gradient(180deg, #38bdf8, #0ea5e9); color: #00111d; border: 0; border-radius: 999px; padding: 10px 14px; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+    button.secondary, .btn.secondary { background: #162033; color: #dbeafe; border: 1px solid #2a3b59; }
+    button.danger, .btn.danger { background: linear-gradient(180deg, #f87171, #ef4444); color: #1c0202; }
+    button.ghost, .btn.ghost { background: transparent; color: #dbeafe; border: 1px solid #2a3b59; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; vertical-align: top; padding: 10px; border-bottom: 1px solid rgba(148,163,184,0.16); }
+    th { color: #93c5fd; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+    code { background: #0b1220; padding: 2px 6px; border-radius: 6px; word-break: break-all; white-space: pre-wrap; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .table-wrap { overflow: auto; }
+    .flash { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #0b1220; border: 1px solid #22304a; white-space: pre-wrap; }
+    .hinbit-brand {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      z-index: 80;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(8, 15, 29, 0.82);
+      border: 1px solid rgba(148,163,184,0.22);
+      box-shadow: 0 12px 32px rgba(0,0,0,0.25);
+      text-decoration: none;
+      color: #e5eef8;
+      backdrop-filter: blur(12px);
+    }
+    .hinbit-brand img {
+      width: 22px;
+      height: 22px;
+      display: block;
+      object-fit: contain;
+    }
+    .hinbit-brand span {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+    .public-key { display: block; max-width: 520px; }
+  </style>
+</head>
+<body>
+  <a class="hinbit-brand" href="https://hinbit.com" target="_blank" rel="noreferrer">
+    <img src="https://hinbit.com/hebrew_site/hinbit-logo-symbol.png" alt="Hinbit">
+    <span>Powered by Hinbit Development</span>
+  </a>
+  <header>
+    <div>
+      <h1>SSH Keys</h1>
+      <div class="muted">Existing keys on the machine with memos and new GitHub-ready key generation.</div>
+      <div class="small">${escapeHtml(String(keys.length))} keys found</div>
+    </div>
+    <div class="actions">
+      <a class="btn ghost" href="/manage/">Back to manage</a>
+      <a class="btn ghost" href="/phpmyadmin/">phpMyAdmin</a>
+      <button class="secondary" id="refreshBtn" type="button">Refresh</button>
+    </div>
+  </header>
+  <main class="grid" style="gap:20px">
+    <section class="panel">
+      <h2>Create SSH Key</h2>
+      <div class="grid two">
+        <label>Key name
+          <input id="keyName" placeholder="github-shaykid">
+        </label>
+        <label>Memo
+          <input id="keyMemo" placeholder="GitHub account or project note">
+        </label>
+      </div>
+      <div class="actions">
+        <button id="createBtn" type="button">Create key</button>
+      </div>
+      <div class="small">The public key can be copied from the table below and added to GitHub.</div>
+      <div id="createResult" class="flash" hidden></div>
+    </section>
+    <section class="panel">
+      <h2>Saved Keys</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Memo</th>
+              <th>Path</th>
+              <th>Fingerprint</th>
+              <th>Public key</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="keysBody">${renderSshKeyRows(keys)}</tbody>
+        </table>
+      </div>
+      <div id="listResult" class="flash" hidden></div>
+    </section>
+  </main>
+  <script>
+    const API = '/manage/api';
+    const keysBody = document.getElementById('keysBody');
+    const listResult = document.getElementById('listResult');
+    const createResult = document.getElementById('createResult');
+    const keyName = document.getElementById('keyName');
+    const keyMemo = document.getElementById('keyMemo');
+    const createBtn = document.getElementById('createBtn');
+    const refreshBtn = document.getElementById('refreshBtn');
+    let currentKeys = ${initialKeys};
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function showMessage(el, value, ok = true) {
+      el.hidden = false;
+      el.style.borderColor = ok ? '#1d4ed8' : '#7f1d1d';
+      el.textContent = value;
+    }
+
+    async function api(path, options = {}) {
+      const res = await fetch(\`\${API}\${path}\`, {
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        credentials: 'same-origin',
+        ...options,
+      });
+      const text = await res.text();
+      let data;
+      try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+      if (!res.ok) {
+        const message = data && typeof data === 'object' ? (data.error || data.message || text) : text;
+        throw new Error(message || \`Request failed: \${res.status}\`);
+      }
+      return data;
+    }
+
+    function renderRows(keys) {
+      keysBody.innerHTML = keys.length
+        ? keys.map((key) => \`
+          <tr>
+            <td><strong>\${escapeHtml(key.name || '')}</strong></td>
+            <td>
+              <textarea data-key-memo="\${escapeHtml(key.id || '')}" rows="3">\${escapeHtml(key.memo || '')}</textarea>
+            </td>
+            <td><code>\${escapeHtml(key.path || '')}</code></td>
+            <td><code>\${escapeHtml(key.fingerprint || 'n/a')}</code></td>
+            <td><code class="public-key">\${escapeHtml(key.publicKey || '')}</code></td>
+            <td>
+              <div class="actions">
+                <button class="secondary" data-key-copy="\${escapeHtml(key.id || '')}" type="button">Copy public</button>
+                <button class="secondary" data-key-save="\${escapeHtml(key.id || '')}" type="button">Save memo</button>
+              </div>
+            </td>
+          </tr>
+        \`).join('')
+        : '<tr><td colspan="6" class="muted">No SSH keys found on this machine.</td></tr>';
+    }
+
+    async function refresh() {
+      const data = await api('/ssh-keys');
+      currentKeys = data.keys || [];
+      renderRows(currentKeys);
+    }
+
+    async function createKey() {
+      const payload = {
+        name: keyName.value.trim(),
+        memo: keyMemo.value.trim(),
+      };
+      const res = await api('/ssh-keys', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      showMessage(createResult, res.message || 'SSH key created');
+      await refresh();
+      keyName.value = '';
+      keyMemo.value = '';
+    }
+
+    document.addEventListener('click', async (event) => {
+      const copyBtn = event.target.closest('button[data-key-copy]');
+      if (copyBtn) {
+        const key = currentKeys.find((item) => String(item.id) === String(copyBtn.dataset.keyCopy || ''));
+        if (!key || !key.publicKey) return;
+        await navigator.clipboard.writeText(key.publicKey);
+        showMessage(listResult, 'Public key copied');
+        return;
+      }
+      const saveBtn = event.target.closest('button[data-key-save]');
+      if (saveBtn) {
+        const key = currentKeys.find((item) => String(item.id) === String(saveBtn.dataset.keySave || ''));
+        if (!key) return;
+        const memoField = keysBody.querySelector(\`[data-key-memo="\${CSS.escape(String(key.id || ''))}"]\`);
+        const memo = memoField ? memoField.value : '';
+        const res = await api(\`/ssh-keys/\${encodeURIComponent(key.id)}\`, {
+          method: 'POST',
+          body: JSON.stringify({ memo }),
+        });
+        showMessage(listResult, res.message || 'Memo saved');
+        await refresh();
+      }
+    });
+
+    createBtn.addEventListener('click', async () => {
+      createBtn.disabled = true;
+      try {
+        await createKey();
+      } catch (error) {
+        showMessage(createResult, error.message, false);
+      } finally {
+        createBtn.disabled = false;
+      }
+    });
+
+    refreshBtn.addEventListener('click', async () => {
+      try {
+        await refresh();
+      } catch (error) {
+        showMessage(listResult, error.message, false);
+      }
+    });
+
+    renderRows(currentKeys);
   </script>
 </body>
 </html>`;
@@ -2670,6 +3111,15 @@ async function handleRequest(req, res) {
       return;
     }
 
+    if (req.method === 'GET' && (pathname === '/ssh-keys' || pathname === '/manage/ssh-keys')) {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(renderSshKeysPage());
+      return;
+    }
+
     if (req.method === 'GET' && (pathname === '/' || pathname === '/manage')) {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
@@ -2706,6 +3156,41 @@ async function handleRequest(req, res) {
         });
         return;
       }
+    }
+
+    if (pathname === '/api/ssh-keys') {
+      if (req.method === 'GET') {
+        sendJson(res, 200, { keys: readSshKeys() });
+        return;
+      }
+
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        const key = createSshKey(body || {});
+        sendJson(res, 200, {
+          ok: true,
+          message: `Created SSH key ${key.name}`,
+          key,
+          keys: readSshKeys(),
+        });
+        return;
+      }
+    }
+
+    const sshKeyMatch = pathname.match(/^\/api\/ssh-keys\/(.+)$/);
+    if (sshKeyMatch && req.method === 'POST') {
+      const keyId = decodeURIComponent(sshKeyMatch[1]);
+      const body = await readBody(req);
+      const memo = String(body.memo || '').trim();
+      const name = String(body.name || '').trim();
+      const updated = saveSshKeyMemo({ id: keyId, memo, name });
+      sendJson(res, 200, {
+        ok: true,
+        message: `Saved memo for ${updated.name}`,
+        key: updated,
+        keys: readSshKeys(),
+      });
+      return;
     }
 
     const dbMachineDeleteMatch = pathname.match(/^\/api\/db-machines\/(.+)$/);

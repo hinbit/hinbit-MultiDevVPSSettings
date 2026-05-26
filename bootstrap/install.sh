@@ -17,6 +17,8 @@ SYSTEM_PORTAL_WEBROOT="/var/www/system-portal"
 SYSTEM_DOMAIN_FILE="/etc/vps-system-domain"
 SYSTEM_ENV_FILE="/etc/vps-system.env"
 DB_MACHINES_FILE="/etc/vps-db-machines.json"
+SSH_KEYS_FILE="/etc/vps-ssh-keys.json"
+SSH_KEYS_DIR="/root/.ssh/vps-managed-keys"
 MANAGE_SERVICE="/etc/systemd/system/vps-manage.service"
 SSH_HARDEN_FILE="/etc/ssh/sshd_config.d/99-vps-bootstrap.conf"
 PHP_FPM_VERSION=""
@@ -323,6 +325,14 @@ EOF
 EOF
     chmod 0600 "${DB_MACHINES_FILE}"
   fi
+
+  if [[ ! -f "${SSH_KEYS_FILE}" ]]; then
+    cat > "${SSH_KEYS_FILE}" <<'EOF'
+[]
+EOF
+    chmod 0600 "${SSH_KEYS_FILE}"
+  fi
+  install -d -m 0700 "${SSH_KEYS_DIR}"
 
   if [[ -n "${SYSTEM_DOMAIN:-}" && ! -f "${SYSTEM_DOMAIN_FILE}" ]]; then
     printf '%s\n' "${SYSTEM_DOMAIN}" > "${SYSTEM_DOMAIN_FILE}"
@@ -640,6 +650,7 @@ cat > "\${SYSTEM_PORTAL_WEBROOT}/index.html" <<EOF2
     <h2>Admin</h2>
     <ul>
       <li><a href="/manage/">Manage projects</a></li>
+      <li><a href="/manage/ssh-keys/">Manage SSH Keys</a></li>
     </ul>
     <h2>DB Management</h2>
     <ul>

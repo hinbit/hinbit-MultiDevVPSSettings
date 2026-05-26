@@ -78,6 +78,7 @@ cat > "${SYSTEM_PORTAL_WEBROOT}/index.html" <<EOF
     <h2>Admin</h2>
     <ul>
       <li><a href="/manage/">Manage projects</a></li>
+      <li><a href="/manage/ssh-keys/">Manage SSH Keys</a></li>
     </ul>
     <h2>DB Management</h2>
     <ul>
