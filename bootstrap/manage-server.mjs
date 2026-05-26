@@ -445,6 +445,146 @@ function createSshKey(payload) {
   };
 }
 
+function deleteSshKey(keyId) {
+  const id = String(keyId || '').trim();
+  if (!id) throw new Error('Missing SSH key id');
+  const records = readSshKeyRegistry();
+  const nextRecords = records.filter((item) => String(item.path) !== id);
+  writeSshKeyRegistry(nextRecords);
+
+  try { fs.rmSync(id, { force: true }); } catch {}
+  try { fs.rmSync(`${id}.pub`, { force: true }); } catch {}
+
+  return { ok: true, id };
+}
+
+function safeArchiveName(input, fallback = 'ssh-key') {
+  return normalizeSshKeyName(input || fallback) || fallback;
+}
+
+function createSshKeysZip() {
+  const keys = readSshKeys();
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vps-ssh-zip-'));
+  const zipPath = path.join(tmpDir, 'ssh-keys.zip');
+  const manifest = keys.map((key, index) => ({
+    index,
+    id: key.id,
+    name: key.name || path.basename(key.path || `key-${index}`),
+    memo: key.memo || '',
+    path: key.path || '',
+    publicPath: key.publicPath || '',
+    archiveBase: safeArchiveName(key.name || path.basename(key.path || `key-${index}`), `ssh-key-${index + 1}`),
+  }));
+
+  runPython(
+    `
+import json, os, sys, zipfile
+zip_path = sys.argv[1]
+manifest = json.loads(sys.argv[2])
+with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+    zf.writestr('registry.json', json.dumps(manifest, indent=2) + '\\n')
+    for item in manifest:
+        priv = item.get('path') or ''
+        pub = item.get('publicPath') or ''
+        base = item.get('archiveBase') or 'ssh-key'
+        if priv and os.path.isfile(priv):
+            zf.write(priv, arcname=f'keys/{base}')
+        if pub and os.path.isfile(pub):
+            zf.write(pub, arcname=f'keys/{base}.pub')
+print(zip_path)
+`,
+    [zipPath, JSON.stringify(manifest)],
+  );
+
+  const data = fs.readFileSync(zipPath);
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  return data;
+}
+
+function replaceSshKeysZip(zipBuffer) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vps-ssh-import-'));
+  const zipPath = path.join(tmpDir, 'upload.zip');
+  const extractDir = path.join(tmpDir, 'extract');
+  fs.writeFileSync(zipPath, zipBuffer);
+  fs.mkdirSync(extractDir, { recursive: true });
+  runPython(
+    `
+import os, sys, zipfile
+zip_path = sys.argv[1]
+extract_dir = sys.argv[2]
+with zipfile.ZipFile(zip_path) as zf:
+    for info in zf.infolist():
+        name = info.filename.replace('\\\\', '/')
+        if not name or name.endswith('/'):
+            continue
+        if name == 'registry.json':
+            zf.extract(info, extract_dir)
+            continue
+        if not name.startswith('keys/'):
+            raise SystemExit(f'Invalid zip entry: {name}')
+        parts = name.split('/')
+        if len(parts) != 2:
+            raise SystemExit(f'Invalid zip entry: {name}')
+        if parts[1] not in ('',):
+            zf.extract(info, extract_dir)
+print(extract_dir)
+`,
+    [zipPath, extractDir],
+  );
+
+  const registryPath = path.join(extractDir, 'registry.json');
+  if (!fs.existsSync(registryPath)) {
+    throw new Error('Missing registry.json in SSH key zip');
+  }
+
+  const manifest = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
+  if (!Array.isArray(manifest)) {
+    throw new Error('Invalid SSH key registry in zip');
+  }
+
+  ensureSshKeysDir();
+  const imported = [];
+
+  for (const item of manifest) {
+    const base = safeArchiveName(item.archiveBase || item.name || path.basename(item.path || ''), 'ssh-key');
+    const privateSource = path.join(extractDir, 'keys', base);
+    const publicSource = path.join(extractDir, 'keys', `${base}.pub`);
+    if (!fs.existsSync(privateSource) || !fs.existsSync(publicSource)) {
+      continue;
+    }
+
+    let destBase = path.join(SSH_KEYS_DIR, base);
+    let suffix = 0;
+    while (fs.existsSync(destBase) || fs.existsSync(`${destBase}.pub`)) {
+      suffix += 1;
+      destBase = path.join(SSH_KEYS_DIR, `${base}-${suffix}`);
+    }
+
+    fs.copyFileSync(privateSource, destBase);
+    fs.copyFileSync(publicSource, `${destBase}.pub`);
+    fs.chmodSync(destBase, 0o600);
+    fs.chmodSync(`${destBase}.pub`, 0o644);
+    const stat = fs.statSync(destBase);
+    imported.push({
+      id: destBase,
+      path: destBase,
+      name: String(item.name || path.basename(destBase)),
+      memo: String(item.memo || ''),
+      createdAt: Number(item.createdAt || stat.birthtimeMs || stat.mtimeMs || Date.now()) || Date.now(),
+      updatedAt: Number(item.updatedAt || stat.mtimeMs || Date.now()) || Date.now(),
+    });
+  }
+
+  if (imported.length) {
+    const merged = readSshKeyRegistry().filter((item) => !String(item.path || '').startsWith(SSH_KEYS_DIR));
+    merged.push(...imported);
+    writeSshKeyRegistry(merged);
+  }
+
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  return imported.length;
+}
+
 function normalizeDbMachine(input, existing = {}) {
   const name = String(input?.name || input?.label || existing.name || '').trim();
   const host = String(input?.host || existing.host || '').trim();
@@ -1275,7 +1415,9 @@ function renderSshKeyRows(keys) {
     const ref = escapeHtml(key.id || '');
     return `
       <tr>
-        <td><strong>${escapeHtml(key.name || path.basename(key.path || ''))}</strong></td>
+        <td>
+          <input data-key-name="${ref}" value="${escapeHtml(key.name || path.basename(key.path || ''))}" placeholder="Label">
+        </td>
         <td>
           <textarea data-key-memo="${ref}" rows="3" placeholder="Memo for this key">${escapeHtml(key.memo || '')}</textarea>
         </td>
@@ -1286,6 +1428,7 @@ function renderSshKeyRows(keys) {
           <div class="actions">
             <button class="secondary" type="button" data-key-copy="${ref}">Copy public</button>
             <button class="secondary" type="button" data-key-save="${ref}">Save memo</button>
+            <button class="danger" type="button" data-key-delete="${ref}">Delete</button>
           </div>
         </td>
       </tr>
@@ -1326,6 +1469,9 @@ function renderSshKeysPage() {
     .actions { display: flex; flex-wrap: wrap; gap: 8px; }
     .table-wrap { overflow: auto; }
     .flash { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #0b1220; border: 1px solid #22304a; white-space: pre-wrap; }
+    .top-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .file-button { position: relative; overflow: hidden; }
+    .file-button input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
     .hinbit-brand {
       position: fixed;
       top: 16px;
@@ -1386,8 +1532,14 @@ function renderSshKeysPage() {
           <input id="keyMemo" placeholder="GitHub account or project note">
         </label>
       </div>
-      <div class="actions">
+      <div class="top-actions">
         <button id="createBtn" type="button">Create key</button>
+        <a class="btn secondary" id="exportBtn" href="/manage/api/ssh-keys/export">Export zip</a>
+        <label class="btn ghost file-button" for="importFile">
+          Import zip
+          <input id="importFile" type="file" accept=".zip">
+        </label>
+        <button id="importBtn" class="secondary" type="button">Upload zip</button>
       </div>
       <div class="small">The public key can be copied from the table below and added to GitHub.</div>
       <div id="createResult" class="flash" hidden></div>
@@ -1420,6 +1572,9 @@ function renderSshKeysPage() {
     const keyName = document.getElementById('keyName');
     const keyMemo = document.getElementById('keyMemo');
     const createBtn = document.getElementById('createBtn');
+    const importBtn = document.getElementById('importBtn');
+    const importFile = document.getElementById('importFile');
+    const exportBtn = document.getElementById('exportBtn');
     const refreshBtn = document.getElementById('refreshBtn');
     let currentKeys = ${initialKeys};
 
@@ -1496,6 +1651,29 @@ function renderSshKeysPage() {
       keyMemo.value = '';
     }
 
+    async function importKeys() {
+      const file = importFile.files && importFile.files[0];
+      if (!file) {
+        throw new Error('Choose a zip file first');
+      }
+      const res = await fetch(\`\${API}/ssh-keys/import\`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/zip' },
+        credentials: 'same-origin',
+        body: file,
+      });
+      const text = await res.text();
+      let data;
+      try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+      if (!res.ok) {
+        const message = data && typeof data === 'object' ? (data.error || data.message || text) : text;
+        throw new Error(message || \`Import failed: \${res.status}\`);
+      }
+      showMessage(createResult, data.message || 'SSH key registry imported');
+      await refresh();
+      importFile.value = '';
+    }
+
     document.addEventListener('click', async (event) => {
       const copyBtn = event.target.closest('button[data-key-copy]');
       if (copyBtn) {
@@ -1510,12 +1688,26 @@ function renderSshKeysPage() {
         const key = currentKeys.find((item) => String(item.id) === String(saveBtn.dataset.keySave || ''));
         if (!key) return;
         const memoField = keysBody.querySelector(\`[data-key-memo="\${CSS.escape(String(key.id || ''))}"]\`);
+        const nameField = keysBody.querySelector(\`[data-key-name="\${CSS.escape(String(key.id || ''))}"]\`);
         const memo = memoField ? memoField.value : '';
+        const name = nameField ? nameField.value : '';
         const res = await api(\`/ssh-keys/\${encodeURIComponent(key.id)}\`, {
           method: 'POST',
-          body: JSON.stringify({ memo }),
+          body: JSON.stringify({ memo, name }),
         });
         showMessage(listResult, res.message || 'Memo saved');
+        await refresh();
+        return;
+      }
+      const deleteBtn = event.target.closest('button[data-key-delete]');
+      if (deleteBtn) {
+        const key = currentKeys.find((item) => String(item.id) === String(deleteBtn.dataset.keyDelete || ''));
+        if (!key) return;
+        if (!confirm('Delete SSH key ' + (key.name || key.path || '') + '?')) return;
+        const res = await api(\`/ssh-keys/\${encodeURIComponent(key.id)}\`, {
+          method: 'DELETE',
+        });
+        showMessage(listResult, res.message || 'SSH key deleted');
         await refresh();
       }
     });
@@ -1528,6 +1720,17 @@ function renderSshKeysPage() {
         showMessage(createResult, error.message, false);
       } finally {
         createBtn.disabled = false;
+      }
+    });
+
+    importBtn.addEventListener('click', async () => {
+      importBtn.disabled = true;
+      try {
+        await importKeys();
+      } catch (error) {
+        showMessage(createResult, error.message, false);
+      } finally {
+        importBtn.disabled = false;
       }
     });
 
@@ -3177,7 +3380,45 @@ async function handleRequest(req, res) {
       }
     }
 
+    if (pathname === '/api/ssh-keys/export' && (req.method === 'GET' || req.method === 'HEAD')) {
+      const zipBuffer = createSshKeysZip();
+      res.writeHead(200, {
+        'Content-Type': 'application/zip',
+        'Content-Disposition': 'attachment; filename="ssh-keys.zip"',
+      });
+      if (req.method === 'HEAD') {
+        res.end();
+        return;
+      }
+      res.end(zipBuffer);
+      return;
+    }
+
+    if (pathname === '/api/ssh-keys/import' && req.method === 'POST') {
+      const body = await readBinaryBody(req);
+      if (!body || !body.length) {
+        throw new Error('Missing zip upload body');
+      }
+      const count = replaceSshKeysZip(body);
+      sendJson(res, 200, {
+        ok: true,
+        message: `Imported ${count} SSH keys`,
+        keys: readSshKeys(),
+      });
+      return;
+    }
+
     const sshKeyMatch = pathname.match(/^\/api\/ssh-keys\/(.+)$/);
+    if (sshKeyMatch && req.method === 'DELETE') {
+      const keyId = decodeURIComponent(sshKeyMatch[1]);
+      deleteSshKey(keyId);
+      sendJson(res, 200, {
+        ok: true,
+        message: 'SSH key deleted',
+        keys: readSshKeys(),
+      });
+      return;
+    }
     if (sshKeyMatch && req.method === 'POST') {
       const keyId = decodeURIComponent(sshKeyMatch[1]);
       const body = await readBody(req);
