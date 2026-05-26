@@ -549,6 +549,9 @@ function renderPage() {
     .kv-list { display: grid; gap: 10px; }
     .kv-item { display: grid; gap: 4px; padding: 12px; border: 1px solid #22304a; border-radius: 12px; background: #0b1220; }
     .kv-item code { white-space: pre-wrap; word-break: break-word; }
+    .vault-table code { white-space: nowrap; }
+    .copy-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .copy-actions .btn, .copy-actions button { padding: 8px 10px; font-size: 12px; }
     .hinbit-brand {
       position: fixed;
       top: 16px;
@@ -632,6 +635,27 @@ function renderPage() {
       <div class="space"></div>
       <button id="installBtn" type="button">Install project</button>
       <div id="installResult" class="flash" hidden></div>
+    </section>
+
+    <section class="panel">
+      <h2>DB Vault</h2>
+      <div class="muted">Central view of project database credentials with copy actions.</div>
+      <div class="table-wrap">
+        <table class="vault-table">
+          <thead>
+            <tr>
+              <th>Project</th>
+              <th>DB Name</th>
+              <th>DB User</th>
+              <th>DB Password</th>
+              <th>Allowed IPs</th>
+              <th>Copy</th>
+            </tr>
+          </thead>
+          <tbody id="mysqlVaultBody"></tbody>
+        </table>
+      </div>
+      <div id="vaultResult" class="flash" hidden></div>
     </section>
 
     <section class="panel">
@@ -768,6 +792,8 @@ function renderPage() {
     const projectsBody = document.getElementById('projectsBody');
     const listResult = document.getElementById('listResult');
     const installResult = document.getElementById('installResult');
+    const mysqlVaultBody = document.getElementById('mysqlVaultBody');
+    const vaultResult = document.getElementById('vaultResult');
     const systemStats = document.getElementById('systemStats');
     const scriptsPanel = document.getElementById('scriptsPanel');
     const scriptsTitle = document.getElementById('scriptsTitle');
@@ -823,6 +849,7 @@ function renderPage() {
     let currentEnvRef = '';
     let currentLogRef = '';
     let currentLogType = 'out';
+    let currentProjects = [];
     let progressAbort = null;
     let logTimer = null;
     let modalLockCount = 0;
@@ -918,7 +945,9 @@ function renderPage() {
       ]);
       if (dataResult.status !== 'fulfilled') throw dataResult.reason;
       const data = dataResult.value;
-      renderProjects(data.projects || []);
+      currentProjects = data.projects || [];
+      renderMysqlVault(currentProjects);
+      renderProjects(currentProjects);
       refreshSystemStats(statsResult.status === 'fulfilled' ? statsResult.value.system || null : null);
     }
 
@@ -928,6 +957,68 @@ function renderPage() {
       if (value.includes('launch')) return 'status-launching';
       if (value.includes('error')) return 'status-errored';
       return 'status-stopped';
+    }
+
+    function getProjectDbValue(project, kind) {
+      if (!project) return '';
+      if (kind === 'name') return project.dbName || '';
+      if (kind === 'user') return project.dbUser || '';
+      if (kind === 'password') return project.dbPassword || '';
+      if (kind === 'allowedIps') return project.mysqlAllowedIps || '';
+      return '';
+    }
+
+    function renderMysqlVault(projects) {
+      if (!projects.length) {
+        mysqlVaultBody.innerHTML = '<tr><td colspan="6" class="muted">No project database credentials found.</td></tr>';
+        return;
+      }
+      mysqlVaultBody.innerHTML = projects.map((project) => {
+        const ref = encodeURIComponent(project.repo || project.slug || '');
+        const dbName = project.dbName || 'n/a';
+        const dbUser = project.dbUser || 'n/a';
+        const dbPassword = project.dbPassword || 'n/a';
+        const allowedIps = project.mysqlAllowedIps || 'local only';
+        const copyDisabled = (!project.dbUser && !project.dbPassword && !project.mysqlAllowedIps);
+        return \`
+          <tr>
+            <td>
+              <div><strong>\${escapeHtml(project.repo || project.slug || '')}</strong></div>
+              <div class="small">\${escapeHtml(project.domain || '')}</div>
+            </td>
+            <td><code>\${escapeHtml(dbName)}</code></td>
+            <td><code>\${escapeHtml(dbUser)}</code></td>
+            <td><code>\${escapeHtml(dbPassword)}</code></td>
+            <td class="small">\${escapeHtml(allowedIps)}</td>
+            <td>
+              <div class="copy-actions">
+                <button class="secondary" type="button" data-copy-kind="user" data-ref="\${ref}" \${copyDisabled ? 'disabled' : ''}>User</button>
+                <button class="secondary" type="button" data-copy-kind="password" data-ref="\${ref}" \${copyDisabled ? 'disabled' : ''}>Pass</button>
+                <button class="ghost" type="button" data-copy-kind="all" data-ref="\${ref}" \${copyDisabled ? 'disabled' : ''}>All</button>
+              </div>
+            </td>
+          </tr>
+        \`;
+      }).join('');
+    }
+
+    async function copyToClipboard(text) {
+      const value = String(text || '');
+      if (!value) throw new Error('Nothing to copy');
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(value);
+        return;
+      }
+      const area = document.createElement('textarea');
+      area.value = value;
+      area.setAttribute('readonly', 'readonly');
+      area.style.position = 'fixed';
+      area.style.left = '-9999px';
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(area);
+      if (!ok) throw new Error('Clipboard copy failed');
     }
 
     function rowActions(project) {
@@ -1566,6 +1657,42 @@ function renderPage() {
         mysqlPanel.hidden = false;
       } finally {
         mysqlSaveBtn.disabled = false;
+      }
+    });
+
+    document.addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-copy-kind]');
+      if (!btn) return;
+      const ref = btn.dataset.ref || '';
+      const kind = btn.dataset.copyKind || '';
+      const project = currentProjects.find((item) => encodeURIComponent(item.repo || item.slug || '') === ref);
+      if (!project) return;
+      const user = getProjectDbValue(project, 'user');
+      const password = getProjectDbValue(project, 'password');
+      const dbName = getProjectDbValue(project, 'name');
+      const allowedIps = getProjectDbValue(project, 'allowedIps');
+      let value = '';
+      if (kind === 'user') {
+        value = user;
+      } else if (kind === 'password') {
+        value = password;
+      } else {
+        value = [
+          'project=' + (project.repo || project.slug || ''),
+          'db=' + dbName,
+          'user=' + user,
+          'password=' + password,
+          'allowed_ips=' + (allowedIps || 'local only'),
+        ].join('\n');
+      }
+      btn.disabled = true;
+      try {
+        await copyToClipboard(value);
+        showMessage(vaultResult, kind === 'all' ? 'Copied project DB bundle' : 'Copied ' + kind);
+      } catch (error) {
+        showMessage(vaultResult, error.message, false);
+      } finally {
+        btn.disabled = false;
       }
     });
 
