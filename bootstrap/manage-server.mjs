@@ -1734,7 +1734,7 @@ function renderPage() {
           'user=' + user,
           'password=' + password,
           'allowed_ips=' + (allowedIps || 'local only'),
-        ].join('\n');
+        ].join('\\n');
       }
       btn.disabled = true;
       try {
