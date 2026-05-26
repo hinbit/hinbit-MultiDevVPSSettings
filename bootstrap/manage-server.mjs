@@ -2177,6 +2177,10 @@ async function handleRequest(req, res) {
 
 const server = http.createServer((req, res) => {
   handleRequest(req, res).catch((error) => {
+    if (res.headersSent || res.writableEnded) {
+      console.error('[manage] late request failure', error);
+      return;
+    }
     sendJson(res, 500, { error: error.message || String(error) });
   });
 });
