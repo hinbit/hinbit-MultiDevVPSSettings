@@ -1350,7 +1350,6 @@ function renderPage() {
               <th>SSL</th>
               <th>Branch</th>
               <th>Details</th>
-              <th>Actions</th>
             </tr>
           </thead>
           <tbody id="projectsBody"></tbody>
@@ -1676,6 +1675,7 @@ function renderPage() {
       const ref = encodeURIComponent(project.repo);
       return \`
         <div class="actions">
+          \${project.domain ? '<a class="btn ghost" href="https://' + escapeHtml(project.domain) + '/" target="_blank" rel="noreferrer">Open</a>' : ''}
           <button class="secondary" data-action="update" data-ref="\${ref}">Pull</button>
           <button class="secondary" data-action="restart" data-ref="\${ref}">Restart</button>
           <button class="secondary" data-action="stop" data-ref="\${ref}">Stop</button>
@@ -1701,7 +1701,7 @@ function renderPage() {
 
     function renderProjects(projects) {
       if (!projects.length) {
-        projectsBody.innerHTML = '<tr><td colspan="12" class="muted">No projects found.</td></tr>';
+        projectsBody.innerHTML = '<tr><td colspan="11" class="muted">No projects found.</td></tr>';
         return;
       }
       projectsBody.innerHTML = projects.map((project) => \`
@@ -1737,7 +1737,9 @@ function renderPage() {
             ssh: \${escapeHtml(project.sshUser || 'n/a')}<br>
             mysql ips: \${escapeHtml(project.mysqlAllowedIps || 'local only')}
           </td>
-          <td>\${rowActions(project)}</td>
+        </tr>
+        <tr class="project-actions-row">
+          <td colspan="11">\${rowActions(project)}</td>
         </tr>
       \`).join('');
     }
