@@ -309,8 +309,7 @@ function getPm2List() {
   }
 }
 
-function projectView(options = {}) {
-  const includeMetrics = options.includeMetrics !== false;
+function projectView() {
   const pm2List = getPm2List();
   const byName = new Map();
   for (const proc of pm2List) {
@@ -322,7 +321,7 @@ function projectView(options = {}) {
     const proc = byName.get(project.PM2_NAME || project.PROJECT_SLUG);
     const env = proc?.pm2_env || {};
     const { db } = pickDbDetails(project.APP_DIR || '');
-    const disk = includeMetrics ? readProjectDiskUsage(project.APP_DIR || '') : 0;
+    const disk = readProjectDiskUsage(project.APP_DIR || '');
     const ssl = readProjectSslStatus(project);
     return {
       repo: project.REPO_REF || '',
@@ -357,73 +356,6 @@ function projectView(options = {}) {
       cpu: proc?.monit?.cpu ?? proc?.pm2_env?.monit?.cpu ?? 0,
     };
   });
-}
-
-function renderProjectActions(project) {
-  const ref = encodeURIComponent(project.repo || project.slug || '');
-  return `
-        <div class="actions">
-          <button class="secondary" data-action="update" data-ref="${ref}">Pull</button>
-          <button class="secondary" data-action="restart" data-ref="${ref}">Restart</button>
-          <button class="secondary" data-action="stop" data-ref="${ref}">Stop</button>
-          <button class="danger" data-action="uninstall" data-ref="${ref}">Kill</button>
-          <button class="secondary" data-action="db" data-ref="${ref}">DB</button>
-          <button class="secondary" data-action="mysql" data-ref="${ref}">MySQL</button>
-          <button class="secondary" data-action="env" data-ref="${ref}">Env</button>
-          <button class="secondary" data-action="scripts" data-ref="${ref}">Scripts</button>
-          <button class="secondary" data-action="log" data-ref="${ref}">Log</button>
-          <span class="pill ${project.protected ? 'good' : 'neutral'}">${project.protected ? 'protected' : 'open'}</span>
-        </div>
-        <div class="space"></div>
-        <div class="stack">
-          <input data-password-for="${ref}" type="password" placeholder="Project password">
-          <div class="actions">
-            <button class="secondary" data-action="protect" data-ref="${ref}">Set password</button>
-            <button class="ghost" data-action="clear-password" data-ref="${ref}">Clear password</button>
-          </div>
-        </div>
-      `;
-}
-
-function renderProjectRows(projects) {
-  if (!projects.length) {
-    return '<tr><td colspan="11" class="muted">No projects found.</td></tr>';
-  }
-  return projects.map((project) => `
-        <tr>
-          <td>
-            <div><strong>${escapeHtml(project.repo || project.slug || '')}</strong></div>
-            <div class="small">${escapeHtml(project.path || '')}</div>
-          </td>
-          <td>
-            <div>${project.domain ? `<a href="https://${escapeHtml(project.domain)}/" target="_blank" rel="noreferrer">${escapeHtml(project.domain)}</a>` : '<span class="muted">n/a</span>'}</div>
-            <div class="small">${project.https === 'yes' ? 'HTTPS' : 'HTTP only'} · <span class="pill ${escapeHtml(project.sslStatusClass || 'neutral')}">${escapeHtml(project.sslStatus || 'n/a')}</span></div>
-          </td>
-          <td>
-            <div><code>${escapeHtml(project.pm2 || '')}</code></div>
-            <div class="small">${escapeHtml(project.scriptPath || '')}</div>
-          </td>
-          <td>${escapeHtml(project.port || '')}</td>
-          <td>${escapeHtml(formatBytes(project.memory || 0))}</td>
-          <td>${escapeHtml(project.diskHuman || formatBytes(project.disk || 0))}</td>
-          <td><span class="${statusClass(project.status)}">${escapeHtml(project.status || '')}</span></td>
-          <td>${project.protected ? 'yes' : 'no'}</td>
-          <td><span class="pill ${escapeHtml(project.sslStatusClass || 'neutral')}">${escapeHtml(project.sslStatus || 'n/a')}</span></td>
-          <td>${escapeHtml(project.branch || '')}</td>
-          <td class="small">
-            kind: ${escapeHtml(project.kind || '')}<br>
-            type: ${escapeHtml(project.type || '')}<br>
-            pm: ${escapeHtml(project.packageManager || '')}<br>
-            restarts: ${escapeHtml(String(project.restarts ?? 0))}<br>
-            uptime: ${escapeHtml(fmtTime(project.uptime))}<br>
-            env: ${escapeHtml(project.nodeEnv || '')}<br>
-            ram: ${escapeHtml(project.memory ? formatBytes(project.memory) : '0 B')}<br>
-            disk: ${escapeHtml(project.diskHuman || formatBytes(project.disk || 0))}<br>
-            mysql ips: ${escapeHtml(project.mysqlAllowedIps || 'local only')}
-          </td>
-          <td>${renderProjectActions(project)}</td>
-        </tr>
-      `).join('');
 }
 
 function runProjectCtl(args, input = null) {
@@ -578,7 +510,6 @@ function escapeHtml(value) {
 }
 
 function renderPage() {
-  const initialProjects = projectView({ includeMetrics: false });
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -792,7 +723,7 @@ function renderPage() {
               <th>Actions</th>
             </tr>
           </thead>
-          <tbody id="projectsBody">${renderProjectRows(initialProjects)}</tbody>
+          <tbody id="projectsBody"></tbody>
         </table>
       </div>
       <div id="listResult" class="flash" hidden></div>
