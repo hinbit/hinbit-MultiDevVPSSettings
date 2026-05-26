@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 const META_DIR = '/etc/vps-projects';
 const AUTH_DIR = '/etc/nginx/project-auth';
 const SYSTEM_ENV_FILE = '/etc/vps-system.env';
+const DB_MACHINES_FILE = '/etc/vps-db-machines.json';
 const PROJECTCTL = '/usr/local/bin/projectctl';
 const PM2 = 'pm2';
 const BASIC_USER = 'manage';
@@ -217,6 +218,83 @@ function readMysqlAccounts(dbUser) {
   } catch {
     return [];
   }
+}
+
+function readDbMachines() {
+  try {
+    if (!fs.existsSync(DB_MACHINES_FILE)) return [];
+    const data = JSON.parse(fs.readFileSync(DB_MACHINES_FILE, 'utf8'));
+    if (!Array.isArray(data)) return [];
+    return data.map((machine, index) => ({
+      id: String(machine.id || `${Date.now().toString(36)}-${index}`),
+      name: String(machine.name || machine.label || '').trim(),
+      host: String(machine.host || '').trim(),
+      rootUser: String(machine.rootUser || machine.user || '').trim(),
+      rootPassword: String(machine.rootPassword || machine.password || '').trim(),
+      port: String(machine.port || '3306').trim() || '3306',
+      notes: String(machine.notes || '').trim(),
+    })).filter((machine) => machine.name || machine.host || machine.rootUser || machine.rootPassword);
+  } catch {
+    return [];
+  }
+}
+
+function writeDbMachines(machines) {
+  fs.writeFileSync(DB_MACHINES_FILE, `${JSON.stringify(machines, null, 2)}\n`);
+  fs.chmodSync(DB_MACHINES_FILE, 0o600);
+}
+
+function normalizeDbMachine(input, existing = {}) {
+  const name = String(input?.name || input?.label || existing.name || '').trim();
+  const host = String(input?.host || existing.host || '').trim();
+  const rootUser = String(input?.rootUser || input?.user || existing.rootUser || '').trim();
+  const rootPassword = String(input?.rootPassword || input?.password || existing.rootPassword || '').trim();
+  const notes = String(input?.notes || existing.notes || '').trim();
+  let port = String(input?.port || existing.port || '3306').trim() || '3306';
+
+  if (!name) throw new Error('DB machine name is required');
+  if (!host) throw new Error('DB machine host is required');
+  if (!rootUser) throw new Error('DB root user is required');
+  if (!rootPassword) throw new Error('DB root password is required');
+  if (!/^[A-Za-z0-9._:-]+$/.test(host)) throw new Error(`Invalid DB machine host: ${host}`);
+  if (!/^[0-9]+$/.test(port)) {
+    port = '3306';
+  }
+  const portNum = Number(port);
+  if (!Number.isFinite(portNum) || portNum < 1 || portNum > 65535) {
+    throw new Error(`Invalid DB port: ${port}`);
+  }
+
+  return {
+    id: String(existing.id || input?.id || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`),
+    name,
+    host,
+    rootUser,
+    rootPassword,
+    port: String(portNum),
+    notes,
+  };
+}
+
+function saveDbMachine(payload) {
+  const machines = readDbMachines();
+  const existingIndex = machines.findIndex((machine) => machine.id === String(payload?.id || ''));
+  const existing = existingIndex >= 0 ? machines[existingIndex] : {};
+  const normalized = normalizeDbMachine(payload, existing);
+  if (existingIndex >= 0) {
+    machines[existingIndex] = normalized;
+  } else {
+    machines.push(normalized);
+  }
+  machines.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  writeDbMachines(machines);
+  return normalized;
+}
+
+function deleteDbMachine(id) {
+  const machines = readDbMachines();
+  const next = machines.filter((machine) => machine.id !== String(id || ''));
+  writeDbMachines(next);
 }
 
 function runPython(script, args = []) {
@@ -605,6 +683,328 @@ function renderVaultPage() {
         refreshBtn.disabled = false;
       }
     });
+  </script>
+</body>
+</html>`;
+}
+
+function renderDbMachineRows(machines) {
+  if (!machines.length) {
+    return '<tr><td colspan="6" class="muted">No DB machines saved yet.</td></tr>';
+  }
+  return machines.map((machine) => {
+    const ref = escapeHtml(machine.id || '');
+    return `
+      <tr>
+        <td>
+          <div><strong>${escapeHtml(machine.name || '')}</strong></div>
+          <div class="small">${escapeHtml(machine.notes || '')}</div>
+        </td>
+        <td><code>${escapeHtml(machine.host || '')}</code></td>
+        <td><code>${escapeHtml(machine.rootUser || '')}</code></td>
+        <td><code>${escapeHtml(machine.rootPassword || '')}</code></td>
+        <td><code>${escapeHtml(machine.port || '3306')}</code></td>
+        <td>
+          <div class="copy-actions">
+            <button class="secondary" type="button" data-machine-edit="${ref}">Edit</button>
+            <button class="danger" type="button" data-machine-delete="${ref}">Delete</button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function renderDbMachinesPage() {
+  const machines = readDbMachines();
+  const initialMachines = JSON.stringify(machines).replace(/</g, '\\u003c');
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DB Machines</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font-family: Inter, system-ui, sans-serif; background: radial-gradient(circle at top, #11213d 0, #08111f 50%, #05070c 100%); color: #e5eef8; padding-top: 84px; }
+    header, main { max-width: 1400px; margin: 0 auto; padding: 24px; }
+    header { display: flex; justify-content: space-between; align-items: end; gap: 16px; }
+    h1, h2 { margin: 0 0 12px; }
+    .muted { color: #94a3b8; }
+    .panel { background: rgba(8, 15, 29, 0.88); border: 1px solid rgba(148,163,184,0.2); border-radius: 18px; padding: 20px; box-shadow: 0 12px 40px rgba(0,0,0,0.35); }
+    .grid { display: grid; gap: 16px; }
+    .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    label { display: grid; gap: 6px; font-size: 13px; color: #cbd5e1; }
+    input, textarea { width: 100%; box-sizing: border-box; background: #0b1220; color: #e5eef8; border: 1px solid #22304a; border-radius: 10px; padding: 10px 12px; }
+    textarea { min-height: 96px; resize: vertical; }
+    button, .btn { background: linear-gradient(180deg, #38bdf8, #0ea5e9); color: #00111d; border: 0; border-radius: 999px; padding: 10px 14px; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+    button.secondary, .btn.secondary { background: #162033; color: #dbeafe; border: 1px solid #2a3b59; }
+    button.danger, .btn.danger { background: linear-gradient(180deg, #f87171, #ef4444); color: #1c0202; }
+    button.ghost, .btn.ghost { background: transparent; color: #dbeafe; border: 1px solid #2a3b59; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; vertical-align: top; padding: 10px; border-bottom: 1px solid rgba(148,163,184,0.16); }
+    th { color: #93c5fd; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+    code { background: #0b1220; padding: 2px 6px; border-radius: 6px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .small { font-size: 12px; color: #94a3b8; }
+    .table-wrap { overflow: auto; }
+    .flash { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #0b1220; border: 1px solid #22304a; white-space: pre-wrap; }
+    .hinbit-brand {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      z-index: 80;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(8, 15, 29, 0.82);
+      border: 1px solid rgba(148,163,184,0.22);
+      box-shadow: 0 12px 32px rgba(0,0,0,0.25);
+      text-decoration: none;
+      color: #e5eef8;
+      backdrop-filter: blur(12px);
+    }
+    .hinbit-brand img {
+      width: 22px;
+      height: 22px;
+      display: block;
+      object-fit: contain;
+    }
+    .hinbit-brand span {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <a class="hinbit-brand" href="https://hinbit.com" target="_blank" rel="noreferrer">
+    <img src="https://hinbit.com/hebrew_site/hinbit-logo-symbol.png" alt="Hinbit">
+    <span>Powered by Hinbit Development</span>
+  </a>
+  <header>
+    <div>
+      <h1>DB Machines</h1>
+      <div class="muted">Registry of DB machines, root credentials, and default ports.</div>
+      <div class="small">${escapeHtml(String(machines.length))} machines saved</div>
+    </div>
+    <div class="actions">
+      <a class="btn ghost" href="/manage/">Back to manage</a>
+      <a class="btn ghost" href="/phpmyadmin/">phpMyAdmin</a>
+      <button class="secondary" id="refreshBtn" type="button">Refresh</button>
+    </div>
+  </header>
+  <main class="grid" style="gap:20px">
+    <section class="panel">
+      <h2 id="formTitle">Add DB machine</h2>
+      <div class="grid two">
+        <label>Machine name
+          <input id="machineName" placeholder="Primary DB">
+        </label>
+        <label>DB host
+          <input id="machineHost" placeholder="localhost, 10.0.0.5, db.example.com">
+        </label>
+        <label>DB root user
+          <input id="machineRootUser" placeholder="root">
+        </label>
+        <label>DB root password
+          <input id="machineRootPassword" type="password" placeholder="password">
+        </label>
+        <label>DB port
+          <input id="machinePort" value="3306" placeholder="3306">
+        </label>
+        <label>Notes
+          <textarea id="machineNotes" placeholder="Optional notes"></textarea>
+        </label>
+      </div>
+      <div class="actions">
+        <button id="saveBtn" type="button">Save machine</button>
+        <button id="clearBtn" class="ghost" type="button">Clear form</button>
+      </div>
+      <input id="machineId" type="hidden">
+      <div id="formResult" class="flash" hidden></div>
+    </section>
+    <section class="panel">
+      <h2>Saved Machines</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Host</th>
+              <th>Root user</th>
+              <th>Root password</th>
+              <th>Port</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="machinesBody">${renderDbMachineRows(machines)}</tbody>
+        </table>
+      </div>
+      <div id="listResult" class="flash" hidden></div>
+    </section>
+  </main>
+  <script>
+    const API = '/manage/api';
+    const machinesBody = document.getElementById('machinesBody');
+    const listResult = document.getElementById('listResult');
+    const formResult = document.getElementById('formResult');
+    const formTitle = document.getElementById('formTitle');
+    const machineId = document.getElementById('machineId');
+    const machineName = document.getElementById('machineName');
+    const machineHost = document.getElementById('machineHost');
+    const machineRootUser = document.getElementById('machineRootUser');
+    const machineRootPassword = document.getElementById('machineRootPassword');
+    const machinePort = document.getElementById('machinePort');
+    const machineNotes = document.getElementById('machineNotes');
+    const saveBtn = document.getElementById('saveBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const refreshBtn = document.getElementById('refreshBtn');
+    let currentMachines = ${initialMachines};
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function showMessage(el, value, ok = true) {
+      el.hidden = false;
+      el.style.borderColor = ok ? '#1d4ed8' : '#7f1d1d';
+      el.textContent = value;
+    }
+
+    async function api(path, options = {}) {
+      const res = await fetch(\`\${API}\${path}\`, {
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        credentials: 'same-origin',
+        ...options,
+      });
+      const text = await res.text();
+      let data;
+      try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+      if (!res.ok) {
+        const message = data && typeof data === 'object' ? (data.error || data.message || text) : text;
+        throw new Error(message || \`Request failed: \${res.status}\`);
+      }
+      return data;
+    }
+
+    function renderRows(machines) {
+      machinesBody.innerHTML = machines.length
+        ? machines.map((machine) => \`
+          <tr>
+            <td>
+              <div><strong>\${escapeHtml(machine.name || '')}</strong></div>
+              <div class="small">\${escapeHtml(machine.notes || '')}</div>
+            </td>
+            <td><code>\${escapeHtml(machine.host || '')}</code></td>
+            <td><code>\${escapeHtml(machine.rootUser || '')}</code></td>
+            <td><code>\${escapeHtml(machine.rootPassword || '')}</code></td>
+            <td><code>\${escapeHtml(machine.port || '3306')}</code></td>
+            <td>
+              <div class="actions">
+                <button class="secondary" data-machine-edit="\${escapeHtml(machine.id || '')}" type="button">Edit</button>
+                <button class="danger" data-machine-delete="\${escapeHtml(machine.id || '')}" type="button">Delete</button>
+              </div>
+            </td>
+          </tr>
+        \`).join('')
+        : '<tr><td colspan="6" class="muted">No DB machines saved yet.</td></tr>';
+    }
+
+    function clearForm() {
+      machineId.value = '';
+      machineName.value = '';
+      machineHost.value = '';
+      machineRootUser.value = '';
+      machineRootPassword.value = '';
+      machinePort.value = '3306';
+      machineNotes.value = '';
+      formTitle.textContent = 'Add DB machine';
+    }
+
+    function fillForm(machine) {
+      machineId.value = machine.id || '';
+      machineName.value = machine.name || '';
+      machineHost.value = machine.host || '';
+      machineRootUser.value = machine.rootUser || '';
+      machineRootPassword.value = machine.rootPassword || '';
+      machinePort.value = machine.port || '3306';
+      machineNotes.value = machine.notes || '';
+      formTitle.textContent = 'Edit DB machine';
+      machineName.focus();
+    }
+
+    async function refresh() {
+      const data = await api('/db-machines');
+      currentMachines = data.machines || [];
+      renderRows(currentMachines);
+    }
+
+    async function saveMachine() {
+      const payload = {
+        id: machineId.value.trim(),
+        name: machineName.value.trim(),
+        host: machineHost.value.trim(),
+        rootUser: machineRootUser.value.trim(),
+        rootPassword: machineRootPassword.value.trim(),
+        port: machinePort.value.trim(),
+        notes: machineNotes.value.trim(),
+      };
+      const res = await api('/db-machines', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      showMessage(formResult, res.message || 'Saved DB machine');
+      await refresh();
+      clearForm();
+    }
+
+    document.addEventListener('click', async (event) => {
+      const editBtn = event.target.closest('button[data-machine-edit]');
+      if (editBtn) {
+        const machine = currentMachines.find((item) => String(item.id) === String(editBtn.dataset.machineEdit));
+        if (machine) fillForm(machine);
+        return;
+      }
+      const deleteBtn = event.target.closest('button[data-machine-delete]');
+      if (deleteBtn) {
+        const id = deleteBtn.dataset.machineDelete;
+        if (!id) return;
+        if (!confirm('Delete this DB machine?')) return;
+        await api(\`/db-machines/\${encodeURIComponent(id)}\`, { method: 'DELETE' });
+        showMessage(listResult, 'DB machine deleted');
+        await refresh();
+      }
+    });
+
+    saveBtn.addEventListener('click', async () => {
+      saveBtn.disabled = true;
+      try {
+        await saveMachine();
+      } catch (error) {
+        showMessage(formResult, error.message, false);
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+
+    clearBtn.addEventListener('click', clearForm);
+    refreshBtn.addEventListener('click', async () => {
+      try {
+        await refresh();
+      } catch (error) {
+        showMessage(listResult, error.message, false);
+      }
+    });
+
+    renderRows(currentMachines);
   </script>
 </body>
 </html>`;
@@ -2098,6 +2498,15 @@ async function handleRequest(req, res) {
       return;
     }
 
+    if (req.method === 'GET' && (pathname === '/db-machines' || pathname === '/manage/db-machines')) {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(renderDbMachinesPage());
+      return;
+    }
+
     if (req.method === 'GET' && (pathname === '/' || pathname === '/manage')) {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
@@ -2114,6 +2523,32 @@ async function handleRequest(req, res) {
 
     if (req.method === 'GET' && pathname === '/api/system') {
       sendJson(res, 200, { system: getSystemStats() });
+      return;
+    }
+
+    if (pathname === '/api/db-machines') {
+      if (req.method === 'GET') {
+        sendJson(res, 200, { machines: readDbMachines() });
+        return;
+      }
+
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        const machine = saveDbMachine(body || {});
+        sendJson(res, 200, {
+          ok: true,
+          message: `Saved DB machine ${machine.name}`,
+          machine,
+          machines: readDbMachines(),
+        });
+        return;
+      }
+    }
+
+    const dbMachineDeleteMatch = pathname.match(/^\/api\/db-machines\/(.+)$/);
+    if (dbMachineDeleteMatch && req.method === 'DELETE') {
+      deleteDbMachine(decodeURIComponent(dbMachineDeleteMatch[1]));
+      sendJson(res, 200, { ok: true, message: 'DB machine deleted', machines: readDbMachines() });
       return;
     }
 

@@ -16,6 +16,7 @@ SYSTEM_PORTAL_FILE="/etc/nginx/sites-available/system-portal.conf"
 SYSTEM_PORTAL_WEBROOT="/var/www/system-portal"
 SYSTEM_DOMAIN_FILE="/etc/vps-system-domain"
 SYSTEM_ENV_FILE="/etc/vps-system.env"
+DB_MACHINES_FILE="/etc/vps-db-machines.json"
 MANAGE_SERVICE="/etc/systemd/system/vps-manage.service"
 SSH_HARDEN_FILE="/etc/ssh/sshd_config.d/99-vps-bootstrap.conf"
 PHP_FPM_VERSION=""
@@ -212,6 +213,13 @@ EOF
 name,path,check_minutes
 # my-app,/var/www/my-app,2
 EOF
+  fi
+
+  if [[ ! -f "${DB_MACHINES_FILE}" ]]; then
+    cat > "${DB_MACHINES_FILE}" <<'EOF'
+[]
+EOF
+    chmod 0600 "${DB_MACHINES_FILE}"
   fi
 
   if [[ -n "${SYSTEM_DOMAIN:-}" && ! -f "${SYSTEM_DOMAIN_FILE}" ]]; then
@@ -536,6 +544,7 @@ cat > "\${SYSTEM_PORTAL_WEBROOT}/index.html" <<EOF2
       <li><a href="/phpmyadmin/">phpMyAdmin</a></li>
       <li><a href="/manage/vault/">DB Vault</a></li>
       <li><a href="/manage/">Manage MySQL permissions</a></li>
+      <li><a href="/manage/db-machines/">DB machines</a></li>
     </ul>
     <h2>Apps</h2>
     <ul>
