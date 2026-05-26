@@ -8,6 +8,15 @@ AUTH_DIR="/etc/nginx/project-auth"
 AUTH_USER="project"
 PORT_MIN="${PROJECT_PORT_START:-3000}"
 PORT_MAX="${PROJECT_PORT_END:-9999}"
+ENV_CANDIDATES=(
+  .env
+  .env.local
+  .env.production
+  .env.credentials
+  .env.machine
+  .env.production.local
+  .env.development
+)
 
 die() {
   printf '[projectctl] %s\n' "$*" >&2
@@ -24,6 +33,7 @@ Usage:
   projectctl status owner/repo
   projectctl script [--pm2] owner/repo package-script
   projectctl password [--password secret|--clear] owner/repo
+  projectctl mysql [--ips ip1,ip2] owner/repo
   projectctl uninstall owner/repo
   projectctl list
 
@@ -37,6 +47,7 @@ Defaults:
   - when a domain is provided, VITE_ALLOWED_HOSTS and CORS_ORIGIN are exported for the PM2 runtime
   - `projectctl script` runs a package.json script, with optional `--pm2` for runtime scripts
   - `projectctl password` enables or clears nginx basic auth for a project's domain
+  - `projectctl mysql` manages MySQL access IPs for a project's DB user
 EOF
 }
 
@@ -89,6 +100,100 @@ validate_domain() {
 
 meta_path_for_slug() {
   printf '%s/%s.env' "${META_DIR}" "$1"
+}
+
+project_env_value() {
+  local key="$1"
+  local file=""
+  local line=""
+  local value=""
+
+  for file in "${ENV_CANDIDATES[@]}"; do
+    [[ -f "${APP_DIR}/${file}" ]] || continue
+    line="$(grep -hE "^[[:space:]]*${key}=" "${APP_DIR}/${file}" 2>/dev/null | tail -n1 || true)"
+    if [[ -n "${line}" ]]; then
+      value="${line#*=}"
+    fi
+  done
+
+  printf '%s' "${value}"
+}
+
+project_db_value() {
+  local key=""
+  for key in "$@"; do
+    local value
+    value="$(project_env_value "${key}")"
+    if [[ -n "${value}" ]]; then
+      printf '%s' "${value}"
+      return
+    fi
+  done
+  printf '%s' ""
+}
+
+sql_quote() {
+  local value
+  value="$(printf '%s' "$1" | sed "s/'/''/g")"
+  printf "'%s'" "${value}"
+}
+
+sql_ident() {
+  local value
+  value="$(printf '%s' "$1" | sed 's/`/``/g')"
+  printf '`%s`' "${value}"
+}
+
+mysql_exec() {
+  mysql --protocol=socket -uroot --batch --skip-column-names -e "$1"
+}
+
+normalize_mysql_ips() {
+  local raw="${1:-}"
+  python3 - "${raw}" <<'PY'
+import ipaddress
+import re
+import sys
+
+raw = sys.argv[1]
+seen = []
+for token in re.split(r'[\s,]+', raw.strip()):
+    if not token:
+        continue
+    try:
+        if '/' in token:
+            ipaddress.ip_network(token, strict=False)
+        else:
+            ipaddress.ip_address(token)
+    except ValueError:
+        raise SystemExit(f"Invalid IP/CIDR: {token}")
+    if token not in seen:
+        seen.append(token)
+print(",".join(seen))
+PY
+}
+
+update_meta_value() {
+  local meta="$1"
+  local key="$2"
+  local value="$3"
+  local tmp
+  tmp="$(mktemp)"
+  awk -v key="${key}" -v value="${value}" '
+    BEGIN { updated = 0 }
+    $1 == key {
+      print key "=" value
+      updated = 1
+      next
+    }
+    { print }
+    END {
+      if (!updated) {
+        print key "=" value
+      }
+    }
+  ' "${meta}" > "${tmp}"
+  mv "${tmp}" "${meta}"
 }
 
 ensure_meta_dir() {
@@ -318,6 +423,7 @@ BRANCH=${BRANCH}
 GIT_REMOTE=${GIT_REMOTE}
 START_KIND=${START_KIND}
 START_TARGET=${START_TARGET}
+MYSQL_ALLOWED_IPS=${MYSQL_ALLOWED_IPS:-}
 EOF
 }
 
@@ -494,6 +600,8 @@ do_install() {
     validate_domain "${APP_DOMAIN}"
   fi
 
+  MYSQL_ALLOWED_IPS="$(project_env_value MYSQL_ALLOWED_IPS)"
+
   clone_or_pull
 
   git -C "${APP_DIR}" checkout "${BRANCH}" >/dev/null 2>&1 || git -C "${APP_DIR}" checkout -b "${BRANCH}" "origin/${BRANCH}"
@@ -527,6 +635,16 @@ do_install() {
   meta="$(meta_path_for_slug "${PROJECT_SLUG}")"
   write_meta "${meta}"
   chmod 0644 "${meta}"
+
+  local db_name=""
+  local db_user=""
+  local db_password=""
+  db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
+  db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
+  db_password="$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)"
+  if [[ -n "${db_name}" && -n "${db_user}" && -n "${db_password}" ]]; then
+    sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" ""
+  fi
 
   sync_app_map
   restart_pm2
@@ -594,14 +712,20 @@ do_status() {
   local ref="$1"
   local slug
   local meta
+  local db_name
+  local db_user
 
   slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
+  db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
+  db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
 
   printf 'repo: %s\npath: %s\npm2: %s\nport: %s\ndomain: %s\nhttps: %s\nkind: %s\n' \
     "${REPO_REF}" "${APP_DIR}" "${PM2_NAME}" "${APP_PORT}" "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}" "${START_KIND}"
   printf 'protected: %s\n' "$(project_auth_enabled "${APP_DOMAIN:-}" && printf yes || printf no)"
+  printf 'mysql_allowed_ips: %s\n' "${MYSQL_ALLOWED_IPS:-}"
+  printf 'db: %s\nuser: %s\n' "${db_name}" "${db_user}"
   (cd "${APP_DIR}" && git status -sb) || true
   pm2 describe "${PM2_NAME}" || true
 }
@@ -678,15 +802,184 @@ do_password() {
   printf '[projectctl] set password for %s\n' "${REPO_REF}"
 }
 
+sync_mysql_firewall_rules() {
+  local new_ips="${1:-}"
+  local old_ips="${2:-}"
+  local -A desired=()
+  local -a desired_list=()
+  local -a old_list=()
+  local ip=""
+
+  if [[ -n "${new_ips}" ]]; then
+    IFS=, read -r -a desired_list <<< "${new_ips}"
+  fi
+
+  if [[ -n "${old_ips}" ]]; then
+    IFS=, read -r -a old_list <<< "${old_ips}"
+  fi
+
+  for ip in "${desired_list[@]}"; do
+    [[ -n "${ip}" ]] || continue
+    desired["$ip"]=1
+  done
+
+  for ip in "${old_list[@]}"; do
+    [[ -n "${ip}" && "${ip}" != "localhost" ]] || continue
+    if [[ -z "${desired[$ip]:-}" ]]; then
+      ufw --force delete allow from "${ip}" to any port 3306 proto tcp >/dev/null 2>&1 || true
+    fi
+  done
+
+  for ip in "${desired_list[@]}"; do
+    [[ -n "${ip}" ]] || continue
+    ufw allow from "${ip}" to any port 3306 proto tcp >/dev/null 2>&1 || true
+  done
+}
+
+sync_mysql_permissions() {
+  local db_name="$1"
+  local db_user="$2"
+  local db_password="$3"
+  local new_ips="${4:-}"
+  local old_ips="${5:-}"
+  local db_ident
+  local user_q
+  local pass_q
+  local current_hosts
+  local host
+  local -A desired=()
+  local -a desired_list=()
+
+  [[ -n "${db_name}" ]] || die "Missing database name in project env"
+  [[ -n "${db_user}" ]] || die "Missing database user in project env"
+  [[ -n "${db_password}" ]] || die "Missing database password in project env"
+
+  db_ident="$(sql_ident "${db_name}")"
+  user_q="$(sql_quote "${db_user}")"
+  pass_q="$(sql_quote "${db_password}")"
+
+  if [[ -n "${new_ips}" ]]; then
+    IFS=, read -r -a desired_list <<< "${new_ips}"
+  fi
+
+  desired["localhost"]=1
+  mysql_exec "CREATE DATABASE IF NOT EXISTS ${db_ident} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+  mysql_exec "CREATE USER IF NOT EXISTS ${user_q}@'localhost' IDENTIFIED BY ${pass_q};"
+  mysql_exec "ALTER USER ${user_q}@'localhost' IDENTIFIED BY ${pass_q};"
+  mysql_exec "GRANT ALL PRIVILEGES ON ${db_ident}.* TO ${user_q}@'localhost';"
+
+  if [[ -n "${new_ips}" ]]; then
+    desired["%"]=1
+    mysql_exec "CREATE USER IF NOT EXISTS ${user_q}@'%' IDENTIFIED BY ${pass_q};"
+    mysql_exec "ALTER USER ${user_q}@'%' IDENTIFIED BY ${pass_q};"
+    mysql_exec "GRANT ALL PRIVILEGES ON ${db_ident}.* TO ${user_q}@'%';"
+  fi
+
+  current_hosts="$(mysql_exec "SELECT Host FROM mysql.user WHERE User=${user_q};" 2>/dev/null || true)"
+  while IFS= read -r host; do
+    [[ -n "${host}" ]] || continue
+    if [[ -z "${desired[$host]:-}" ]]; then
+      mysql_exec "DROP USER IF EXISTS ${user_q}@$(sql_quote "${host}");" >/dev/null 2>&1 || true
+    fi
+  done <<< "${current_hosts}"
+
+  mysql_exec "FLUSH PRIVILEGES;"
+  sync_mysql_firewall_rules "${new_ips}" "${old_ips}"
+}
+
+read_mysql_accounts() {
+  local db_user="$1"
+  local user_q
+
+  [[ -n "${db_user}" ]] || return 0
+  user_q="$(sql_quote "${db_user}")"
+  mysql_exec "SELECT CONCAT(User, '@', Host) FROM mysql.user WHERE User=${user_q} ORDER BY Host;" 2>/dev/null || true
+}
+
+do_mysql() {
+  local ref="$1"
+  local ips="${2-__unset__}"
+  local slug
+  local meta
+  local old_ips
+  local new_ips
+  local db_name
+  local db_user
+  local db_password
+
+  slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
+  meta="$(meta_path_for_slug "${slug}")"
+  load_meta "${meta}"
+
+  old_ips="${MYSQL_ALLOWED_IPS:-}"
+
+  if [[ "${ips}" == "__unset__" ]]; then
+    db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
+    db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
+    db_password="$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)"
+    printf 'repo: %s\npath: %s\ndb: %s\nuser: %s\npassword: %s\nallowed_ips: %s\n' \
+      "${REPO_REF}" "${APP_DIR}" \
+      "${db_name}" \
+      "${db_user}" \
+      "${db_password}" \
+      "${MYSQL_ALLOWED_IPS:-}"
+    if [[ -n "${db_user}" ]]; then
+      printf 'mysql_accounts:\n%s\n' "$(read_mysql_accounts "${db_user}")"
+    fi
+    return
+  fi
+
+  new_ips="$(normalize_mysql_ips "${ips}")"
+  db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
+  db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
+  db_password="$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)"
+
+  MYSQL_ALLOWED_IPS="${new_ips}"
+  update_meta_value "${meta}" "MYSQL_ALLOWED_IPS" "${MYSQL_ALLOWED_IPS}"
+  sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS}" "${old_ips}"
+  printf '[projectctl] mysql permissions updated for %s (%s)\n' "${REPO_REF}" "${MYSQL_ALLOWED_IPS:-local only}"
+}
+
+remove_mysql_permissions() {
+  local db_name="$1"
+  local db_user="$2"
+  local db_password="$3"
+  local old_ips="${4:-}"
+  local user_q
+  local current_hosts
+  local host
+
+  [[ -n "${db_name}" ]] || return 0
+  [[ -n "${db_user}" ]] || return 0
+  [[ -n "${db_password}" ]] || return 0
+
+  user_q="$(sql_quote "${db_user}")"
+
+  current_hosts="$(mysql_exec "SELECT Host FROM mysql.user WHERE User=${user_q};" 2>/dev/null || true)"
+  while IFS= read -r host; do
+    [[ -n "${host}" ]] || continue
+    mysql_exec "DROP USER IF EXISTS ${user_q}@$(sql_quote "${host}");" >/dev/null 2>&1 || true
+  done <<< "${current_hosts}"
+
+  sync_mysql_firewall_rules "" "${old_ips}"
+  mysql_exec "FLUSH PRIVILEGES;" >/dev/null 2>&1 || true
+}
+
 do_uninstall() {
   local ref="$1"
   local slug
   local meta
   local tmp
+  local db_name
+  local db_user
+  local db_password
 
   slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
+  db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
+  db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
+  db_password="$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)"
 
   if pm2 describe "${PM2_NAME}" >/dev/null 2>&1; then
     pm2 delete "${PM2_NAME}" >/dev/null 2>&1 || true
@@ -705,6 +998,8 @@ do_uninstall() {
       /usr/local/bin/app-sync.sh
     fi
   fi
+
+  remove_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}"
 
   rm -rf "${APP_DIR}" "${meta}"
   printf '[projectctl] uninstalled %s\n' "${REPO_REF}"
@@ -837,6 +1132,26 @@ main() {
       done
       [[ $# -eq 1 ]] || { usage; exit 1; }
       do_password "$1" "${password}" "${clear}"
+      ;;
+    mysql)
+      local ips="__unset__"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --ips)
+            ips="${2:-}"
+            shift 2
+            ;;
+          --help|-h)
+            usage
+            exit 0
+            ;;
+          *)
+            break
+            ;;
+        esac
+      done
+      [[ $# -eq 1 ]] || { usage; exit 1; }
+      do_mysql "$1" "${ips}"
       ;;
     uninstall)
       [[ $# -eq 1 ]] || { usage; exit 1; }

@@ -170,6 +170,20 @@ function pickEnvDetails(projectPath) {
   return { files, env: merged };
 }
 
+function readMysqlAccounts(dbUser) {
+  if (!dbUser) return [];
+  try {
+    const out = execFileSync(
+      'mysql',
+      ['--protocol=socket', '-uroot', '--batch', '--skip-column-names', '-e', `SELECT CONCAT(User, '@', Host) FROM mysql.user WHERE User='${String(dbUser).replace(/'/g, "''")}' ORDER BY Host;`],
+      { encoding: 'utf8' },
+    );
+    return out.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 function runPython(script, args = []) {
   const res = spawnSync('python3', ['-c', script, ...args], {
     encoding: 'utf8',
@@ -271,6 +285,7 @@ function projectView() {
   return readProjects().map((project) => {
     const proc = byName.get(project.PM2_NAME || project.PROJECT_SLUG);
     const env = proc?.pm2_env || {};
+    const { db } = pickDbDetails(project.APP_DIR || '');
     return {
       repo: project.REPO_REF || '',
       slug: project.PROJECT_SLUG || '',
@@ -283,6 +298,10 @@ function projectView() {
       kind: project.START_KIND || '',
       type: project.APP_TYPE || '',
       packageManager: project.PACKAGE_MANAGER || '',
+      mysqlAllowedIps: project.MYSQL_ALLOWED_IPS || '',
+      dbName: db.DB_NAME || db.DB_DATABASE || db.MYSQL_DATABASE || db.POSTGRES_DB || '',
+      dbUser: db.DB_USER || db.MYSQL_USER || db.POSTGRES_USER || '',
+      dbPassword: db.DB_PASSWORD || db.MYSQL_PASSWORD || db.POSTGRES_PASSWORD || '',
       protected: Boolean(project.protected),
       status: env.status || 'stopped',
       restarts: env.restart_time ?? proc?.pm2_env?.restart_time ?? 0,
@@ -665,6 +684,31 @@ function renderPage() {
       <div id="dbList" class="kv-list"></div>
     </div>
   </div>
+  <div id="mysqlPanel" class="scripts-panel modal-panel" hidden>
+    <header>
+      <div>
+        <h2 id="mysqlTitle">MySQL Access</h2>
+        <div id="mysqlSubtitle" class="muted"></div>
+      </div>
+      <button id="closeMysqlBtn" class="ghost" type="button">Close</button>
+    </header>
+    <div class="body">
+      <div id="mysqlFlash" class="flash" hidden></div>
+      <div class="grid two">
+        <div class="kv-list" id="mysqlDetails"></div>
+        <div class="stack">
+          <label>Allowed IPs / CIDRs
+            <textarea id="mysqlIpsInput" placeholder="198.51.100.10,203.0.113.0/24"></textarea>
+          </label>
+          <div class="actions">
+            <a id="mysqlPhpMyAdminBtn" class="btn ghost" href="/phpmyadmin/" target="_blank" rel="noreferrer">phpMyAdmin</a>
+            <button id="mysqlSaveBtn" class="secondary" type="button">Save permissions</button>
+          </div>
+          <div id="mysqlAccounts" class="kv-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
   <div id="envPanel" class="scripts-panel modal-panel" hidden>
     <header>
       <div>
@@ -737,6 +781,16 @@ function renderPage() {
     const dbList = document.getElementById('dbList');
     const dbFlash = document.getElementById('dbFlash');
     const closeDbBtn = document.getElementById('closeDbBtn');
+    const mysqlPanel = document.getElementById('mysqlPanel');
+    const mysqlTitle = document.getElementById('mysqlTitle');
+    const mysqlSubtitle = document.getElementById('mysqlSubtitle');
+    const mysqlDetails = document.getElementById('mysqlDetails');
+    const mysqlFlash = document.getElementById('mysqlFlash');
+    const mysqlIpsInput = document.getElementById('mysqlIpsInput');
+    const mysqlAccounts = document.getElementById('mysqlAccounts');
+    const mysqlPhpMyAdminBtn = document.getElementById('mysqlPhpMyAdminBtn');
+    const mysqlSaveBtn = document.getElementById('mysqlSaveBtn');
+    const closeMysqlBtn = document.getElementById('closeMysqlBtn');
     const envPanel = document.getElementById('envPanel');
     const envTitle = document.getElementById('envTitle');
     const envSubtitle = document.getElementById('envSubtitle');
@@ -765,6 +819,7 @@ function renderPage() {
     const closeLogBtn = document.getElementById('closeLogBtn');
     let currentScriptsRef = '';
     let currentDbRef = '';
+    let currentMysqlRef = '';
     let currentEnvRef = '';
     let currentLogRef = '';
     let currentLogType = 'out';
@@ -884,6 +939,7 @@ function renderPage() {
           <button class="secondary" data-action="stop" data-ref="\${ref}">Stop</button>
           <button class="danger" data-action="uninstall" data-ref="\${ref}">Kill</button>
           <button class="secondary" data-action="db" data-ref="\${ref}">DB</button>
+          <button class="secondary" data-action="mysql" data-ref="\${ref}">MySQL</button>
           <button class="secondary" data-action="env" data-ref="\${ref}">Env</button>
           <button class="secondary" data-action="scripts" data-ref="\${ref}">Scripts</button>
           <button class="secondary" data-action="log" data-ref="\${ref}">Log</button>
@@ -930,7 +986,8 @@ function renderPage() {
             pm: \${escapeHtml(project.packageManager || '')}<br>
             restarts: \${escapeHtml(String(project.restarts ?? 0))}<br>
             uptime: \${escapeHtml(fmtTime(project.uptime))}<br>
-            env: \${escapeHtml(project.nodeEnv || '')}
+            env: \${escapeHtml(project.nodeEnv || '')}<br>
+            mysql ips: \${escapeHtml(project.mysqlAllowedIps || 'local only')}
           </td>
           <td>\${rowActions(project)}</td>
         </tr>
@@ -939,6 +996,7 @@ function renderPage() {
 
     function openScriptsModal(ref, scripts, subtitle) {
       closeDbPanel();
+      closeMysqlPanel();
       closeEnvPanel();
       closeProgressPanel();
       closeLogPanel();
@@ -974,6 +1032,7 @@ function renderPage() {
 
     function openDbPanel(ref, details, subtitle) {
       closeScriptsModal();
+      closeMysqlPanel();
       closeEnvPanel();
       closeProgressPanel();
       closeLogPanel();
@@ -1015,6 +1074,62 @@ function renderPage() {
       setModalLocked(false);
     }
 
+    function openMysqlPanel(ref, details, subtitle) {
+      closeScriptsModal();
+      closeDbPanel();
+      closeEnvPanel();
+      closeProgressPanel();
+      closeLogPanel();
+      currentMysqlRef = ref;
+      mysqlTitle.textContent = 'MySQL Access';
+      mysqlSubtitle.textContent = subtitle || '';
+      mysqlFlash.hidden = true;
+      mysqlPhpMyAdminBtn.href = '/phpmyadmin/';
+      mysqlIpsInput.value = details.allowedIps || '';
+      const rows = [
+        ['DB supplier', details.db?.DB_SUPPLIER || 'n/a'],
+        ['Database name', details.db?.DB_NAME || details.db?.DB_DATABASE || details.db?.MYSQL_DATABASE || details.db?.POSTGRES_DB || 'n/a'],
+        ['Database user', details.db?.DB_USER || details.db?.MYSQL_USER || details.db?.POSTGRES_USER || 'n/a'],
+        ['Database password', details.db?.DB_PASSWORD || details.db?.MYSQL_PASSWORD || details.db?.POSTGRES_PASSWORD || 'n/a'],
+        ['Database host', details.db?.DB_HOST || details.db?.MYSQL_HOST || details.db?.POSTGRES_HOST || 'n/a'],
+        ['Database port', details.db?.DB_PORT || details.db?.MYSQL_PORT || details.db?.POSTGRES_PORT || 'n/a'],
+        ['Allowed IPs', details.allowedIps || 'local only'],
+      ];
+      const sources = (details.files || []).map((file) => escapeHtml(file)).join('<br>');
+      mysqlDetails.innerHTML = \`
+        \${rows.map(([label, value]) => \`
+          <div class="kv-item">
+            <div class="small">\${escapeHtml(label)}</div>
+            <code>\${escapeHtml(value)}</code>
+          </div>
+        \`).join('')}
+        <div class="kv-item">
+          <div class="small">Source files</div>
+          <div class="small">\${sources || 'n/a'}</div>
+        </div>
+      \`;
+      mysqlAccounts.innerHTML = details.accounts && details.accounts.length
+        ? details.accounts.map((account) => \`
+          <div class="kv-item">
+            <div class="small">Account</div>
+            <code>\${escapeHtml(account)}</code>
+          </div>
+        \`).join('')
+        : '<div class="muted">No MySQL account rows found.</div>';
+      mysqlPanel.hidden = false;
+      setModalLocked(true);
+    }
+
+    function closeMysqlPanel() {
+      mysqlPanel.hidden = true;
+      currentMysqlRef = '';
+      mysqlDetails.innerHTML = '';
+      mysqlAccounts.innerHTML = '';
+      mysqlIpsInput.value = '';
+      mysqlFlash.hidden = true;
+      setModalLocked(false);
+    }
+
     function renderKeyValueList(listEl, entries) {
       listEl.innerHTML = entries.length
         ? entries.map(([label, value]) => \`
@@ -1029,6 +1144,7 @@ function renderPage() {
     function openEnvPanel(ref, details, subtitle) {
       closeScriptsModal();
       closeDbPanel();
+      closeMysqlPanel();
       closeProgressPanel();
       closeLogPanel();
       currentEnvRef = ref;
@@ -1057,6 +1173,7 @@ function renderPage() {
       closeScriptsModal();
       closeDbPanel();
       closeEnvPanel();
+      closeMysqlPanel();
       closeLogPanel();
       progressTitle.textContent = 'Pull Progress';
       progressSubtitle.textContent = subtitle || ref || '';
@@ -1081,6 +1198,7 @@ function renderPage() {
       closeScriptsModal();
       closeDbPanel();
       closeEnvPanel();
+      closeMysqlPanel();
       closeProgressPanel();
       currentLogRef = ref;
       currentLogType = type || 'out';
@@ -1170,6 +1288,11 @@ function renderPage() {
       openDbPanel(ref, data.db || {}, data.project || ref);
     }
 
+    async function loadMysql(ref) {
+      const data = await api(\`/projects/\${ref}/mysql\`);
+      openMysqlPanel(ref, data, data.project || ref);
+    }
+
     async function loadEnv(ref) {
       const data = await api(\`/projects/\${ref}/env\`);
       openEnvPanel(ref, data, data.project || ref);
@@ -1190,6 +1313,16 @@ function renderPage() {
         throw new Error(message || \`Upload failed: \${res.status}\`);
       }
       showMessage(envFlash, data.message || 'Environment files uploaded');
+      await refresh();
+    }
+
+    async function saveMysql(ref, ips) {
+      const res = await api(\`/projects/\${ref}/mysql\`, {
+        method: 'POST',
+        body: JSON.stringify({ ips }),
+      });
+      await loadMysql(ref);
+      showMessage(mysqlFlash, res.message || 'MySQL permissions updated');
       await refresh();
     }
 
@@ -1225,7 +1358,7 @@ function renderPage() {
       const action = btn.dataset.action;
       const ref = btn.dataset.ref;
       if (!action || !ref) return;
-      if (action === 'db' || action === 'env') {
+      if (action === 'db' || action === 'env' || action === 'mysql') {
         return;
       }
       if (action === 'log') {
@@ -1288,6 +1421,7 @@ function renderPage() {
 
     closeScriptsBtn.addEventListener('click', closeScriptsModal);
     closeDbBtn.addEventListener('click', closeDbPanel);
+    closeMysqlBtn.addEventListener('click', closeMysqlPanel);
     closeEnvBtn.addEventListener('click', closeEnvPanel);
     closeProgressBtn.addEventListener('click', closeProgressPanel);
     closeLogBtn.addEventListener('click', closeLogPanel);
@@ -1387,6 +1521,22 @@ function renderPage() {
       }
     });
 
+    document.addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-action="mysql"]');
+      if (!btn) return;
+      const ref = btn.dataset.ref;
+      if (!ref) return;
+      btn.disabled = true;
+      try {
+        await loadMysql(ref);
+      } catch (error) {
+        showMessage(mysqlFlash, error.message, false);
+        mysqlPanel.hidden = false;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
     envUploadBtn.addEventListener('click', async () => {
       if (!currentEnvRef) return;
       const file = envUploadInput.files && envUploadInput.files[0];
@@ -1403,6 +1553,19 @@ function renderPage() {
         envPanel.hidden = false;
       } finally {
         envUploadBtn.disabled = false;
+      }
+    });
+
+    mysqlSaveBtn.addEventListener('click', async () => {
+      if (!currentMysqlRef) return;
+      mysqlSaveBtn.disabled = true;
+      try {
+        await saveMysql(currentMysqlRef, mysqlIpsInput.value.trim());
+      } catch (error) {
+        showMessage(mysqlFlash, error.message, false);
+        mysqlPanel.hidden = false;
+      } finally {
+        mysqlSaveBtn.disabled = false;
       }
     });
 
@@ -1555,6 +1718,46 @@ async function handleRequest(req, res) {
         db,
       });
       return;
+    }
+
+    const mysqlMatch = pathname.match(/^\/api\/projects\/(.+?)\/mysql$/);
+    if (mysqlMatch) {
+      const ref = decodeURIComponent(mysqlMatch[1]);
+      const meta = parseEnvFile(metaPathForRef(ref));
+      const projectPath = meta.APP_DIR || '';
+      const { files, db } = pickDbDetails(projectPath);
+      const dbUser = db.DB_USER || db.MYSQL_USER || db.POSTGRES_USER || '';
+      const allowedIps = meta.MYSQL_ALLOWED_IPS || '';
+      const accounts = readMysqlAccounts(dbUser);
+
+      if (req.method === 'GET') {
+        sendJson(res, 200, {
+          project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
+          files,
+          db,
+          allowedIps,
+          accounts,
+        });
+        return;
+      }
+
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        const ips = String(body.ips || '').trim();
+        const output = runProjectCtl(['mysql', '--ips', ips, ref]);
+        const refreshedMeta = parseEnvFile(metaPathForRef(ref));
+        const refreshedDb = pickDbDetails(projectPath).db;
+        sendJson(res, 200, {
+          ok: true,
+          message: output || 'MySQL permissions updated',
+          project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
+          files,
+          db: refreshedDb,
+          allowedIps: refreshedMeta.MYSQL_ALLOWED_IPS || ips,
+          accounts: readMysqlAccounts(refreshedDb.DB_USER || refreshedDb.MYSQL_USER || refreshedDb.POSTGRES_USER || ''),
+        });
+        return;
+      }
     }
 
     const envMatch = pathname.match(/^\/api\/projects\/(.+?)\/env(?:\/(download|upload))?$/);

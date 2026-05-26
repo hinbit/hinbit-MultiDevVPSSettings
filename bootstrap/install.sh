@@ -11,6 +11,7 @@ NGINX_ENABLED="/etc/nginx/sites-enabled"
 PM2_SERVICE="/etc/systemd/system/pm2-root.service"
 CRON_FILE="/etc/cron.d/vps-bootstrap"
 PHPMA_FILE="/etc/nginx/sites-available/phpmyadmin.local"
+MYSQL_CONF_FILE="/etc/mysql/mysql.conf.d/99-vps-bootstrap.cnf"
 SYSTEM_PORTAL_FILE="/etc/nginx/sites-available/system-portal.conf"
 SYSTEM_PORTAL_WEBROOT="/var/www/system-portal"
 SYSTEM_DOMAIN_FILE="/etc/vps-system-domain"
@@ -163,6 +164,17 @@ X11Forwarding no
 EOF
 
   systemctl reload ssh || systemctl reload sshd || true
+}
+
+configure_mysql_server() {
+  log "Configuring MySQL for remote access behind UFW"
+  install -d /etc/mysql/mysql.conf.d
+  cat > "${MYSQL_CONF_FILE}" <<'EOF'
+[mysqld]
+bind-address = 0.0.0.0
+mysqlx-bind-address = 127.0.0.1
+skip-name-resolve = ON
+EOF
 }
 
 install_system_files() {
@@ -516,7 +528,12 @@ cat > "\${SYSTEM_PORTAL_WEBROOT}/index.html" <<EOF2
     <p class="muted">System services and deployed apps for \${SYSTEM_DOMAIN}</p>
     <h2>Admin</h2>
     <ul>
+      <li><a href="/manage/">Manage projects</a></li>
+    </ul>
+    <h2>MySQL</h2>
+    <ul>
       <li><a href="/phpmyadmin/">phpMyAdmin</a></li>
+      <li><a href="/manage/">Manage MySQL permissions</a></li>
     </ul>
     <h2>Apps</h2>
     <ul>
@@ -740,6 +757,7 @@ main() {
   configure_fail2ban
   configure_unattended_upgrades
   configure_ssh_hardening
+  configure_mysql_server
   install_system_files
 
   systemctl restart "${PHP_FPM_SERVICE}"
