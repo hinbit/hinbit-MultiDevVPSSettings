@@ -467,6 +467,31 @@ sync_app_map() {
   fi
 }
 
+verify_https_vhost() {
+  local domain="${1:-}"
+  local https="${2:-yes}"
+  local conf=""
+  local cert=""
+
+  [[ "${https,,}" == "yes" ]] || return 0
+  [[ -n "${domain}" ]] || return 0
+
+  conf="/etc/nginx/sites-available/${domain}.conf"
+  cert="/etc/letsencrypt/live/${domain}/fullchain.pem"
+
+  if [[ -s "${conf}" ]] && [[ -s "${cert}" ]] && grep -q 'listen 443 ssl' "${conf}"; then
+    return 0
+  fi
+
+  if [[ -x /usr/local/bin/app-sync.sh ]]; then
+    /usr/local/bin/app-sync.sh
+  fi
+
+  if [[ ! -s "${conf}" ]] || [[ ! -s "${cert}" ]] || ! grep -q 'listen 443 ssl' "${conf}"; then
+    die "HTTPS was requested for ${domain}, but the SSL vhost is not active yet. Check DNS, re-run app sync, and try again."
+  fi
+}
+
 auth_file_for_domain() {
   local domain="$1"
   printf '%s/%s.htpasswd' "${AUTH_DIR}" "${domain}"
@@ -647,6 +672,7 @@ do_install() {
   fi
 
   sync_app_map
+  verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
   restart_pm2
   if [[ -n "${APP_DOMAIN}" ]]; then
     printf '[projectctl] installed %s in %s on port %s for %s\n' "${REPO_REF}" "${APP_DIR}" "${APP_PORT}" "${APP_DOMAIN}"
@@ -675,6 +701,7 @@ do_update() {
   )
 
   sync_app_map
+  verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
   restart_pm2
   printf '[projectctl] updated %s\n' "${REPO_REF}"
 }
