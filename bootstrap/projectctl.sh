@@ -195,6 +195,8 @@ pull_repo_with_optional_stash() {
   local repo_url="${3:-${REPO_URL}}"
   local dirty_status=""
   local did_stash=0
+  local env_backup_dir=""
+  local pull_rc=0
 
   dirty_status="$(git_repo_dirty_status "${repo_dir}")"
   if [[ -n "${dirty_status}" ]]; then
@@ -205,16 +207,43 @@ pull_repo_with_optional_stash() {
     did_stash=1
   fi
 
-  git -C "${repo_dir}" remote set-url origin "${repo_url}" >/dev/null 2>&1 || true
-  git -C "${repo_dir}" fetch origin "${branch}" >/dev/null 2>&1 || true
-  git -C "${repo_dir}" checkout "${branch}" >/dev/null 2>&1 || git -C "${repo_dir}" checkout -B "${branch}" "origin/${branch}" >/dev/null 2>&1 || true
+  env_backup_dir="$(mktemp -d)"
+
+  for file in "${ENV_CANDIDATES[@]}"; do
+    [[ -f "${repo_dir}/${file}" ]] || continue
+    mkdir -p "${env_backup_dir}/$(dirname "${file}")"
+    cp -p "${repo_dir}/${file}" "${env_backup_dir}/${file}"
+    if git -C "${repo_dir}" ls-files --error-unmatch -- "${file}" >/dev/null 2>&1; then
+      git -C "${repo_dir}" checkout -- "${file}" >/dev/null 2>&1 || true
+    fi
+  done
+
+  set +e
+  git -C "${repo_dir}" remote set-url origin "${repo_url}" >/dev/null 2>&1
+  git -C "${repo_dir}" fetch origin "${branch}" >/dev/null 2>&1
+  git -C "${repo_dir}" checkout "${branch}" >/dev/null 2>&1
+  if [[ $? -ne 0 ]]; then
+    git -C "${repo_dir}" checkout -B "${branch}" "origin/${branch}" >/dev/null 2>&1
+  fi
   git -C "${repo_dir}" pull --ff-only origin "${branch}"
+  pull_rc=$?
+  set -e
 
   if [[ "${did_stash}" -eq 1 ]]; then
     if ! git -C "${repo_dir}" stash pop --index; then
       printf '[projectctl] Warning: stash pop did not apply cleanly; your stash may still be present.\n' >&2
     fi
   fi
+
+  for file in "${ENV_CANDIDATES[@]}"; do
+    [[ -f "${env_backup_dir}/${file}" ]] || continue
+    mkdir -p "${repo_dir}/$(dirname "${file}")"
+    cp -p "${env_backup_dir}/${file}" "${repo_dir}/${file}"
+  done
+
+  rm -rf "${env_backup_dir}" >/dev/null 2>&1 || true
+
+  return "${pull_rc}"
 }
 
 normalize_login_name() {
