@@ -35,6 +35,7 @@ ${MARKER}
 server {
     listen 80;
     server_name ${domain};
+    client_max_body_size 50m;
 ${auth_block}
     location /.well-known/acme-challenge/ {
         auth_basic off;
@@ -65,6 +66,7 @@ ${MARKER}
 server {
     listen 80;
     server_name ${domain};
+    client_max_body_size 50m;
 
     location /.well-known/acme-challenge/ {
         auth_basic off;
@@ -79,6 +81,7 @@ server {
 server {
     listen 443 ssl http2;
     server_name ${domain};
+    client_max_body_size 50m;
 ${auth_block}
     ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;
