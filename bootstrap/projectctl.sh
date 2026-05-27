@@ -1278,6 +1278,7 @@ do_password() {
   {
     printf '%s:%s\n' "${AUTH_USER}" "$(openssl passwd -apr1 "${password}")"
   } > "${auth_file}"
+  chown root:www-data "${auth_file}" 2>/dev/null || true
   chmod 0640 "${auth_file}"
   sync_app_map
   printf '[projectctl] set password for %s\n' "${REPO_REF}"
