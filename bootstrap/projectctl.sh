@@ -198,6 +198,12 @@ pull_repo_with_optional_stash() {
   local env_backup_dir=""
   local pull_rc=0
 
+  for file in "${ENV_CANDIDATES[@]}"; do
+    if git -C "${repo_dir}" ls-files --error-unmatch -- "${file}" >/dev/null 2>&1; then
+      git -C "${repo_dir}" update-index --no-skip-worktree -- "${file}" >/dev/null 2>&1 || true
+    fi
+  done
+
   dirty_status="$(git_repo_dirty_status "${repo_dir}")"
   if [[ -n "${dirty_status}" ]]; then
     if ! confirm_stash_before_pull "${repo_dir}" "${dirty_status}" "${REPO_REF:-${PROJECT_SLUG:-project}}"; then
@@ -239,6 +245,9 @@ pull_repo_with_optional_stash() {
     [[ -f "${env_backup_dir}/${file}" ]] || continue
     mkdir -p "${repo_dir}/$(dirname "${file}")"
     cp -p "${env_backup_dir}/${file}" "${repo_dir}/${file}"
+    if git -C "${repo_dir}" ls-files --error-unmatch -- "${file}" >/dev/null 2>&1; then
+      git -C "${repo_dir}" update-index --skip-worktree -- "${file}" >/dev/null 2>&1 || true
+    fi
   done
 
   rm -rf "${env_backup_dir}" >/dev/null 2>&1 || true
