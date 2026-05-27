@@ -53,6 +53,7 @@ Defaults:
   - `projectctl password` enables or clears nginx basic auth for a project's domain
   - `projectctl mysql` manages MySQL access IPs and DB machine placement for a project's DB user
   - `projectctl ssh` shows or rotates the project's SSH/SFTP upload credentials
+  - `projectctl update` prompts before stashing local changes; set PROJECTCTL_PULL_STASH=yes|no to force the choice
 EOF
 }
 
@@ -145,6 +146,75 @@ generate_secret() {
   fi
   [[ -n "${secret}" ]] || die "Unable to generate a secret"
   printf '%s' "${secret}"
+}
+
+git_repo_dirty_status() {
+  local repo_dir="${1:-${APP_DIR}}"
+
+  git -C "${repo_dir}" status --porcelain 2>/dev/null || true
+}
+
+confirm_stash_before_pull() {
+  local repo_dir="${1:-${APP_DIR}}"
+  local dirty_status="${2:-}"
+  local label="${3:-${REPO_REF:-${PROJECT_SLUG:-project}}}"
+  local answer=""
+  local pref="${PROJECTCTL_PULL_STASH:-}"
+
+  case "${pref,,}" in
+    yes|y|true|1)
+      return 0
+      ;;
+    no|n|false|0)
+      return 1
+      ;;
+  esac
+
+  if [[ -t 0 && -t 1 ]]; then
+    printf '[projectctl] Local changes detected in %s (%s):\n' "${label}" "${repo_dir}"
+    if [[ -n "${dirty_status}" ]]; then
+      printf '%s\n' "${dirty_status}" | sed 's/^/[projectctl]   /'
+    fi
+    read -r -p "[projectctl] Stash local changes before pulling? [Y/n] " answer || answer=""
+    answer="${answer:-Y}"
+    case "${answer,,}" in
+      n|no)
+        return 1
+        ;;
+    esac
+    return 0
+  fi
+
+  printf '[projectctl] Local changes detected in %s; auto-stashing before pull (set PROJECTCTL_PULL_STASH=no to skip)\n' "${label}" >&2
+  return 0
+}
+
+pull_repo_with_optional_stash() {
+  local repo_dir="${1:-${APP_DIR}}"
+  local branch="${2:-${BRANCH}}"
+  local repo_url="${3:-${REPO_URL}}"
+  local dirty_status=""
+  local did_stash=0
+
+  dirty_status="$(git_repo_dirty_status "${repo_dir}")"
+  if [[ -n "${dirty_status}" ]]; then
+    if ! confirm_stash_before_pull "${repo_dir}" "${dirty_status}" "${REPO_REF:-${PROJECT_SLUG:-project}}"; then
+      die "Pull cancelled"
+    fi
+    git -C "${repo_dir}" stash push -u -m "projectctl auto-stash before pull ${REPO_REF:-${PROJECT_SLUG:-project}} $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    did_stash=1
+  fi
+
+  git -C "${repo_dir}" remote set-url origin "${repo_url}" >/dev/null 2>&1 || true
+  git -C "${repo_dir}" fetch origin "${branch}" >/dev/null 2>&1 || true
+  git -C "${repo_dir}" checkout "${branch}" >/dev/null 2>&1 || git -C "${repo_dir}" checkout -B "${branch}" "origin/${branch}" >/dev/null 2>&1 || true
+  git -C "${repo_dir}" pull --ff-only origin "${branch}"
+
+  if [[ "${did_stash}" -eq 1 ]]; then
+    if ! git -C "${repo_dir}" stash pop --index; then
+      printf '[projectctl] Warning: stash pop did not apply cleanly; your stash may still be present.\n' >&2
+    fi
+  fi
 }
 
 normalize_login_name() {
@@ -427,7 +497,10 @@ sync_project_db_machine_env() {
   local machine_id="${1:-${LOCAL_DB_MACHINE_ID}}"
   local machine_host="${2:-127.0.0.1}"
   local machine_port="${3:-3306}"
+  local machine_root_user="${4:-root}"
+  local machine_root_password="${5:-}"
   local env_file="${APP_DIR}/.env.machine"
+  local db_type=""
 
   touch "${env_file}"
   chmod 0600 "${env_file}"
@@ -436,6 +509,11 @@ sync_project_db_machine_env() {
   update_meta_value "${env_file}" "DB_PORT" "${machine_port}"
   update_meta_value "${env_file}" "MYSQL_HOST" "${machine_host}"
   update_meta_value "${env_file}" "MYSQL_PORT" "${machine_port}"
+  db_type="$(project_db_value DB_TYPE VITE_DB_TYPE)"
+  if [[ "${db_type,,}" == "mysql" ]]; then
+    update_meta_value "${env_file}" "MYSQL_USER" "${machine_root_user}"
+    update_meta_value "${env_file}" "MYSQL_PASSWORD" "${machine_root_password}"
+  fi
 }
 
 read_project_db_machine_accounts() {
@@ -920,8 +998,7 @@ package_script_runner() {
 
 clone_or_pull() {
   if [[ -d "${APP_DIR}/.git" ]]; then
-    git -C "${APP_DIR}" remote set-url origin "${REPO_URL}" >/dev/null 2>&1 || true
-    git -C "${APP_DIR}" pull --ff-only
+    pull_repo_with_optional_stash "${APP_DIR}" "${BRANCH}" "${REPO_URL}"
   else
     rm -rf "${APP_DIR}"
     git clone --branch "${BRANCH}" --single-branch "${REPO_URL}" "${APP_DIR}"
@@ -1080,7 +1157,7 @@ do_install() {
   resolve_db_machine "${DB_MACHINE_ID}"
   write_meta "${meta}"
   chmod 0644 "${meta}"
-  sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}"
+  sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}"
 
   ensure_project_ssh_user "${SSH_UPLOAD_USER}" "${SSH_UPLOAD_PASSWORD}" "${APP_DIR}"
   refresh_project_ssh_config
@@ -1109,14 +1186,13 @@ do_update() {
     DB_MACHINE_ID="$(project_db_machine_id)"
   fi
   resolve_db_machine "${DB_MACHINE_ID:-${LOCAL_DB_MACHINE_ID}}"
-  sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}"
+  sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}"
 
   [[ -d "${APP_DIR}/.git" ]] || die "Missing git repo at ${APP_DIR}"
 
   (
     cd "${APP_DIR}"
-    git checkout "${BRANCH}" >/dev/null 2>&1 || true
-    git pull --ff-only origin "${BRANCH}"
+    pull_repo_with_optional_stash "${APP_DIR}" "${BRANCH}" "${REPO_URL}"
     install_deps
     maybe_build
   )
@@ -1476,7 +1552,7 @@ do_mysql() {
   MYSQL_ALLOWED_IPS="${new_ips}"
   sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS}" "${old_ips}" "${active_machine_id}"
   resolve_db_machine "${active_machine_id}"
-  sync_project_db_machine_env "${active_machine_id}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}"
+  sync_project_db_machine_env "${active_machine_id}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}"
   update_meta_value "${meta}" "MYSQL_ALLOWED_IPS" "${MYSQL_ALLOWED_IPS}"
   update_meta_value "${meta}" "DB_MACHINE_ID" "${active_machine_id}"
   printf '[projectctl] mysql permissions updated for %s (%s)\n' "${REPO_REF}" "${MYSQL_ALLOWED_IPS:-local only}"

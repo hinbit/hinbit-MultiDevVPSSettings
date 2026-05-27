@@ -218,6 +218,20 @@ function pickEnvDetails(projectPath) {
   return { files, env: merged };
 }
 
+function readProjectGitStatus(projectPath) {
+  if (!projectPath || !fs.existsSync(path.join(projectPath, '.git'))) {
+    return { exists: false, dirty: false, lines: [] };
+  }
+
+  try {
+    const output = execFileSync('git', ['-C', projectPath, 'status', '--porcelain'], { encoding: 'utf8' }).trim();
+    const lines = output ? output.split(/\r?\n/).filter(Boolean) : [];
+    return { exists: true, dirty: lines.length > 0, lines };
+  } catch (error) {
+    return { exists: true, dirty: false, lines: [], error: error.message || String(error) };
+  }
+}
+
 function mysqlExecForMachine(machineId, query) {
   const machines = readDbMachines();
   const machine = machines.find((item) => String(item.id) === String(machineId)) || machines.find((item) => String(item.id) === LOCAL_DB_MACHINE_ID) || LOCAL_DB_MACHINE;
@@ -1762,10 +1776,10 @@ function runProjectCtl(args, input = null) {
   return (res.stdout || '').trim();
 }
 
-function streamProjectCtl(res, args) {
+function streamProjectCtl(res, args, extraEnv = {}) {
   const child = spawn(PROJECTCTL, args, {
     cwd: '/',
-    env: process.env,
+    env: { ...process.env, ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -2233,6 +2247,23 @@ function renderPage() {
       <pre id="progressBody" class="kv-item" style="margin:0; max-height: 60vh; overflow:auto; white-space: pre-wrap;"></pre>
     </div>
   </div>
+  <div id="pullConfirmPanel" class="scripts-panel modal-panel" hidden>
+    <header>
+      <div>
+        <h2 id="pullConfirmTitle">Local changes detected</h2>
+        <div id="pullConfirmSubtitle" class="muted"></div>
+      </div>
+      <div class="actions">
+        <button id="pullConfirmNoBtn" class="ghost" type="button">Cancel</button>
+        <button id="pullConfirmYesBtn" class="secondary" type="button" autofocus>Yes, stash and pull</button>
+      </div>
+    </header>
+    <div class="body">
+      <div id="pullConfirmFlash" class="flash" hidden></div>
+      <div id="pullConfirmSummary" class="kv-item"></div>
+      <pre id="pullConfirmBody" class="kv-item" style="margin:0; max-height: 60vh; overflow:auto; white-space: pre-wrap;"></pre>
+    </div>
+  </div>
   <div id="logPanel" class="scripts-panel modal-panel" hidden>
     <header>
       <div>
@@ -2308,6 +2339,14 @@ function renderPage() {
     const progressBody = document.getElementById('progressBody');
     const progressFlash = document.getElementById('progressFlash');
     const closeProgressBtn = document.getElementById('closeProgressBtn');
+    const pullConfirmPanel = document.getElementById('pullConfirmPanel');
+    const pullConfirmTitle = document.getElementById('pullConfirmTitle');
+    const pullConfirmSubtitle = document.getElementById('pullConfirmSubtitle');
+    const pullConfirmFlash = document.getElementById('pullConfirmFlash');
+    const pullConfirmSummary = document.getElementById('pullConfirmSummary');
+    const pullConfirmBody = document.getElementById('pullConfirmBody');
+    const pullConfirmYesBtn = document.getElementById('pullConfirmYesBtn');
+    const pullConfirmNoBtn = document.getElementById('pullConfirmNoBtn');
     const logPanel = document.getElementById('logPanel');
     const logTitle = document.getElementById('logTitle');
     const logSubtitle = document.getElementById('logSubtitle');
@@ -2326,6 +2365,8 @@ function renderPage() {
     let currentEnvRef = '';
     let currentLogRef = '';
     let currentLogType = 'out';
+    let currentPullRef = '';
+    let pullConfirmResolve = null;
     let currentProjects = [];
     let currentDbMachines = [];
     let progressAbort = null;
@@ -2775,6 +2816,51 @@ function renderPage() {
       setModalLocked(false);
     }
 
+    function resolvePullConfirm(value) {
+      if (!pullConfirmResolve) return;
+      const resolve = pullConfirmResolve;
+      pullConfirmResolve = null;
+      resolve(value);
+    }
+
+    function openPullConfirmPanel(ref, preflight) {
+      closeScriptsModal();
+      closeDbPanel();
+      closeEnvPanel();
+      closeMysqlPanel();
+      closeProgressPanel();
+      closeLogPanel();
+      currentPullRef = ref;
+      pullConfirmTitle.textContent = 'Local changes detected';
+      const changes = Array.isArray(preflight?.changes) ? preflight.changes.length : 0;
+      pullConfirmSubtitle.textContent = decodeURIComponent(ref) + ' · ' + changes + ' local change' + (changes === 1 ? '' : 's') + ' · stash before pull';
+      pullConfirmFlash.hidden = true;
+      pullConfirmSummary.innerHTML = '<div class="small">' + escapeHtml(preflight?.message || 'Git reported local changes in this project. Stash them first, then pull the remote branch.') + '</div>' +
+        '<div class="small">Default action: Yes, stash and pull.</div>';
+      pullConfirmBody.textContent = Array.isArray(preflight?.changes) && preflight.changes.length
+        ? preflight.changes.map((line) => '  ' + line).join('\n')
+        : '(no change list available)';
+      pullConfirmPanel.hidden = false;
+      setModalLocked(true);
+    }
+
+    function closePullConfirmPanel(accept = false) {
+      pullConfirmPanel.hidden = true;
+      currentPullRef = '';
+      pullConfirmBody.textContent = '';
+      pullConfirmSummary.innerHTML = '';
+      pullConfirmFlash.hidden = true;
+      resolvePullConfirm(accept);
+      setModalLocked(false);
+    }
+
+    function confirmPullStash(ref, preflight) {
+      return new Promise((resolve) => {
+        pullConfirmResolve = resolve;
+        openPullConfirmPanel(ref, preflight);
+      });
+    }
+
     function openLogPanel(ref, type) {
       closeScriptsModal();
       closeDbPanel();
@@ -2821,14 +2907,19 @@ function renderPage() {
       await loadLog(ref, currentLogType);
     }
 
-    async function runPullWithProgress(ref) {
+    async function runPullWithProgress(ref, stash = false) {
       if (progressAbort) {
         progressAbort.abort();
       }
       progressAbort = new AbortController();
-      openProgressPanel(decodeURIComponent(ref), 'Pulling ' + decodeURIComponent(ref));
+      openProgressPanel(
+        decodeURIComponent(ref),
+        stash
+          ? 'Pulling ' + decodeURIComponent(ref) + ' with auto-stash'
+          : 'Pulling ' + decodeURIComponent(ref),
+      );
       try {
-        const res = await fetch(API + '/projects/' + ref + '/update-stream', {
+        const res = await fetch(API + '/projects/' + ref + '/update-stream?stash=' + (stash ? '1' : '0'), {
           method: 'POST',
           credentials: 'same-origin',
           signal: progressAbort.signal,
@@ -2857,6 +2948,10 @@ function renderPage() {
       } finally {
         progressAbort = null;
       }
+    }
+
+    async function loadPullPreflight(ref) {
+      return api('/projects/' + ref + '/pull-preflight');
     }
 
     async function loadScripts(ref) {
@@ -2984,7 +3079,19 @@ function renderPage() {
       if (action === 'update') {
         btn.disabled = true;
         try {
-          await runPullWithProgress(ref);
+          const preflight = await loadPullPreflight(ref);
+          if (preflight && preflight.exists === false) {
+            throw new Error(preflight.message || 'Git repository not found');
+          }
+          let stash = false;
+          if (preflight && preflight.dirty) {
+            stash = await confirmPullStash(ref, preflight);
+            if (!stash) {
+              showMessage(listResult, 'Pull cancelled', false);
+              return;
+            }
+          }
+          await runPullWithProgress(ref, stash || Boolean(preflight && preflight.dirty));
         } catch (error) {
           showMessage(progressFlash, error.message, false);
           progressPanel.hidden = false;
@@ -3024,6 +3131,8 @@ function renderPage() {
     closeSshBtn.addEventListener('click', closeSshPanel);
     closeEnvBtn.addEventListener('click', closeEnvPanel);
     closeProgressBtn.addEventListener('click', closeProgressPanel);
+    pullConfirmNoBtn.addEventListener('click', () => closePullConfirmPanel(false));
+    pullConfirmYesBtn.addEventListener('click', () => closePullConfirmPanel(true));
     closeLogBtn.addEventListener('click', closeLogPanel);
     sshCopyUserBtn.addEventListener('click', async () => {
       const user = sshDetails.querySelector('code');
@@ -3600,6 +3709,29 @@ async function handleRequest(req, res) {
       }
     }
 
+    const pullPreflightMatch = pathname.match(/^\/api\/projects\/(.+?)\/pull-preflight$/);
+    if (pullPreflightMatch) {
+      const ref = decodeURIComponent(pullPreflightMatch[1]);
+      const meta = parseEnvFile(metaPathForRef(ref));
+      const projectPath = meta.APP_DIR || '';
+      const gitStatus = readProjectGitStatus(projectPath);
+      sendJson(res, 200, {
+        project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
+        repo: meta.REPO_REF || ref,
+        branch: meta.BRANCH || '',
+        projectPath,
+        exists: gitStatus.exists,
+        dirty: gitStatus.dirty,
+        changes: gitStatus.lines || [],
+        message: gitStatus.exists
+          ? (gitStatus.dirty
+            ? `Local changes detected in ${ref}. Stash them before pulling?`
+            : `Repository is clean for ${ref}.`)
+          : `Git repository not found for ${ref}.`,
+      });
+      return;
+    }
+
     const updateStreamMatch = pathname.match(/^\/api\/projects\/(.+?)\/update-stream$/);
     if (updateStreamMatch) {
       const ref = decodeURIComponent(updateStreamMatch[1]);
@@ -3608,7 +3740,8 @@ async function handleRequest(req, res) {
         res.end('Method not allowed');
         return;
       }
-      streamProjectCtl(res, ['update', ref]);
+      const stash = url.searchParams.get('stash') === '1';
+      streamProjectCtl(res, ['update', ref], stash ? { PROJECTCTL_PULL_STASH: 'yes' } : {});
       return;
     }
 
