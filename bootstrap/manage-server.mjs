@@ -2838,7 +2838,7 @@ function renderPage() {
       pullConfirmSummary.innerHTML = '<div class="small">' + escapeHtml(preflight?.message || 'Git reported local changes in this project. Stash them first, then pull the remote branch.') + '</div>' +
         '<div class="small">Default action: Yes, stash and pull.</div>';
       pullConfirmBody.textContent = Array.isArray(preflight?.changes) && preflight.changes.length
-        ? preflight.changes.map((line) => '  ' + line).join('\n')
+        ? preflight.changes.map((line) => '  ' + line).join('\\n')
         : '(no change list available)';
       pullConfirmPanel.hidden = false;
       setModalLocked(true);
