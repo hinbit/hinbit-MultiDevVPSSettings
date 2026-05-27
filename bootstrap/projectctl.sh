@@ -154,6 +154,17 @@ git_repo_dirty_status() {
   git -C "${repo_dir}" status --porcelain 2>/dev/null || true
 }
 
+is_preserved_env_file() {
+  local path="$1"
+  local candidate=""
+
+  for candidate in "${ENV_CANDIDATES[@]}"; do
+    [[ "${path}" == "${candidate}" ]] && return 0
+  done
+
+  return 1
+}
+
 confirm_stash_before_pull() {
   local repo_dir="${1:-${APP_DIR}}"
   local dirty_status="${2:-}"
@@ -197,6 +208,10 @@ pull_repo_with_optional_stash() {
   local did_stash=0
   local env_backup_dir=""
   local pull_rc=0
+  local non_env_dirty_status=""
+  local non_env_dirty_paths=()
+  local line=""
+  local path=""
 
   for file in "${ENV_CANDIDATES[@]}"; do
     if git -C "${repo_dir}" ls-files --error-unmatch -- "${file}" >/dev/null 2>&1; then
@@ -205,11 +220,21 @@ pull_repo_with_optional_stash() {
   done
 
   dirty_status="$(git_repo_dirty_status "${repo_dir}")"
-  if [[ -n "${dirty_status}" ]]; then
-    if ! confirm_stash_before_pull "${repo_dir}" "${dirty_status}" "${REPO_REF:-${PROJECT_SLUG:-project}}"; then
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    path="${line:3}"
+    [[ -n "${path}" ]] || continue
+    if is_preserved_env_file "${path}"; then
+      continue
+    fi
+    non_env_dirty_paths+=("${path}")
+  done <<< "${dirty_status}"
+  if [[ ${#non_env_dirty_paths[@]} -gt 0 ]]; then
+    non_env_dirty_status="$(printf '%s\n' "${non_env_dirty_paths[@]}")"
+    if ! confirm_stash_before_pull "${repo_dir}" "${non_env_dirty_status}" "${REPO_REF:-${PROJECT_SLUG:-project}}"; then
       die "Pull cancelled"
     fi
-    git -C "${repo_dir}" stash push -u -m "projectctl auto-stash before pull ${REPO_REF:-${PROJECT_SLUG:-project}} $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    git -C "${repo_dir}" stash push -u -m "projectctl auto-stash before pull ${REPO_REF:-${PROJECT_SLUG:-project}} $(date -u +%Y-%m-%dT%H:%M:%SZ)" -- "${non_env_dirty_paths[@]}"
     did_stash=1
   fi
 
