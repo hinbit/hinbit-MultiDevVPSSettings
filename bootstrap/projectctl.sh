@@ -480,6 +480,17 @@ ensure_auth_dir() {
   mkdir -p "${AUTH_DIR}"
 }
 
+ensure_auth_file_accessible() {
+  local domain="$1"
+  local auth_file=""
+
+  [[ -n "${domain}" ]] || return 0
+  auth_file="$(auth_file_for_domain "${domain}")"
+  [[ -e "${auth_file}" ]] || return 0
+  chown root:www-data "${auth_file}" 2>/dev/null || true
+  chmod 0640 "${auth_file}" 2>/dev/null || true
+}
+
 ensure_app_map() {
   if [[ ! -f "${APP_MAP}" ]]; then
     cat > "${APP_MAP}" <<'EOF'
@@ -739,6 +750,7 @@ app_map_upsert() {
 
 sync_app_map() {
   if [[ -n "${APP_DOMAIN:-}" ]]; then
+    ensure_auth_file_accessible "${APP_DOMAIN}"
     app_map_upsert "${APP_DOMAIN}" "${APP_PORT}" "${APP_TYPE:-project}" "${APP_HTTPS:-yes}"
     if [[ -x /usr/local/bin/app-sync.sh ]]; then
       /usr/local/bin/app-sync.sh
