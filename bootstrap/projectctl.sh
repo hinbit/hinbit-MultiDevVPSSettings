@@ -556,6 +556,68 @@ project_db_machine_id() {
   printf '%s' "${machine_id:-${LOCAL_DB_MACHINE_ID}}"
 }
 
+project_sidecar_ports() {
+  local -a keys=(
+    MYSQL_API_PORT
+    VITE_REACT_PORT
+    VITE_DEV_PORT
+    API_PORT
+    GUI_PORT
+    FRONTEND_PORT
+    BACKEND_PORT
+    SERVER_PORT
+    WEB_PORT
+    ADMIN_PORT
+  )
+  local key=""
+  local value=""
+  local -a ports=()
+
+  for key in "${keys[@]}"; do
+    value="$(project_db_value "${key}")"
+    [[ "${value}" =~ ^[0-9]+$ ]] || continue
+    case "${value}" in
+      22|80|443|3306)
+        continue
+        ;;
+    esac
+    if [[ " ${ports[*]} " != *" ${value} "* ]]; then
+      ports+=("${value}")
+    fi
+  done
+
+  printf '%s\n' "${ports[@]}"
+}
+
+kill_listening_pids_on_port() {
+  local port="$1"
+  local listeners=""
+  local pid=""
+
+  command -v ss >/dev/null 2>&1 || return 0
+
+  listeners="$(ss -ltnp "sport = :${port}" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true)"
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    kill -TERM "${pid}" >/dev/null 2>&1 || true
+  done <<< "${listeners}"
+
+  sleep 1
+  listeners="$(ss -ltnp "sport = :${port}" 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true)"
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    kill -KILL "${pid}" >/dev/null 2>&1 || true
+  done <<< "${listeners}"
+}
+
+cleanup_project_sidecars() {
+  local port=""
+  while IFS= read -r port; do
+    [[ -n "${port}" ]] || continue
+    kill_listening_pids_on_port "${port}"
+  done < <(project_sidecar_ports)
+}
+
 sync_project_db_machine_env() {
   local machine_id="${1:-${LOCAL_DB_MACHINE_ID}}"
   local machine_host="${2:-127.0.0.1}"
@@ -1129,6 +1191,7 @@ start_pm2() {
 }
 
 restart_pm2() {
+  cleanup_project_sidecars
   if pm2 describe "${PM2_NAME}" >/dev/null 2>&1; then
     pm2 delete "${PM2_NAME}" >/dev/null 2>&1 || true
   fi
