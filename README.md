@@ -44,6 +44,8 @@ projectctl install --domain example.com --branch main --pm2-name example-app own
 projectctl install --domain example.com --branch main --pm2-name example-app --env-file /root/app.env --entrypoint server/index.js owner/repo
 ```
 
+If the repo is private under a separate GitHub account, configure root's `~/.ssh/config` on the app VPS so `Host github.com` uses the matching key. `projectctl` clones as root, so uploading a key into the VPS is not enough by itself.
+
 Pull updates and restart PM2 for an existing project:
 
 ```bash

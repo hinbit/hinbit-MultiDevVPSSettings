@@ -119,6 +119,8 @@ You can later edit the machine details, including the root credentials and appro
 
 Use `projectctl install` from the app VPS:
 
+If the repo lives under a GitHub account that is not the server's default GitHub identity, make sure root has a `Host github.com` entry in `~/.ssh/config` that points at the matching private key. `projectctl` runs `git clone` directly as root, so the key must be selected there or the clone will fail with `Permission denied (publickey)`.
+
 ```bash
 projectctl install --domain example.com --branch main --pm2-name example-app --db-machine local-current owner/repo
 ```
