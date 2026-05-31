@@ -660,12 +660,20 @@ update_meta_value() {
   tmp="$(mktemp)"
   awk -v key="${key}" -v value="${value}" '
     BEGIN { updated = 0 }
-    $1 == key {
-      print key "=" value
-      updated = 1
-      next
+    {
+      line = $0
+      split(line, parts, "=")
+      current = parts[1]
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", current)
+      if (current == key) {
+        if (!updated) {
+          print key "=" value
+          updated = 1
+        }
+        next
+      }
+      print line
     }
-    { print }
     END {
       if (!updated) {
         print key "=" value
@@ -716,6 +724,16 @@ package_has_script() {
     const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
     const script = process.argv[1];
     process.exit(pkg.scripts && Object.prototype.hasOwnProperty.call(pkg.scripts, script) ? 0 : 1);
+  ' "${script}"
+}
+
+package_script_value() {
+  local script="$1"
+  node -e '
+    const fs = require("fs");
+    const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+    const script = process.argv[1];
+    process.stdout.write(pkg.scripts && pkg.scripts[script] ? String(pkg.scripts[script]) : "");
   ' "${script}"
 }
 
@@ -839,8 +857,25 @@ detect_start_kind() {
   fi
 
   if [[ -f package.json ]]; then
+    local start_script=""
+    local prod_script=""
+
+    if package_has_script prod; then
+      prod_script="$(package_script_value prod)"
+    fi
+
     if package_has_script start; then
+      start_script="$(package_script_value start)"
+      if [[ -n "${prod_script}" && "${start_script}" =~ (npm[[:space:]]+run[[:space:]]+dev|yarn[[:space:]]+dev|pnpm[[:space:]]+run[[:space:]]+dev|concurrently|vite|nodemon) ]]; then
+        printf 'npm-prod'
+        return
+      fi
       printf 'npm-start'
+      return
+    fi
+
+    if [[ -n "${prod_script}" ]]; then
+      printf 'npm-prod'
       return
     fi
 
@@ -891,6 +926,25 @@ start_kind_target() {
     npm-start|npm-dev) printf '' ;;
     *) printf '' ;;
   esac
+}
+
+refresh_project_start_kind() {
+  local meta="$1"
+  local detected=""
+
+  [[ -n "${meta}" ]] || return 0
+  [[ -f "${meta}" ]] || return 0
+  [[ -d "${APP_DIR}" ]] || return 0
+
+  detected="$(cd "${APP_DIR}" && detect_start_kind)"
+  if [[ -n "${detected}" && "${detected}" != "${START_KIND:-}" ]]; then
+    START_KIND="${detected}"
+    START_TARGET="$(start_kind_target "${START_KIND}")"
+    APP_TYPE="$(start_kind_family "${START_KIND}")"
+    update_meta_value "${meta}" "START_KIND" "${START_KIND}"
+    update_meta_value "${meta}" "START_TARGET" "${START_TARGET}"
+    update_meta_value "${meta}" "APP_TYPE" "${APP_TYPE}"
+  fi
 }
 
 used_ports() {
@@ -1224,6 +1278,15 @@ start_pm2() {
       ecosystem)
         start_with_env pm2 start "${START_TARGET}" --name "${PM2_NAME}" --update-env --time
         ;;
+      npm-prod)
+        case "${PACKAGE_MANAGER:-npm}" in
+          pnpm) start_with_env env PORT="${APP_PORT}" pm2 start pnpm --name "${PM2_NAME}" --time -- prod ;;
+          corepack-pnpm) start_with_env env PORT="${APP_PORT}" pm2 start corepack --name "${PM2_NAME}" --time -- pnpm run prod ;;
+          yarn) start_with_env env PORT="${APP_PORT}" pm2 start yarn --name "${PM2_NAME}" --time -- prod ;;
+          corepack-yarn) start_with_env env PORT="${APP_PORT}" pm2 start corepack --name "${PM2_NAME}" --time -- yarn prod ;;
+          *) start_with_env env PORT="${APP_PORT}" pm2 start npm --name "${PM2_NAME}" --time -- run prod ;;
+        esac
+        ;;
       npm-start)
         case "${PACKAGE_MANAGER:-npm}" in
           pnpm) start_with_env env PORT="${APP_PORT}" pm2 start pnpm --name "${PM2_NAME}" --time -- start ;;
@@ -1391,6 +1454,7 @@ do_update() {
     install_deps
     maybe_build
   )
+  refresh_project_start_kind "${meta}"
 
   if [[ -z "${SSH_UPLOAD_USER:-}" ]]; then
     SSH_UPLOAD_USER="$(ssh_upload_user_from_slug "${PROJECT_SLUG}")"
