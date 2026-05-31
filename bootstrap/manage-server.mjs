@@ -2338,6 +2338,7 @@ function renderPage() {
           <input id="envUploadInput" type="file" accept=".zip" hidden>
           Choose zip
         </label>
+        <a id="envDownloadZipBtn" class="btn ghost" href="#" download>Download zip</a>
         <button id="envUploadBtn" class="secondary" type="button">Upload zip</button>
         <button id="closeEnvBtn" class="ghost" type="button">Close</button>
       </div>
@@ -2453,6 +2454,7 @@ function renderPage() {
     const envRestoreSelectedBtn = document.getElementById('envRestoreSelectedBtn');
     const envUploadInput = document.getElementById('envUploadInput');
     const envUploadBtn = document.getElementById('envUploadBtn');
+    const envDownloadZipBtn = document.getElementById('envDownloadZipBtn');
     const closeEnvBtn = document.getElementById('closeEnvBtn');
     const envBackupsList = document.getElementById('envBackupsList');
     const progressPanel = document.getElementById('progressPanel');
@@ -2942,6 +2944,7 @@ function renderPage() {
       envRestoreBtn.disabled = !backups.length;
       envRestoreSelectedBtn.disabled = !backups.length;
       envDownloadBtn.href = \`\${API}/projects/\${ref}/env/download\`;
+      if (envDownloadZipBtn) envDownloadZipBtn.href = \`\${API}/projects/\${ref}/env/download\`;
       envPanel.hidden = false;
       setModalLocked(true);
     }
