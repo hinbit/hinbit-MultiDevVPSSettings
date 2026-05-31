@@ -2315,6 +2315,8 @@ function renderPage() {
         <a id="envDownloadBtn" class="btn ghost" href="#" download>Download zip</a>
         <button id="envBackupBtn" class="secondary" type="button">Backup</button>
         <button id="envRestoreBtn" class="danger" type="button">Restore latest</button>
+        <select id="envRestoreSelect" class="secondary" style="min-width: 240px;"></select>
+        <button id="envRestoreSelectedBtn" class="danger" type="button">Restore selected</button>
         <label class="btn ghost" style="cursor:pointer">
           <input id="envUploadInput" type="file" accept=".zip" hidden>
           Choose zip
@@ -2430,6 +2432,8 @@ function renderPage() {
     const envDownloadBtn = document.getElementById('envDownloadBtn');
     const envBackupBtn = document.getElementById('envBackupBtn');
     const envRestoreBtn = document.getElementById('envRestoreBtn');
+    const envRestoreSelect = document.getElementById('envRestoreSelect');
+    const envRestoreSelectedBtn = document.getElementById('envRestoreSelectedBtn');
     const envUploadInput = document.getElementById('envUploadInput');
     const envUploadBtn = document.getElementById('envUploadBtn');
     const closeEnvBtn = document.getElementById('closeEnvBtn');
@@ -2880,6 +2884,19 @@ function renderPage() {
       \`).join('');
     }
 
+    function renderBackupSelect(selectEl, backups, selectedName = '') {
+      if (!selectEl) return;
+      const list = Array.isArray(backups) ? backups : [];
+      selectEl.innerHTML = list.length
+        ? list.map((backup) => \`
+          <option value="\${escapeHtml(backup.name || '')}"\${String(backup.name || '') === String(selectedName || '') ? ' selected' : ''}>
+            \${escapeHtml(backup.name || '')}\${backup.isLatest ? ' (latest)' : ''}
+          </option>
+        \`).join('')
+        : '<option value="">No backups available</option>';
+      selectEl.disabled = !list.length;
+    }
+
     function openEnvPanel(ref, details, subtitle) {
       closeScriptsModal();
       closeDbPanel();
@@ -2890,12 +2907,15 @@ function renderPage() {
       envTitle.textContent = 'Environment Values';
       envSubtitle.textContent = subtitle || '';
       envFlash.hidden = true;
+      const backups = Array.isArray(details.backups) ? details.backups : [];
       const entries = Object.entries(details.env || {})
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([key, value]) => [key, String(value)]);
       renderKeyValueList(envList, entries);
-      renderBackupList(envBackupsList, details.backups || []);
-      envRestoreBtn.disabled = !(Array.isArray(details.backups) && details.backups.length);
+      renderBackupList(envBackupsList, backups);
+      renderBackupSelect(envRestoreSelect, backups, details.latestBackup?.name || 'latest.zip');
+      envRestoreBtn.disabled = !backups.length;
+      envRestoreSelectedBtn.disabled = !backups.length;
       envDownloadBtn.href = \`\${API}/projects/\${ref}/env/download\`;
       envPanel.hidden = false;
       setModalLocked(true);
@@ -2906,6 +2926,7 @@ function renderPage() {
       currentEnvRef = '';
       envList.innerHTML = '';
       envBackupsList.innerHTML = '';
+      if (envRestoreSelect) envRestoreSelect.innerHTML = '';
       envFlash.hidden = true;
       envUploadInput.value = '';
       setModalLocked(false);
@@ -3495,6 +3516,25 @@ function renderPage() {
         envPanel.hidden = false;
       } finally {
         envRestoreBtn.disabled = false;
+      }
+    });
+
+    envRestoreSelectedBtn.addEventListener('click', async () => {
+      if (!currentEnvRef) return;
+      const backupName = envRestoreSelect && envRestoreSelect.value ? envRestoreSelect.value : 'latest.zip';
+      const ok = window.confirm(
+        'Restore backup "' + backupName + '" for ' + decodeURIComponent(currentEnvRef) + '? This will overwrite the current .env files and restart the project.',
+      );
+      if (!ok) return;
+      envRestoreSelectedBtn.disabled = true;
+      try {
+        showMessage(envFlash, 'Restoring ' + backupName + ' for ' + decodeURIComponent(currentEnvRef) + '...');
+        await restoreEnv(currentEnvRef, backupName);
+      } catch (error) {
+        showMessage(envFlash, error.message, false);
+        envPanel.hidden = false;
+      } finally {
+        envRestoreSelectedBtn.disabled = false;
       }
     });
 
