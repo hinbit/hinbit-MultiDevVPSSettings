@@ -13,6 +13,7 @@ Bootstrap for a clean Ubuntu VPS that hosts multiple Node/React apps behind ngin
 - the app routing files used by `app-sync.sh`
 - `projectctl` for GitHub clone/pull/restart workflows
 - a `/manage/` control panel on the system portal for installs, restarts, updates, logs, stop/kill, project passwords, DB details, environment files, package scripts, and machine stats
+- a `/manage/tls/` page for pasting server-default and per-project certificate + key PEMs
 
 ## What it does not install
 
@@ -84,6 +85,7 @@ multidev.seach.co.il -> http://127.0.0.1:8090
 
 The tunnel should point to the machine serving `/manage/`, not the separate DB host unless you intentionally want that host to proxy the UI.
 The root path `/` now serves the portal landing page, and `/manage/` serves the project dashboard.
+Use `/manage/tls/` to paste a server-default certificate for the manage host domain and a per-project certificate for any app domain. Custom certs are stored under `/etc/vps-custom-certs/` and override Let’s Encrypt on sync.
 
 ## Runtime layout
 

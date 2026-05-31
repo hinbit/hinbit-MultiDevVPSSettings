@@ -9,10 +9,14 @@ import { fileURLToPath } from 'url';
 const META_DIR = '/etc/vps-projects';
 const AUTH_DIR = '/etc/nginx/project-auth';
 const SYSTEM_ENV_FILE = '/etc/vps-system.env';
+const SYSTEM_DOMAIN_FILE = '/etc/vps-system-domain';
 const DB_MACHINES_FILE = '/etc/vps-db-machines.json';
 const SSH_KEYS_FILE = '/etc/vps-ssh-keys.json';
 const SSH_KEYS_DIR = '/root/.ssh/vps-managed-keys';
 const PROJECT_ENV_BACKUP_DIR = '/etc/vps-project-env-backups';
+const TLS_CUSTOM_DIR = '/etc/vps-custom-certs';
+const TLS_SERVER_DIR = path.join(TLS_CUSTOM_DIR, 'server');
+const TLS_PROJECT_DIR = path.join(TLS_CUSTOM_DIR, 'projects');
 const PROJECTCTL = '/usr/local/bin/projectctl';
 const PM2 = 'pm2';
 const BASIC_USER = 'manage';
@@ -248,6 +252,11 @@ function readProjectSslStatus(project) {
     return { label: 'HTTP only', className: 'warn', active: false };
   }
 
+  const custom = readTlsStatus('project', domain, domain);
+  if (custom.active && custom.source === 'custom') {
+    return { label: 'SSL active (custom)', className: 'good', active: true };
+  }
+
   const confPath = `/etc/nginx/sites-available/${domain}.conf`;
   const certPath = `/etc/letsencrypt/live/${domain}/fullchain.pem`;
   const certReady = fs.existsSync(certPath) && fs.statSync(certPath).size > 0;
@@ -260,6 +269,28 @@ function readProjectSslStatus(project) {
     return { label: 'SSL pending', className: 'warn', active: false };
   }
   return { label: 'SSL missing', className: 'warn', active: false };
+}
+
+function readProjectTlsStatus(project) {
+  const domain = String(project?.APP_DOMAIN || '').trim();
+  const ssl = readProjectSslStatus(project);
+  const tls = domain ? readTlsStatus('project', domain, domain) : {
+    scope: 'project',
+    key: '',
+    label: 'no domain',
+    source: 'missing',
+    active: false,
+    certPath: '',
+    keyPath: '',
+    dir: '',
+  };
+  return {
+    domain,
+    ...tls,
+    statusLabel: ssl.label,
+    statusClass: ssl.className,
+    active: ssl.active,
+  };
 }
 
 function readPackageScripts(projectPath) {
@@ -407,6 +438,141 @@ function writeDbMachines(machines) {
   }
   fs.writeFileSync(DB_MACHINES_FILE, `${JSON.stringify(list, null, 2)}\n`);
   fs.chmodSync(DB_MACHINES_FILE, 0o600);
+}
+
+function safeTlsKey(input) {
+  return String(input || '')
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 120);
+}
+
+function tlsEntryDir(scope, key) {
+  const safeKey = safeTlsKey(key);
+  if (!safeKey) return '';
+  if (scope === 'server') {
+    return path.join(TLS_SERVER_DIR, safeKey);
+  }
+  return path.join(TLS_PROJECT_DIR, safeKey);
+}
+
+function tlsEntryPaths(scope, key) {
+  const dir = tlsEntryDir(scope, key);
+  if (!dir) return { dir: '', certPath: '', keyPath: '' };
+  return {
+    dir,
+    certPath: path.join(dir, 'fullchain.pem'),
+    keyPath: path.join(dir, 'privkey.pem'),
+  };
+}
+
+function ensureTlsDirs() {
+  fs.mkdirSync(TLS_SERVER_DIR, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(TLS_PROJECT_DIR, { recursive: true, mode: 0o700 });
+}
+
+function readTlsStatus(scope, key, label = '') {
+  const { dir, certPath, keyPath } = tlsEntryPaths(scope, key);
+  const exists = Boolean(dir && fs.existsSync(certPath) && fs.existsSync(keyPath));
+  const letsEncryptCert = scope === 'server'
+    ? `/etc/letsencrypt/live/${String(key || '').trim()}/fullchain.pem`
+    : `/etc/letsencrypt/live/${String(key || '').trim()}/fullchain.pem`;
+  const letsEncryptKey = scope === 'server'
+    ? `/etc/letsencrypt/live/${String(key || '').trim()}/privkey.pem`
+    : `/etc/letsencrypt/live/${String(key || '').trim()}/privkey.pem`;
+  const letsEncryptActive = fs.existsSync(letsEncryptCert) && fs.existsSync(letsEncryptKey);
+  if (exists) {
+    return {
+      scope,
+      key,
+      label: label || key,
+      source: 'custom',
+      active: true,
+      certPath,
+      keyPath,
+      dir,
+    };
+  }
+  if (letsEncryptActive) {
+    return {
+      scope,
+      key,
+      label: label || key,
+      source: 'letsencrypt',
+      active: true,
+      certPath: letsEncryptCert,
+      keyPath: letsEncryptKey,
+      dir: path.dirname(letsEncryptCert),
+    };
+  }
+  return {
+    scope,
+    key,
+    label: label || key,
+    source: 'missing',
+    active: false,
+    certPath: '',
+    keyPath: '',
+    dir,
+  };
+}
+
+function saveTlsEntry(scope, key, certificatePem, privateKeyPem) {
+  const { dir, certPath, keyPath } = tlsEntryPaths(scope, key);
+  if (!dir) throw new Error('Invalid TLS key');
+  if (!String(certificatePem || '').trim()) throw new Error('Certificate PEM is required');
+  if (!String(privateKeyPem || '').trim()) throw new Error('Private key PEM is required');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(certPath, String(certificatePem).replace(/\r\n/g, '\n').trim() + '\n');
+  fs.writeFileSync(keyPath, String(privateKeyPem).replace(/\r\n/g, '\n').trim() + '\n');
+  fs.chmodSync(certPath, 0o644);
+  fs.chmodSync(keyPath, 0o600);
+  return { dir, certPath, keyPath };
+}
+
+function deleteTlsEntry(scope, key) {
+  const { dir } = tlsEntryPaths(scope, key);
+  if (!dir || !fs.existsSync(dir)) return false;
+  fs.rmSync(dir, { recursive: true, force: true });
+  return true;
+}
+
+function getSystemDomain() {
+  try {
+    if (fs.existsSync(SYSTEM_DOMAIN_FILE)) {
+      return fs.readFileSync(SYSTEM_DOMAIN_FILE, 'utf8').trim();
+    }
+  } catch {
+    // Ignore unreadable system domain file.
+  }
+  return '';
+}
+
+function readSystemTlsStatus() {
+  const domain = getSystemDomain();
+  if (!domain) {
+    return {
+      scope: 'server',
+      key: '',
+      label: 'no system domain',
+      source: 'missing',
+      active: false,
+      certPath: '',
+      keyPath: '',
+      dir: '',
+      domain: '',
+    };
+  }
+  return {
+    ...readTlsStatus('server', domain, domain),
+    domain,
+  };
+}
+
+function tlsScopeLabel(scope) {
+  return scope === 'server' ? 'Server default' : 'Project';
 }
 
 function describeDbMachine(machine) {
@@ -913,6 +1079,7 @@ function projectView() {
       sslActive: ssl.active,
       sslStatus: ssl.label,
       sslStatusClass: ssl.className,
+      sslSource: ssl.source || 'missing',
       status: env.status || 'stopped',
       restarts: env.restart_time ?? proc?.pm2_env?.restart_time ?? 0,
       uptime: proc?.pm2_env?.pm_uptime || 0,
@@ -1903,6 +2070,21 @@ function runProjectCtl(args, input = null) {
   return (res.stdout || '').trim();
 }
 
+function runSyncScript(scriptName) {
+  const scriptPath = scriptName === 'server'
+    ? '/usr/local/bin/system-sync.sh'
+    : '/usr/local/bin/app-sync.sh';
+  const res = spawnSync('bash', [scriptPath], {
+    encoding: 'utf8',
+    maxBuffer: 20 * 1024 * 1024,
+  });
+  if (res.error) throw res.error;
+  if (res.status !== 0) {
+    throw new Error((res.stderr || res.stdout || `${scriptPath} failed`).trim());
+  }
+  return (res.stdout || '').trim();
+}
+
 function streamProjectCtl(res, args, extraEnv = {}) {
   const child = spawn(PROJECTCTL, args, {
     cwd: '/',
@@ -2131,6 +2313,7 @@ function renderPortalPage() {
       <a class="btn ghost" href="/manage/ssh-keys/">SSH Keys</a>
       <a class="btn ghost" href="/manage/vault/">DB Vault</a>
       <a class="btn ghost" href="/manage/db-machines/">DB Machines</a>
+      <a class="btn ghost" href="/manage/tls/">TLS / Certificates</a>
     </div>
   </header>
   <main class="grid cards">
@@ -2154,6 +2337,11 @@ function renderPortalPage() {
       <h2 class="card-title">DB Machines</h2>
       <div class="card-desc">Register and edit local or remote DB machines, root credentials, and allowed IPs.</div>
     </a>
+    <a class="card" href="/manage/tls/">
+      <div class="card-meta">Security</div>
+      <h2 class="card-title">TLS / Certificates</h2>
+      <div class="card-desc">Upload server and project certificates, switch between custom certs and Let’s Encrypt, and keep nginx in sync.</div>
+    </a>
     <a class="card" href="/phpmyadmin/">
       <div class="card-meta">Database UI</div>
       <h2 class="card-title">phpMyAdmin</h2>
@@ -2165,6 +2353,427 @@ function renderPortalPage() {
       <div class="card-desc">Jump to the full project list and PM2 management screen.</div>
     </a>
   </main>
+</body>
+</html>`;
+}
+
+function renderTlsPage(selectedRef = '') {
+  const projects = projectView();
+  const server = readSystemTlsStatus();
+  const initialProjects = JSON.stringify(projects).replace(/</g, '\\u003c');
+  const initialServer = JSON.stringify(server).replace(/</g, '\\u003c');
+  const selectedProject = projects.find((project) => {
+    const ref = project.repo || project.slug || '';
+    return ref === selectedRef;
+  }) || projects[0] || null;
+  const projectOptions = projects.length
+    ? projects.map((project) => {
+        const ref = project.repo || project.slug || '';
+        const label = `${project.repo || project.slug || ''} · ${project.domain || 'no domain'}`;
+        return `<option value="${escapeHtml(ref)}"${ref === (selectedProject?.repo || selectedProject?.slug || '') ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+      }).join('')
+    : '<option value="">No projects found</option>';
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TLS / Certificates</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font-family: Inter, system-ui, sans-serif; background: radial-gradient(circle at top, #11213d 0, #08111f 50%, #05070c 100%); color: #e5eef8; padding-top: 84px; }
+    header, main { max-width: 1400px; margin: 0 auto; padding: 24px; }
+    header { display: flex; justify-content: space-between; align-items: end; gap: 16px; }
+    h1, h2 { margin: 0 0 12px; }
+    .muted { color: #94a3b8; }
+    .small { font-size: 12px; color: #94a3b8; }
+    .panel { background: rgba(8, 15, 29, 0.88); border: 1px solid rgba(148,163,184,0.2); border-radius: 18px; padding: 20px; box-shadow: 0 12px 40px rgba(0,0,0,0.35); }
+    .grid { display: grid; gap: 16px; }
+    .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .stack { display: grid; gap: 12px; }
+    label { display: grid; gap: 6px; font-size: 13px; color: #cbd5e1; }
+    input, textarea, select { width: 100%; box-sizing: border-box; background: #0b1220; color: #e5eef8; border: 1px solid #22304a; border-radius: 10px; padding: 10px 12px; }
+    textarea { min-height: 180px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    button, .btn { background: linear-gradient(180deg, #38bdf8, #0ea5e9); color: #00111d; border: 0; border-radius: 999px; padding: 10px 14px; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+    button.secondary, .btn.secondary { background: #162033; color: #dbeafe; border: 1px solid #2a3b59; }
+    button.danger, .btn.danger { background: linear-gradient(180deg, #f87171, #ef4444); color: #1c0202; }
+    button.ghost, .btn.ghost { background: transparent; color: #dbeafe; border: 1px solid #2a3b59; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .kv-item { display: grid; gap: 4px; padding: 12px; border: 1px solid #22304a; border-radius: 12px; background: #0b1220; }
+    .kv-item code { white-space: pre-wrap; word-break: break-word; }
+    .pill { display: inline-flex; padding: 3px 8px; border-radius: 999px; background: #102338; border: 1px solid #23405f; font-size: 12px; }
+    .pill.good { background: #0f3a24; border-color: #14532d; color: #86efac; }
+    .pill.warn { background: #3f2d0c; border-color: #7c2d12; color: #fde68a; }
+    .pill.neutral { background: #1f2937; border-color: #334155; color: #cbd5e1; }
+    .flash { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #0b1220; border: 1px solid #22304a; white-space: pre-wrap; }
+    .hinbit-brand {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      z-index: 80;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(8, 15, 29, 0.82);
+      border: 1px solid rgba(148,163,184,0.22);
+      box-shadow: 0 12px 32px rgba(0,0,0,0.25);
+      text-decoration: none;
+      color: #e5eef8;
+      backdrop-filter: blur(12px);
+    }
+    .hinbit-brand img { width: 22px; height: 22px; display: block; object-fit: contain; }
+    .hinbit-brand span { font-size: 12px; font-weight: 700; letter-spacing: 0.02em; white-space: nowrap; }
+    @media (max-width: 980px) {
+      .two { grid-template-columns: 1fr; }
+      header { align-items: start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <a class="hinbit-brand" href="https://hinbit.com" target="_blank" rel="noreferrer">
+    <img src="https://hinbit.com/hebrew_site/hinbit-logo-symbol.png" alt="Hinbit">
+    <span>Powered by Hinbit Development</span>
+  </a>
+  <header>
+    <div>
+      <h1>TLS / Certificates</h1>
+      <div class="muted">Upload or paste a certificate and private key for the server domain or a project domain.</div>
+      <div class="small">Custom certs are stored under <code>/etc/vps-custom-certs</code> and win over Let’s Encrypt.</div>
+    </div>
+    <div class="actions">
+      <a class="btn ghost" href="/">Portal</a>
+      <a class="btn ghost" href="/manage/">Projects</a>
+      <a class="btn ghost" href="/manage/ssh-keys/">SSH Keys</a>
+      <a class="btn ghost" href="/manage/vault/">DB Vault</a>
+      <a class="btn ghost" href="/manage/db-machines/">DB Machines</a>
+      <button id="refreshBtn" class="secondary" type="button">Refresh</button>
+    </div>
+  </header>
+  <main class="grid" style="gap:20px">
+    <section class="panel">
+      <h2>Server default certificate</h2>
+      <div class="small">Applies to the server domain in <code>/etc/vps-system-domain</code>. Current domain: <code id="serverDomainText">${escapeHtml(server.domain || getSystemDomain() || 'n/a')}</code></div>
+      <div class="grid two" style="margin-top:14px;">
+        <div class="kv-item">
+          <div class="small">Current status</div>
+          <div><span id="serverStatusPill" class="pill ${escapeHtml(server.source === 'custom' ? 'good' : (server.source === 'letsencrypt' ? 'good' : 'warn'))}">${escapeHtml(server.label || 'n/a')}</span></div>
+          <div class="small">Source: <code id="serverSourceText">${escapeHtml(server.source || 'missing')}</code></div>
+          <div class="small">Certificate path: <code id="serverCertPathText">${escapeHtml(server.certPath || 'n/a')}</code></div>
+          <div class="small">Key path: <code id="serverKeyPathText">${escapeHtml(server.keyPath || 'n/a')}</code></div>
+        </div>
+        <div class="stack">
+          <label>Certificate / fullchain PEM
+            <textarea id="serverCertPem" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+          </label>
+          <label>Private key PEM
+            <textarea id="serverKeyPem" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+          </label>
+          <div class="actions">
+            <button id="saveServerBtn" type="button">Save server cert</button>
+            <button id="deleteServerBtn" class="danger" type="button">Delete custom cert</button>
+          </div>
+        </div>
+      </div>
+      <div id="serverFlash" class="flash" hidden></div>
+    </section>
+
+    <section class="panel">
+      <h2>Project certificate</h2>
+      <div class="grid two">
+        <label>Project
+          <select id="projectSelect">${projectOptions}</select>
+        </label>
+        <div class="kv-item">
+          <div class="small">Selected project</div>
+          <div><strong id="projectTitleText">${escapeHtml(selectedProject?.repo || selectedProject?.slug || 'n/a')}</strong></div>
+          <div class="small">Domain: <code id="projectDomainText">${escapeHtml(selectedProject?.domain || 'n/a')}</code></div>
+          <div class="small">Status: <span id="projectStatusPill" class="pill neutral">Loading...</span></div>
+          <div class="small">Source: <code id="projectSourceText">n/a</code></div>
+          <div class="small">Certificate path: <code id="projectCertPathText">n/a</code></div>
+          <div class="small">Key path: <code id="projectKeyPathText">n/a</code></div>
+        </div>
+      </div>
+      <div class="grid two" style="margin-top:14px;">
+        <div class="stack">
+          <label>Certificate / fullchain PEM
+            <textarea id="projectCertPem" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+          </label>
+          <label>Private key PEM
+            <textarea id="projectKeyPem" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+          </label>
+          <div class="actions">
+            <button id="saveProjectBtn" type="button">Save project cert</button>
+            <button id="deleteProjectBtn" class="danger" type="button">Delete custom cert</button>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="kv-item">
+            <div class="small">How it works</div>
+            <div class="small">Paste the certificate and private key, save, and the server will rewrite the correct nginx vhost. Custom certs under <code>/etc/vps-custom-certs</code> override Let’s Encrypt on the next sync.</div>
+          </div>
+          <div class="kv-item">
+            <div class="small">Notes</div>
+            <div class="small">Use a Cloudflare Origin Certificate here if you want Cloudflare proxied HTTPS, or paste a browser-trusted cert if you have one. For projects, the domain must match the selected project domain.</div>
+          </div>
+        </div>
+      </div>
+      <div id="projectFlash" class="flash" hidden></div>
+    </section>
+  </main>
+  <script>
+    const API = '/manage/api';
+    const currentProjects = ${initialProjects};
+    const initialServer = ${initialServer};
+    const initialSelectedRef = ${JSON.stringify(selectedProject ? (selectedProject.repo || selectedProject.slug || '') : '')};
+    const serverDomainText = document.getElementById('serverDomainText');
+    const serverStatusPill = document.getElementById('serverStatusPill');
+    const serverSourceText = document.getElementById('serverSourceText');
+    const serverCertPathText = document.getElementById('serverCertPathText');
+    const serverKeyPathText = document.getElementById('serverKeyPathText');
+    const serverCertPem = document.getElementById('serverCertPem');
+    const serverKeyPem = document.getElementById('serverKeyPem');
+    const serverFlash = document.getElementById('serverFlash');
+    const saveServerBtn = document.getElementById('saveServerBtn');
+    const deleteServerBtn = document.getElementById('deleteServerBtn');
+    const projectSelect = document.getElementById('projectSelect');
+    const projectTitleText = document.getElementById('projectTitleText');
+    const projectDomainText = document.getElementById('projectDomainText');
+    const projectStatusPill = document.getElementById('projectStatusPill');
+    const projectSourceText = document.getElementById('projectSourceText');
+    const projectCertPathText = document.getElementById('projectCertPathText');
+    const projectKeyPathText = document.getElementById('projectKeyPathText');
+    const projectCertPem = document.getElementById('projectCertPem');
+    const projectKeyPem = document.getElementById('projectKeyPem');
+    const projectFlash = document.getElementById('projectFlash');
+    const saveProjectBtn = document.getElementById('saveProjectBtn');
+    const deleteProjectBtn = document.getElementById('deleteProjectBtn');
+    const refreshBtn = document.getElementById('refreshBtn');
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function showMessage(el, value, ok = true) {
+      el.hidden = false;
+      el.style.borderColor = ok ? '#1d4ed8' : '#7f1d1d';
+      el.textContent = value;
+    }
+
+    async function api(path, options = {}) {
+      const res = await fetch(\`\${API}\${path}\`, {
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        credentials: 'same-origin',
+        ...options,
+      });
+      const text = await res.text();
+      let data;
+      try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+      if (!res.ok) {
+        const message = data && typeof data === 'object' ? (data.error || data.message || text) : text;
+        throw new Error(message || \`Request failed: \${res.status}\`);
+      }
+      return data;
+    }
+
+    function statusClass(source, active) {
+      if (source === 'custom' || source === 'letsencrypt') return 'good';
+      return active ? 'good' : 'warn';
+    }
+
+    function renderProjectOptions(list, selectedRef = '') {
+      const projects = Array.isArray(list) ? list : [];
+      return projects.length
+        ? projects.map((project) => {
+            const ref = String(project.repo || project.slug || '');
+            const label = (project.repo || project.slug || '') + ' · ' + (project.domain || 'no domain');
+            return '<option value="' + escapeHtml(ref) + '"' + (ref === String(selectedRef || '') ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+          }).join('')
+        : '<option value="">No projects found</option>';
+    }
+
+    function applyServer(data) {
+      const server = data?.server ? { ...data, ...data.server } : (data || {});
+      serverDomainText.textContent = server.domain || '${escapeHtml(server.domain || getSystemDomain() || '')}';
+      serverStatusPill.className = 'pill ' + statusClass(server.source, server.active);
+      serverStatusPill.textContent = server.label || 'n/a';
+      serverSourceText.textContent = server.source || 'missing';
+      serverCertPathText.textContent = server.certPath || 'n/a';
+      serverKeyPathText.textContent = server.keyPath || 'n/a';
+      if (!serverCertPem.value) {
+        serverCertPem.placeholder = server.source === 'custom' ? 'Current custom cert exists on disk' : '-----BEGIN CERTIFICATE-----';
+      }
+      if (!serverKeyPem.value) {
+        serverKeyPem.placeholder = server.source === 'custom' ? 'Current custom key exists on disk' : '-----BEGIN PRIVATE KEY-----';
+      }
+    }
+
+    function findProject(ref) {
+      return currentProjects.find((project) => String(project.repo || project.slug || '') === String(ref || '')) || null;
+    }
+
+    function applyProject(data) {
+      const project = data?.tls ? { ...data, ...data.tls } : (data || {});
+      projectTitleText.textContent = project.project || project.domain || 'n/a';
+      projectDomainText.textContent = project.domain || 'n/a';
+      projectStatusPill.className = 'pill ' + (project.statusClass || 'neutral');
+      projectStatusPill.textContent = project.statusLabel || 'n/a';
+      projectSourceText.textContent = project.source || 'missing';
+      projectCertPathText.textContent = project.certPath || 'n/a';
+      projectKeyPathText.textContent = project.keyPath || 'n/a';
+      if (!projectCertPem.value) {
+        projectCertPem.placeholder = project.source === 'custom' ? 'Current custom cert exists on disk' : '-----BEGIN CERTIFICATE-----';
+      }
+      if (!projectKeyPem.value) {
+        projectKeyPem.placeholder = project.source === 'custom' ? 'Current custom key exists on disk' : '-----BEGIN PRIVATE KEY-----';
+      }
+    }
+
+    async function loadProject(ref) {
+      if (!ref) return;
+      const data = await api('/tls/projects/' + encodeURIComponent(ref));
+      applyProject(data);
+    }
+
+    async function loadServer() {
+      const data = await api('/tls/server');
+      applyServer(data);
+    }
+
+    async function refresh() {
+      const data = await api('/tls');
+      if (data.server) applyServer(data.server);
+      if (Array.isArray(data.projects)) {
+        currentProjects.splice(0, currentProjects.length, ...data.projects);
+      }
+      const selected = projectSelect.value || initialSelectedRef || (currentProjects[0] && (currentProjects[0].repo || currentProjects[0].slug || '')) || '';
+      projectSelect.innerHTML = renderProjectOptions(currentProjects, selected);
+      if (selected) {
+        projectSelect.value = selected;
+        await loadProject(selected);
+      }
+    }
+
+    async function saveServer() {
+      const payload = {
+        certificatePem: serverCertPem.value.trim(),
+        privateKeyPem: serverKeyPem.value.trim(),
+      };
+      const res = await api('/tls/server', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      showMessage(serverFlash, res.message || 'Server certificate saved');
+      serverCertPem.value = '';
+      serverKeyPem.value = '';
+      await loadServer();
+    }
+
+    async function deleteServer() {
+      const ok = confirm('Delete the custom server certificate and fall back to Let\\'s Encrypt/HTTP?');
+      if (!ok) return;
+      const res = await api('/tls/server', { method: 'DELETE' });
+      showMessage(serverFlash, res.message || 'Server certificate removed');
+      await loadServer();
+    }
+
+    async function saveProject() {
+      const ref = projectSelect.value;
+      if (!ref) throw new Error('Choose a project first');
+      const payload = {
+        certificatePem: projectCertPem.value.trim(),
+        privateKeyPem: projectKeyPem.value.trim(),
+      };
+      const res = await api('/tls/projects/' + encodeURIComponent(ref), {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      showMessage(projectFlash, res.message || 'Project certificate saved');
+      projectCertPem.value = '';
+      projectKeyPem.value = '';
+      await loadProject(ref);
+    }
+
+    async function deleteProject() {
+      const ref = projectSelect.value;
+      if (!ref) return;
+      const ok = confirm('Delete the custom certificate for ' + ref + '?');
+      if (!ok) return;
+      const res = await api('/tls/projects/' + encodeURIComponent(ref), { method: 'DELETE' });
+      showMessage(projectFlash, res.message || 'Project certificate removed');
+      await loadProject(ref);
+    }
+
+    projectSelect.addEventListener('change', async () => {
+      const ref = projectSelect.value;
+      if (!ref) return;
+      await loadProject(ref);
+    });
+    saveServerBtn.addEventListener('click', async () => {
+      saveServerBtn.disabled = true;
+      try {
+        await saveServer();
+      } catch (error) {
+        showMessage(serverFlash, error.message, false);
+      } finally {
+        saveServerBtn.disabled = false;
+      }
+    });
+    deleteServerBtn.addEventListener('click', async () => {
+      deleteServerBtn.disabled = true;
+      try {
+        await deleteServer();
+      } catch (error) {
+        showMessage(serverFlash, error.message, false);
+      } finally {
+        deleteServerBtn.disabled = false;
+      }
+    });
+    saveProjectBtn.addEventListener('click', async () => {
+      saveProjectBtn.disabled = true;
+      try {
+        await saveProject();
+      } catch (error) {
+        showMessage(projectFlash, error.message, false);
+      } finally {
+        saveProjectBtn.disabled = false;
+      }
+    });
+    deleteProjectBtn.addEventListener('click', async () => {
+      deleteProjectBtn.disabled = true;
+      try {
+        await deleteProject();
+      } catch (error) {
+        showMessage(projectFlash, error.message, false);
+      } finally {
+        deleteProjectBtn.disabled = false;
+      }
+    });
+    refreshBtn.addEventListener('click', async () => {
+      refreshBtn.disabled = true;
+      try {
+        await refresh();
+      } catch (error) {
+        showMessage(projectFlash, error.message, false);
+      } finally {
+        refreshBtn.disabled = false;
+      }
+    });
+
+    applyServer(initialServer);
+    if (projectSelect.value || initialSelectedRef) {
+      const ref = projectSelect.value || initialSelectedRef;
+      if (ref) {
+        loadProject(ref).catch((error) => showMessage(projectFlash, error.message, false));
+      }
+    }
+  </script>
 </body>
 </html>`;
 }
@@ -2313,6 +2922,7 @@ function renderPage() {
     </div>
     <div class="actions">
       <a class="btn ghost" href="/">Portal</a>
+      <a class="btn ghost" href="/manage/tls/">TLS / Certificates</a>
       <a class="btn ghost" href="/phpmyadmin/">phpMyAdmin</a>
       <button class="secondary" id="refreshBtn" type="button">Refresh</button>
     </div>
@@ -2782,10 +3392,11 @@ function renderPage() {
     }
 
     function rowActions(project) {
-      const ref = encodeURIComponent(project.repo);
+      const ref = encodeURIComponent(project.repo || project.slug || '');
       return \`
         <div class="actions">
           \${project.domain ? '<a class="btn ghost" href="https://' + escapeHtml(project.domain) + '/" target="_blank" rel="noreferrer">Open</a>' : ''}
+          <a class="btn ghost" href="/manage/tls/?ref=\${ref}">SSL</a>
           <button class="secondary" data-action="update" data-ref="\${ref}">Pull</button>
           <button class="secondary" data-action="restart" data-ref="\${ref}">Restart</button>
           <button class="secondary" data-action="stop" data-ref="\${ref}">Stop</button>
@@ -3925,6 +4536,15 @@ async function handleRequest(req, res) {
       return;
     }
 
+    if (req.method === 'GET' && (routePath === '/tls' || routePath === '/ssl')) {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(renderTlsPage(url.searchParams.get('ref') || ''));
+      return;
+    }
+
     if (req.method === 'GET' && routePath === '/') {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
@@ -3951,6 +4571,123 @@ async function handleRequest(req, res) {
     if (req.method === 'GET' && routePath === '/api/system') {
       sendJson(res, 200, { system: getSystemStats() });
       return;
+    }
+
+    if (req.method === 'GET' && routePath === '/api/tls') {
+      sendJson(res, 200, {
+        systemDomain: getSystemDomain(),
+        server: readSystemTlsStatus(),
+        projects: projectView(),
+      });
+      return;
+    }
+
+    if (routePath === '/api/tls/server') {
+      const domain = getSystemDomain();
+      if (!domain) {
+        throw new Error('System domain is not configured');
+      }
+
+      if (req.method === 'GET') {
+        sendJson(res, 200, {
+          systemDomain: domain,
+          server: readSystemTlsStatus(),
+        });
+        return;
+      }
+
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        const saved = saveTlsEntry('server', domain, body.certificatePem, body.privateKeyPem);
+        const output = runSyncScript('server');
+        sendJson(res, 200, {
+          ok: true,
+          message: output || `Saved server certificate for ${domain}`,
+          systemDomain: domain,
+          server: readSystemTlsStatus(),
+          saved,
+        });
+        return;
+      }
+
+      if (req.method === 'DELETE') {
+        const deleted = deleteTlsEntry('server', domain);
+        const output = runSyncScript('server');
+        sendJson(res, 200, {
+          ok: true,
+          message: output || `Deleted server certificate for ${domain}`,
+          systemDomain: domain,
+          deleted,
+          server: readSystemTlsStatus(),
+        });
+        return;
+      }
+    }
+
+    const tlsProjectMatch = routePath.match(/^\/api\/tls\/projects\/(.+)$/);
+    if (tlsProjectMatch) {
+      const ref = decodeURIComponent(tlsProjectMatch[1]);
+      const meta = parseEnvFile(metaPathForRef(ref));
+      const domain = String(meta.APP_DOMAIN || '').trim();
+      const tls = readProjectTlsStatus(meta);
+
+      if (req.method === 'GET') {
+        sendJson(res, 200, {
+          ref,
+          project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
+          domain,
+          repo: meta.REPO_REF || '',
+          slug: meta.PROJECT_SLUG || '',
+          ...tls,
+          tls,
+        });
+        return;
+      }
+
+      if (!domain) {
+        throw new Error(`Project ${ref} has no domain configured`);
+      }
+
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        const saved = saveTlsEntry('project', domain, body.certificatePem, body.privateKeyPem);
+        const output = runSyncScript('project');
+        const refreshedMeta = parseEnvFile(metaPathForRef(ref));
+        const refreshedTls = readProjectTlsStatus(refreshedMeta);
+        sendJson(res, 200, {
+          ok: true,
+          message: output || `Saved certificate for ${domain}`,
+          ref,
+          project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
+          domain,
+          repo: meta.REPO_REF || '',
+          slug: meta.PROJECT_SLUG || '',
+          ...refreshedTls,
+          tls: refreshedTls,
+          saved,
+        });
+        return;
+      }
+
+      if (req.method === 'DELETE') {
+        const deleted = deleteTlsEntry('project', domain);
+        const output = runSyncScript('project');
+        const refreshedMeta = parseEnvFile(metaPathForRef(ref));
+        const refreshedTls = readProjectTlsStatus(refreshedMeta);
+        sendJson(res, 200, {
+          ok: true,
+          message: output || `Deleted certificate for ${domain}`,
+          ref,
+          project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
+          domain,
+          repo: meta.REPO_REF || '',
+          slug: meta.PROJECT_SLUG || '',
+          ...refreshedTls,
+          tls: refreshedTls,
+          deleted,
+        });
+        return;
+      }
     }
 
     if (routePath === '/api/db-machines') {

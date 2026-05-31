@@ -6,6 +6,7 @@ SYSTEM_DOMAIN="${SYSTEM_DOMAIN:-}"
 SYSTEM_PORTAL_WEBROOT="/var/www/system-portal"
 SYSTEM_PORTAL_FILE="/etc/nginx/sites-available/system-portal.conf"
 ACME_ROOT="/var/www/html"
+CUSTOM_CERT_ROOT="/etc/vps-custom-certs/server"
 
 if [[ -z "${SYSTEM_DOMAIN}" && -f "${SYSTEM_DOMAIN_FILE}" ]]; then
   SYSTEM_DOMAIN="$(cat "${SYSTEM_DOMAIN_FILE}")"
@@ -143,6 +144,8 @@ EOF
 }
 
 render_https() {
+  local cert_path="$1"
+  local key_path="$2"
   cat <<EOF
 server {
     listen 80;
@@ -161,8 +164,8 @@ server {
     listen 443 ssl http2;
     server_name ${SYSTEM_DOMAIN};
 
-    ssl_certificate /etc/letsencrypt/live/${SYSTEM_DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${SYSTEM_DOMAIN}/privkey.pem;
+    ssl_certificate ${cert_path};
+    ssl_certificate_key ${key_path};
 
     location = /phpmyadmin {
         return 301 /phpmyadmin/;
@@ -201,11 +204,17 @@ server {
 EOF
 }
 
-if [[ -s "/etc/letsencrypt/live/${SYSTEM_DOMAIN}/fullchain.pem" ]]; then
-  render_https > "${SYSTEM_PORTAL_FILE}"
+custom_cert_dir="${CUSTOM_CERT_ROOT}/${SYSTEM_DOMAIN}"
+custom_cert="${custom_cert_dir}/fullchain.pem"
+custom_key="${custom_cert_dir}/privkey.pem"
+
+if [[ -s "${custom_cert}" && -s "${custom_key}" ]]; then
+  render_https "${custom_cert}" "${custom_key}" > "${SYSTEM_PORTAL_FILE}"
+elif [[ -s "/etc/letsencrypt/live/${SYSTEM_DOMAIN}/fullchain.pem" ]]; then
+  render_https "/etc/letsencrypt/live/${SYSTEM_DOMAIN}/fullchain.pem" "/etc/letsencrypt/live/${SYSTEM_DOMAIN}/privkey.pem" > "${SYSTEM_PORTAL_FILE}"
 else
   if certbot certonly --webroot -w "${ACME_ROOT}" -d "${SYSTEM_DOMAIN}" --non-interactive --agree-tos --register-unsafely-without-email; then
-    render_https > "${SYSTEM_PORTAL_FILE}"
+    render_https "/etc/letsencrypt/live/${SYSTEM_DOMAIN}/fullchain.pem" "/etc/letsencrypt/live/${SYSTEM_DOMAIN}/privkey.pem" > "${SYSTEM_PORTAL_FILE}"
   else
     render_http > "${SYSTEM_PORTAL_FILE}"
   fi

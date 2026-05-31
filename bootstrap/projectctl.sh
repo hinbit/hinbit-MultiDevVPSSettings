@@ -745,39 +745,71 @@ detect_package_manager() {
   printf 'npm'
 }
 
+install_deps_in_dir() {
+  local dir="$1"
+  [[ -f "${dir}/package.json" ]] || return 0
+
+  (
+    cd "${dir}"
+    local pm
+    pm="${PACKAGE_MANAGER:-$(detect_package_manager)}"
+    PACKAGE_MANAGER="${pm}"
+
+    case "${pm}" in
+      pnpm)
+        pnpm install --frozen-lockfile
+        ;;
+      corepack-pnpm)
+        corepack pnpm install --frozen-lockfile
+        ;;
+      yarn)
+        yarn install --frozen-lockfile
+        ;;
+      corepack-yarn)
+        corepack yarn install --frozen-lockfile
+        ;;
+      npm)
+        if [[ -f package-lock.json ]]; then
+          npm ci
+        else
+          npm install
+        fi
+        ;;
+      *)
+        die "Unsupported package manager: ${pm}"
+        ;;
+    esac
+  )
+}
+
 install_deps() {
   if [[ ! -f package.json ]]; then
     return
   fi
 
-  local pm
-  pm="${PACKAGE_MANAGER:-$(detect_package_manager)}"
-  PACKAGE_MANAGER="${pm}"
+  if package_has_script install:all; then
+    local pm
+    pm="${PACKAGE_MANAGER:-$(detect_package_manager)}"
+    PACKAGE_MANAGER="${pm}"
+    case "${pm}" in
+      pnpm) pnpm run install:all ;;
+      corepack-pnpm) corepack pnpm run install:all ;;
+      yarn) yarn run install:all ;;
+      corepack-yarn) corepack yarn run install:all ;;
+      *) npm run install:all ;;
+    esac
+    return
+  fi
 
-  case "${pm}" in
-    pnpm)
-      pnpm install --frozen-lockfile
-      ;;
-    corepack-pnpm)
-      corepack pnpm install --frozen-lockfile
-      ;;
-    yarn)
-      yarn install --frozen-lockfile
-      ;;
-    corepack-yarn)
-      corepack yarn install --frozen-lockfile
-      ;;
-    npm)
-      if [[ -f package-lock.json ]]; then
-        npm ci
-      else
-        npm install
-      fi
-      ;;
-    *)
-      die "Unsupported package manager: ${pm}"
-      ;;
-  esac
+  install_deps_in_dir "${PWD}"
+
+  if [[ -d server && -f server/package.json ]]; then
+    install_deps_in_dir "server"
+  fi
+
+  if [[ -d client && -f client/package.json ]]; then
+    install_deps_in_dir "client"
+  fi
 }
 
 maybe_build() {
