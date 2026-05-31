@@ -34,7 +34,7 @@ Usage:
   projectctl restart owner/repo
   projectctl stop owner/repo
   projectctl status owner/repo
-  projectctl script [--pm2] owner/repo package-script
+  projectctl script [--pm2] [--dir path] owner/repo package-script
   projectctl password [--password secret|--clear] owner/repo
   projectctl mysql [--machine id] [--ips ip1,ip2] owner/repo
   projectctl ssh [--password secret|--generate] owner/repo
@@ -49,7 +49,7 @@ Defaults:
   - port is auto-assigned if not provided
   - domain is optional, but when provided it is added to /etc/app-map.csv and synced to nginx
   - when a domain is provided, VITE_ALLOWED_HOSTS and CORS_ORIGIN are exported for the PM2 runtime
-  - `projectctl script` runs a package.json script, with optional `--pm2` for runtime scripts
+  - `projectctl script` runs a package.json script, with optional `--pm2` for runtime scripts and `--dir` for scripts living in `server/` or `client/`
   - `projectctl password` enables or clears nginx basic auth for a project's domain
   - `projectctl mysql` manages MySQL access IPs and DB machine placement for a project's DB user
   - `projectctl ssh` shows or rotates the project's SSH/SFTP upload credentials
@@ -952,6 +952,40 @@ SSH_UPLOAD_PASSWORD=${SSH_UPLOAD_PASSWORD:-}
 EOF
 }
 
+sync_project_runtime_ports() {
+  local port="$1"
+  local project_dir="${2:-${APP_DIR}}"
+  local candidate=""
+  local subdir=""
+  local env_file=""
+
+  [[ -n "${port}" ]] || return 0
+  [[ -d "${project_dir}" ]] || return 0
+
+  env_file="${project_dir}/.env"
+  touch "${env_file}"
+  chmod 0600 "${env_file}"
+  update_meta_value "${env_file}" "PORT" "${port}"
+  update_meta_value "${env_file}" "APP_PORT" "${port}"
+
+  for candidate in .env.local .env.production .env.credentials .env.production.local .env.development; do
+    env_file="${project_dir}/${candidate}"
+    [[ -f "${env_file}" ]] || continue
+    update_meta_value "${env_file}" "PORT" "${port}"
+    update_meta_value "${env_file}" "APP_PORT" "${port}"
+  done
+
+  for subdir in server client; do
+    [[ -d "${project_dir}/${subdir}" ]] || continue
+    for candidate in .env .env.local .env.production .env.credentials .env.production.local .env.development; do
+      env_file="${project_dir}/${subdir}/${candidate}"
+      [[ -f "${env_file}" ]] || continue
+      update_meta_value "${env_file}" "PORT" "${port}"
+      update_meta_value "${env_file}" "APP_PORT" "${port}"
+    done
+  done
+}
+
 app_map_upsert() {
   local domain="$1"
   local port="$2"
@@ -1281,6 +1315,8 @@ do_install() {
     git -C "${APP_DIR}" update-index --skip-worktree .env >/dev/null 2>&1 || true
   fi
 
+  sync_project_runtime_ports "${APP_PORT}" "${APP_DIR}"
+
   PACKAGE_MANAGER="$(cd "${APP_DIR}" && detect_package_manager)"
 
   if [[ -n "${entrypoint}" ]]; then
@@ -1351,6 +1387,7 @@ do_update() {
   (
     cd "${APP_DIR}"
     pull_repo_with_optional_stash "${APP_DIR}" "${BRANCH}" "${REPO_URL}"
+    sync_project_runtime_ports "${APP_PORT}" "${APP_DIR}"
     install_deps
     maybe_build
   )
@@ -1461,10 +1498,13 @@ do_script() {
   local ref="$1"
   local script="$2"
   local pm2_mode="${3:-no}"
+  local script_dir="${4:-}"
   local slug
   local meta
   local runner
   local pm2_script_name
+  local pm2_script_suffix="${script}"
+  local script_path="${APP_DIR}"
 
   slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
@@ -1473,13 +1513,23 @@ do_script() {
   [[ -d "${APP_DIR}" ]] || die "Missing app directory: ${APP_DIR}"
   [[ -n "${script}" ]] || die "Missing package script name"
   [[ "${script}" =~ ^[A-Za-z0-9:_-]+$ ]] || die "Invalid script name: ${script}"
+  if [[ -n "${script_dir}" ]]; then
+    [[ "${script_dir}" =~ ^[A-Za-z0-9._/-]+$ ]] || die "Invalid script directory: ${script_dir}"
+    [[ "${script_dir}" != *".."* ]] || die "Invalid script directory: ${script_dir}"
+    script_path="${APP_DIR}/${script_dir}"
+    [[ -d "${script_path}" ]] || die "Missing script directory: ${script_dir}"
+    PACKAGE_MANAGER="$(cd "${script_path}" && detect_package_manager)"
+    pm2_script_suffix="${script_dir//\//-}-${script}"
+  else
+    PACKAGE_MANAGER="${PACKAGE_MANAGER:-$(cd "${APP_DIR}" && detect_package_manager)}"
+  fi
 
   runner="$(package_script_runner "${script}")"
-  pm2_script_name="${PM2_NAME}-${script}"
+  pm2_script_name="${PM2_NAME}-${pm2_script_suffix}"
 
   if [[ "${pm2_mode}" == "yes" ]]; then
     (
-      cd "${APP_DIR}"
+      cd "${script_path}"
       pm2 delete "${pm2_script_name}" >/dev/null 2>&1 || true
       env TZ=Asia/Jerusalem PORT="${APP_PORT}" pm2 start /bin/bash --name "${pm2_script_name}" --no-autorestart --time -- -lc "${runner}"
     )
@@ -1489,7 +1539,7 @@ do_script() {
   fi
 
   (
-    cd "${APP_DIR}"
+    cd "${script_path}"
     /bin/bash -lc "${runner}"
   )
   printf '[projectctl] ran %s script %s\n' "${REPO_REF}" "${script}"
@@ -1878,11 +1928,16 @@ main() {
       ;;
     script)
       local pm2_mode="no"
+      local script_dir=""
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --pm2)
             pm2_mode="yes"
             shift
+            ;;
+          --dir)
+            script_dir="${2:-}"
+            shift 2
             ;;
           --help|-h)
             usage
@@ -1894,7 +1949,7 @@ main() {
         esac
       done
       [[ $# -eq 2 ]] || { usage; exit 1; }
-      do_script "$1" "$2" "${pm2_mode}"
+      do_script "$1" "$2" "${pm2_mode}" "${script_dir}"
       ;;
     password)
       local password=""

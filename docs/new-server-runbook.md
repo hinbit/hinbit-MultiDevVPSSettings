@@ -123,6 +123,8 @@ Use `projectctl install` from the app VPS:
 If the repo lives under a GitHub account that is not the server's default GitHub identity, make sure root has a `Host github.com` entry in `~/.ssh/config` that points at the matching private key. `projectctl` runs `git clone` directly as root, so the key must be selected there or the clone will fail with `Permission denied (publickey)`.
 
 If HTTPS is not ready yet, the install still completes and the app is left on HTTP until DNS and certificate provisioning finish. Re-run `sudo app-sync.sh` after the domain resolves to the VPS to activate the SSL vhost.
+The `/manage/` install flow also scans root, `server/`, and `client/` package manifests for DB-related scripts and shows the runnable ones after install.
+Use `/manage/tls/` to store a shared base-domain certificate like `seach.co.il` if you want new subdomains to inherit it automatically until a project-specific certificate is added.
 
 ```bash
 projectctl install --domain example.com --branch main --pm2-name example-app --db-machine local-current owner/repo
@@ -143,6 +145,7 @@ projectctl install --domain example.com --branch main --pm2-name example-app --d
 What the installer does:
 - clones the GitHub repo into `/var/www/<owner-repo>`
 - assigns a PM2 name and port
+- writes the chosen port into the project env files so the runtime keeps the requested app port
 - maps the domain in `/etc/app-map.csv`
 - runs `app-sync.sh` to build nginx and TLS
 - creates a per-project SSH upload user

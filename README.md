@@ -62,7 +62,11 @@ Run an ad-hoc package script from an existing project:
 ```bash
 projectctl script owner/repo db:fill
 projectctl script --pm2 owner/repo dev
+projectctl script --dir server owner/repo db:seed
 ```
+
+When you install a project from `/manage/`, the UI now scans the repo for DB-related scripts across the root, `server/`, and `client/` package manifests and shows the runnable ones after install.
+`projectctl install` also stamps the requested port into the project env files so the runtime uses the selected app port consistently.
 
 Optional environment variables:
 
@@ -86,6 +90,7 @@ multidev.seach.co.il -> http://127.0.0.1:8090
 The tunnel should point to the machine serving `/manage/`, not the separate DB host unless you intentionally want that host to proxy the UI.
 The root path `/` now serves the portal landing page, and `/manage/` serves the project dashboard.
 Use `/manage/tls/` to paste a server-default certificate for the manage host domain and a per-project certificate for any app domain. Custom certs are stored under `/etc/vps-custom-certs/` and override Let’s Encrypt on sync.
+You can also save a default app-domain certificate such as `seach.co.il`; new subdomains like `mon2026.seach.co.il` will use it unless a project-specific certificate is set.
 
 ## Runtime layout
 

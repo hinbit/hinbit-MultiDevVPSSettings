@@ -16,6 +16,15 @@ mkdir -p "${STATE_DIR}"
 declare -A desired_domains=()
 declare -a desired_list=()
 
+default_domain_for() {
+  local domain="$1"
+  if [[ "${domain}" != *.*.* ]]; then
+    printf ''
+    return 0
+  fi
+  printf '%s' "${domain#*.}"
+}
+
 auth_block_for_domain() {
   local domain="$1"
   local auth_file="${PROJECT_AUTH_DIR}/${domain}.htpasswd"
@@ -145,6 +154,10 @@ while IFS=, read -r domain port type https; do
   custom_cert_dir="${CUSTOM_CERT_ROOT}/${domain}"
   custom_cert="${custom_cert_dir}/fullchain.pem"
   custom_key="${custom_cert_dir}/privkey.pem"
+  fallback_domain="$(default_domain_for "${domain}")"
+  fallback_cert_dir="${CUSTOM_CERT_ROOT}/server/${fallback_domain}"
+  fallback_cert="${fallback_cert_dir}/fullchain.pem"
+  fallback_key="${fallback_cert_dir}/privkey.pem"
 
   if [[ "${https,,}" == "yes" ]]; then
     cert_ready="no"
@@ -152,6 +165,9 @@ while IFS=, read -r domain port type https; do
     if [[ -s "${custom_cert}" && -s "${custom_key}" ]]; then
       cert_ready="yes"
       cert_source="custom"
+    elif [[ -n "${fallback_domain}" && -s "${fallback_cert}" && -s "${fallback_key}" ]]; then
+      cert_ready="yes"
+      cert_source="default-domain"
     elif [[ ! -s "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
       if certbot certonly \
         --webroot \
@@ -174,6 +190,8 @@ while IFS=, read -r domain port type https; do
     if [[ "${cert_ready}" == "yes" ]]; then
       if [[ "${cert_source:-}" == "custom" ]]; then
         render_https "${domain}" "${port}" "${auth_block}" "${custom_cert}" "${custom_key}" > "${tmp}"
+      elif [[ "${cert_source:-}" == "default-domain" ]]; then
+        render_https "${domain}" "${port}" "${auth_block}" "${fallback_cert}" "${fallback_key}" > "${tmp}"
       else
         render_https "${domain}" "${port}" "${auth_block}" "/etc/letsencrypt/live/${domain}/fullchain.pem" "/etc/letsencrypt/live/${domain}/privkey.pem" > "${tmp}"
       fi

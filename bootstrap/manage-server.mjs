@@ -242,6 +242,12 @@ function readProjectDiskUsage(projectPath) {
   }
 }
 
+function projectFallbackDomain(domain) {
+  const parts = String(domain || '').trim().split('.').filter(Boolean);
+  if (parts.length < 3) return '';
+  return parts.slice(1).join('.');
+}
+
 function readProjectSslStatus(project) {
   const domain = String(project?.APP_DOMAIN || '').trim();
   const https = String(project?.APP_HTTPS || '').toLowerCase();
@@ -255,6 +261,14 @@ function readProjectSslStatus(project) {
   const custom = readTlsStatus('project', domain, domain);
   if (custom.active && custom.source === 'custom') {
     return { label: 'SSL active (custom)', className: 'good', active: true };
+  }
+
+  const fallbackDomain = projectFallbackDomain(domain);
+  if (fallbackDomain) {
+    const defaultDomain = readTlsStatus('server', fallbackDomain, fallbackDomain);
+    if (defaultDomain.active && defaultDomain.source === 'custom') {
+      return { label: 'SSL active (default domain)', className: 'good', active: true };
+    }
   }
 
   const confPath = `/etc/nginx/sites-available/${domain}.conf`;
@@ -284,6 +298,20 @@ function readProjectTlsStatus(project) {
     keyPath: '',
     dir: '',
   };
+  const fallbackDomain = projectFallbackDomain(domain);
+  const defaultTls = fallbackDomain ? readTlsStatus('server', fallbackDomain, fallbackDomain) : null;
+  if (defaultTls && defaultTls.active && defaultTls.source === 'custom' && !(tls.active && tls.source === 'custom')) {
+    return {
+      domain,
+      defaultDomain: fallbackDomain,
+      ...defaultTls,
+      source: 'default-domain',
+      label: fallbackDomain,
+      statusLabel: ssl.label,
+      statusClass: ssl.className,
+      active: ssl.active,
+    };
+  }
   return {
     domain,
     ...tls,
@@ -294,15 +322,45 @@ function readProjectTlsStatus(project) {
 }
 
 function readPackageScripts(projectPath) {
-  try {
-    const pkgPath = path.join(projectPath, 'package.json');
-    if (!fs.existsSync(pkgPath)) return [];
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-    const scripts = pkg && pkg.scripts ? pkg.scripts : {};
-    return Object.entries(scripts).map(([name, command]) => ({ name, command: String(command) }));
-  } catch {
-    return [];
+  const packageEntries = [
+    { dir: '', pkgPath: path.join(projectPath, 'package.json') },
+    { dir: 'server', pkgPath: path.join(projectPath, 'server', 'package.json') },
+    { dir: 'client', pkgPath: path.join(projectPath, 'client', 'package.json') },
+  ];
+  const scripts = [];
+  for (const entry of packageEntries) {
+    if (!fs.existsSync(entry.pkgPath)) continue;
+    try {
+      const pkg = JSON.parse(fs.readFileSync(entry.pkgPath, 'utf8'));
+      const pkgScripts = pkg && pkg.scripts ? pkg.scripts : {};
+      for (const [name, command] of Object.entries(pkgScripts)) {
+        scripts.push({
+          name,
+          command: String(command),
+          dir: entry.dir,
+          packageJson: entry.pkgPath,
+        });
+      }
+    } catch {
+      // Ignore a broken package manifest and keep scanning the others.
+    }
   }
+  return scripts;
+}
+
+function isDbScript(script) {
+  const name = String(script?.name || '').toLowerCase();
+  const command = String(script?.command || '').toLowerCase();
+  const scriptText = `${name} ${command}`;
+  if (!scriptText.trim()) return false;
+
+  const nameMatch = /(^|[:._-])(db|database|mysql|mariadb|postgres|postgresql|pg|seed|migrate|prisma|knex|typeorm|sequelize|drizzle|mongo|mongodb)(?=[:._-]|$)/i.test(name);
+  const commandMatch = /(mysql|mariadb|postgres|postgresql|psql|prisma|knex|typeorm|sequelize|drizzle|mongo|mongodb|sqlite)/i.test(command);
+  return nameMatch || commandMatch;
+}
+
+function readDbScripts(projectPath) {
+  return readPackageScripts(projectPath).filter(isDbScript);
 }
 
 function readProjects() {
@@ -2360,12 +2418,25 @@ function renderPortalPage() {
 function renderTlsPage(selectedRef = '') {
   const projects = projectView();
   const server = readSystemTlsStatus();
-  const initialProjects = JSON.stringify(projects).replace(/</g, '\\u003c');
-  const initialServer = JSON.stringify(server).replace(/</g, '\\u003c');
   const selectedProject = projects.find((project) => {
     const ref = project.repo || project.slug || '';
     return ref === selectedRef;
   }) || projects[0] || null;
+  const defaultAppDomain = projectFallbackDomain(selectedProject?.domain || '');
+  const defaultAppTls = defaultAppDomain ? readTlsStatus('server', defaultAppDomain, defaultAppDomain) : {
+    scope: 'server',
+    key: '',
+    label: 'no default domain',
+    source: 'missing',
+    active: false,
+    certPath: '',
+    keyPath: '',
+    dir: '',
+  };
+  const initialProjects = JSON.stringify(projects).replace(/</g, '\\u003c');
+  const initialServer = JSON.stringify(server).replace(/</g, '\\u003c');
+  const initialDefaultApp = JSON.stringify(defaultAppTls).replace(/</g, '\\u003c');
+  const initialDefaultAppDomain = JSON.stringify(defaultAppDomain || '').replace(/</g, '\\u003c');
   const projectOptions = projects.length
     ? projects.map((project) => {
         const ref = project.repo || project.slug || '';
@@ -2481,6 +2552,48 @@ function renderTlsPage(selectedRef = '') {
     </section>
 
     <section class="panel">
+      <h2>Default app-domain certificate</h2>
+      <div class="small">Applies to shared base domains like <code>seach.co.il</code>. Projects such as <code>mon2026.seach.co.il</code> will use it unless they have a project-specific certificate.</div>
+      <div class="grid two" style="margin-top:14px;">
+        <label>Default domain
+          <input id="defaultAppDomainInput" placeholder="seach.co.il" value="${escapeHtml(defaultAppDomain || '')}">
+        </label>
+        <div class="kv-item">
+          <div class="small">Current status</div>
+          <div><span id="defaultAppStatusPill" class="pill ${escapeHtml(defaultAppTls.source === 'custom' ? 'good' : (defaultAppTls.source === 'letsencrypt' ? 'good' : 'warn'))}">${escapeHtml(defaultAppTls.label || 'n/a')}</span></div>
+          <div class="small">Source: <code id="defaultAppSourceText">${escapeHtml(defaultAppTls.source || 'missing')}</code></div>
+          <div class="small">Certificate path: <code id="defaultAppCertPathText">${escapeHtml(defaultAppTls.certPath || 'n/a')}</code></div>
+          <div class="small">Key path: <code id="defaultAppKeyPathText">${escapeHtml(defaultAppTls.keyPath || 'n/a')}</code></div>
+        </div>
+      </div>
+      <div class="grid two" style="margin-top:14px;">
+        <div class="stack">
+          <label>Certificate / fullchain PEM
+            <textarea id="defaultAppCertPem" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+          </label>
+          <label>Private key PEM
+            <textarea id="defaultAppKeyPem" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+          </label>
+          <div class="actions">
+            <button id="saveDefaultAppBtn" type="button">Save default app cert</button>
+            <button id="deleteDefaultAppBtn" class="danger" type="button">Delete custom cert</button>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="kv-item">
+            <div class="small">How it works</div>
+            <div class="small">Save a certificate for the base domain and nginx will use it for matching subdomains when no project-specific certificate exists.</div>
+          </div>
+          <div class="kv-item">
+            <div class="small">Notes</div>
+            <div class="small">For your setup, that means a certificate saved for <code>seach.co.il</code> can cover new projects like <code>mon2026.seach.co.il</code>.</div>
+          </div>
+        </div>
+      </div>
+      <div id="defaultAppFlash" class="flash" hidden></div>
+    </section>
+
+    <section class="panel">
       <h2>Project certificate</h2>
       <div class="grid two">
         <label>Project
@@ -2538,6 +2651,16 @@ function renderTlsPage(selectedRef = '') {
     const serverFlash = document.getElementById('serverFlash');
     const saveServerBtn = document.getElementById('saveServerBtn');
     const deleteServerBtn = document.getElementById('deleteServerBtn');
+    const defaultAppDomainInput = document.getElementById('defaultAppDomainInput');
+    const defaultAppStatusPill = document.getElementById('defaultAppStatusPill');
+    const defaultAppSourceText = document.getElementById('defaultAppSourceText');
+    const defaultAppCertPathText = document.getElementById('defaultAppCertPathText');
+    const defaultAppKeyPathText = document.getElementById('defaultAppKeyPathText');
+    const defaultAppCertPem = document.getElementById('defaultAppCertPem');
+    const defaultAppKeyPem = document.getElementById('defaultAppKeyPem');
+    const defaultAppFlash = document.getElementById('defaultAppFlash');
+    const saveDefaultAppBtn = document.getElementById('saveDefaultAppBtn');
+    const deleteDefaultAppBtn = document.getElementById('deleteDefaultAppBtn');
     const projectSelect = document.getElementById('projectSelect');
     const projectTitleText = document.getElementById('projectTitleText');
     const projectDomainText = document.getElementById('projectDomainText');
@@ -2614,6 +2737,25 @@ function renderTlsPage(selectedRef = '') {
       }
     }
 
+    function applyDefaultApp(data) {
+      const tls = data?.tls ? { ...data, ...data.tls } : (data || {});
+      const domain = tls.domain || defaultAppDomainInput.value || initialDefaultAppDomain || '';
+      if (domain && !defaultAppDomainInput.value) {
+        defaultAppDomainInput.value = domain;
+      }
+      defaultAppStatusPill.className = 'pill ' + statusClass(tls.source, tls.active);
+      defaultAppStatusPill.textContent = tls.label || 'n/a';
+      defaultAppSourceText.textContent = tls.source || 'missing';
+      defaultAppCertPathText.textContent = tls.certPath || 'n/a';
+      defaultAppKeyPathText.textContent = tls.keyPath || 'n/a';
+      if (!defaultAppCertPem.value) {
+        defaultAppCertPem.placeholder = tls.source === 'custom' ? 'Current custom cert exists on disk' : '-----BEGIN CERTIFICATE-----';
+      }
+      if (!defaultAppKeyPem.value) {
+        defaultAppKeyPem.placeholder = tls.source === 'custom' ? 'Current custom key exists on disk' : '-----BEGIN PRIVATE KEY-----';
+      }
+    }
+
     function findProject(ref) {
       return currentProjects.find((project) => String(project.repo || project.slug || '') === String(ref || '')) || null;
     }
@@ -2646,6 +2788,16 @@ function renderTlsPage(selectedRef = '') {
       applyServer(data);
     }
 
+    async function loadDefaultApp(domain = '') {
+      const requested = String(domain || defaultAppDomainInput.value || initialDefaultAppDomain || '').trim();
+      if (!requested) {
+        applyDefaultApp({ scope: 'server', key: '', label: 'no default domain', source: 'missing', active: false, certPath: '', keyPath: '', dir: '' });
+        return;
+      }
+      const data = await api('/tls/default-domain?domain=' + encodeURIComponent(requested));
+      applyDefaultApp(data);
+    }
+
     async function refresh() {
       const data = await api('/tls');
       if (data.server) applyServer(data.server);
@@ -2658,6 +2810,7 @@ function renderTlsPage(selectedRef = '') {
         projectSelect.value = selected;
         await loadProject(selected);
       }
+      await loadDefaultApp();
     }
 
     async function saveServer() {
@@ -2681,6 +2834,34 @@ function renderTlsPage(selectedRef = '') {
       const res = await api('/tls/server', { method: 'DELETE' });
       showMessage(serverFlash, res.message || 'Server certificate removed');
       await loadServer();
+    }
+
+    async function saveDefaultApp() {
+      const domain = String(defaultAppDomainInput.value || '').trim();
+      if (!domain) throw new Error('Enter a default domain first');
+      const payload = {
+        domain,
+        certificatePem: defaultAppCertPem.value.trim(),
+        privateKeyPem: defaultAppKeyPem.value.trim(),
+      };
+      const res = await api('/tls/default-domain', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      showMessage(defaultAppFlash, res.message || 'Default app certificate saved');
+      defaultAppCertPem.value = '';
+      defaultAppKeyPem.value = '';
+      await loadDefaultApp(domain);
+    }
+
+    async function deleteDefaultApp() {
+      const domain = String(defaultAppDomainInput.value || '').trim();
+      if (!domain) throw new Error('Enter a default domain first');
+      const ok = confirm('Delete the custom certificate for ' + domain + '?');
+      if (!ok) return;
+      const res = await api('/tls/default-domain?domain=' + encodeURIComponent(domain), { method: 'DELETE' });
+      showMessage(defaultAppFlash, res.message || 'Default app certificate removed');
+      await loadDefaultApp(domain);
     }
 
     async function saveProject() {
@@ -2733,6 +2914,33 @@ function renderTlsPage(selectedRef = '') {
         showMessage(serverFlash, error.message, false);
       } finally {
         deleteServerBtn.disabled = false;
+      }
+    });
+    defaultAppDomainInput.addEventListener('change', async () => {
+      try {
+        await loadDefaultApp(defaultAppDomainInput.value);
+      } catch (error) {
+        showMessage(defaultAppFlash, error.message, false);
+      }
+    });
+    saveDefaultAppBtn.addEventListener('click', async () => {
+      saveDefaultAppBtn.disabled = true;
+      try {
+        await saveDefaultApp();
+      } catch (error) {
+        showMessage(defaultAppFlash, error.message, false);
+      } finally {
+        saveDefaultAppBtn.disabled = false;
+      }
+    });
+    deleteDefaultAppBtn.addEventListener('click', async () => {
+      deleteDefaultAppBtn.disabled = true;
+      try {
+        await deleteDefaultApp();
+      } catch (error) {
+        showMessage(defaultAppFlash, error.message, false);
+      } finally {
+        deleteDefaultAppBtn.disabled = false;
       }
     });
     saveProjectBtn.addEventListener('click', async () => {
@@ -2969,6 +3177,11 @@ function renderPage() {
       <div class="space"></div>
       <button id="installBtn" type="button">Install project</button>
       <div id="installResult" class="flash" hidden></div>
+      <div id="installDbScriptsPanel" class="kv-item" hidden style="margin-top: 12px;">
+        <div class="small">DB scripts found during install</div>
+        <div id="installDbScriptsSubtitle" class="small"></div>
+        <div id="installDbScriptsList" class="script-list"></div>
+      </div>
     </section>
 
     <section class="panel">
@@ -3164,6 +3377,9 @@ function renderPage() {
     const projectsBody = document.getElementById('projectsBody');
     const listResult = document.getElementById('listResult');
     const installResult = document.getElementById('installResult');
+    const installDbScriptsPanel = document.getElementById('installDbScriptsPanel');
+    const installDbScriptsSubtitle = document.getElementById('installDbScriptsSubtitle');
+    const installDbScriptsList = document.getElementById('installDbScriptsList');
     const systemStats = document.getElementById('systemStats');
     const dbMachineSelect = document.getElementById('dbMachineId');
     const toggleAccessPasswordBtn = document.getElementById('toggleAccessPasswordBtn');
@@ -3240,6 +3456,7 @@ function renderPage() {
     const logRefreshBtn = document.getElementById('logRefreshBtn');
     const closeLogBtn = document.getElementById('closeLogBtn');
     let currentScriptsRef = '';
+    let currentInstallScriptsRef = '';
     let currentDbRef = '';
     let currentMysqlRef = '';
     let currentSshRef = '';
@@ -3482,11 +3699,11 @@ function renderPage() {
           <div class="script-row">
             <div>
               <div><strong>\${escapeHtml(script.name || '')}</strong></div>
-              <div class="small"><code>\${escapeHtml(script.command || '')}</code></div>
+              <div class="small">\${script.dir ? \`<span class="pill">from \${escapeHtml(script.dir || 'root')}</span> \` : ''}<code>\${escapeHtml(script.command || '')}</code></div>
             </div>
             <div class="actions">
-              <button class="secondary" data-script-run="\${escapeHtml(script.name || '')}" type="button">Run</button>
-              <button class="ghost" data-script-activate="\${escapeHtml(script.name || '')}" type="button">Activate in PM2</button>
+              <button class="secondary" data-script-run="\${escapeHtml(script.name || '')}" data-script-dir="\${escapeHtml(script.dir || '')}" type="button">Run</button>
+              <button class="ghost" data-script-activate="\${escapeHtml(script.name || '')}" data-script-dir="\${escapeHtml(script.dir || '')}" type="button">Activate in PM2</button>
             </div>
           </div>
         \`).join('')
@@ -3501,6 +3718,32 @@ function renderPage() {
       scriptsList.innerHTML = '';
       scriptsFlash.hidden = true;
       setModalLocked(false);
+    }
+
+    function renderInstallDbScripts(ref, scripts, subtitle) {
+      currentInstallScriptsRef = ref || '';
+      if (!installDbScriptsPanel || !installDbScriptsList) return;
+      if (!ref || !Array.isArray(scripts) || !scripts.length) {
+        installDbScriptsPanel.hidden = true;
+        installDbScriptsSubtitle.textContent = '';
+        installDbScriptsList.innerHTML = '';
+        return;
+      }
+
+      installDbScriptsSubtitle.textContent = subtitle || '';
+      installDbScriptsList.innerHTML = scripts.map((script) => \`
+        <div class="script-row">
+          <div>
+            <div><strong>\${escapeHtml(script.name || '')}</strong></div>
+            <div class="small">\${script.dir ? \`<span class="pill">from \${escapeHtml(script.dir || 'root')}</span> \` : ''}<code>\${escapeHtml(script.command || '')}</code></div>
+          </div>
+          <div class="actions">
+            <button class="secondary" data-install-script-run="\${escapeHtml(script.name || '')}" data-install-script-dir="\${escapeHtml(script.dir || '')}" type="button">Run</button>
+            <button class="ghost" data-install-script-activate="\${escapeHtml(script.name || '')}" data-install-script-dir="\${escapeHtml(script.dir || '')}" type="button">Activate in PM2</button>
+          </div>
+        </div>
+      \`).join('');
+      installDbScriptsPanel.hidden = false;
     }
 
     function openDbPanel(ref, details, subtitle) {
@@ -3977,13 +4220,13 @@ function renderPage() {
       await refresh();
     }
 
-    async function runScript(ref, script, mode) {
+    async function runScript(ref, script, mode, dir = '', flashEl = scriptsFlash) {
       const action = mode === 'activate' ? 'activate' : 'run';
       const res = await api(\`/projects/\${ref}/scripts/\${action}\`, {
         method: 'POST',
-        body: JSON.stringify({ script }),
+        body: JSON.stringify({ script, dir }),
       });
-      showMessage(scriptsFlash, res.message || 'Done');
+      showMessage(flashEl || scriptsFlash, res.message || 'Done');
       await refresh();
     }
 
@@ -4182,11 +4425,29 @@ function renderPage() {
       const script = btn.dataset.scriptRun || btn.dataset.scriptActivate;
       if (!script) return;
       const mode = btn.dataset.scriptActivate ? 'activate' : 'run';
+      const dir = btn.dataset.scriptDir || '';
       btn.disabled = true;
       try {
-        await runScript(currentScriptsRef, script, mode);
+        await runScript(currentScriptsRef, script, mode, dir, scriptsFlash);
       } catch (error) {
         showMessage(scriptsFlash, error.message, false);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-install-script-run], button[data-install-script-activate]');
+      if (!btn || !currentInstallScriptsRef) return;
+      const script = btn.dataset.installScriptRun || btn.dataset.installScriptActivate;
+      if (!script) return;
+      const mode = btn.dataset.installScriptActivate ? 'activate' : 'run';
+      const dir = btn.dataset.installScriptDir || '';
+      btn.disabled = true;
+      try {
+        await runScript(currentInstallScriptsRef, script, mode, dir, installResult);
+      } catch (error) {
+        showMessage(installResult, error.message, false);
       } finally {
         btn.disabled = false;
       }
@@ -4403,6 +4664,8 @@ function renderPage() {
     });
 
     document.getElementById('installBtn').addEventListener('click', async () => {
+      currentInstallScriptsRef = '';
+      renderInstallDbScripts('', []);
       const payload = {
         repo: document.getElementById('repo').value.trim(),
         domain: document.getElementById('domain').value.trim(),
@@ -4420,8 +4683,10 @@ function renderPage() {
           body: JSON.stringify(payload),
         });
         showMessage(installResult, result.message || 'Installed');
+        renderInstallDbScripts(result.repo || payload.repo, result.dbScripts || [], result.project || result.repo || payload.repo);
         await refresh();
       } catch (error) {
+        renderInstallDbScripts('', []);
         showMessage(installResult, error.message, false);
       }
     });
@@ -4624,6 +4889,49 @@ async function handleRequest(req, res) {
       }
     }
 
+    if (routePath === '/api/tls/default-domain') {
+      const requestedDomain = String(url.searchParams.get('domain') || '').trim();
+      const body = req.method === 'POST' ? await readBody(req) : null;
+      const domain = String((body && body.domain) || requestedDomain || '').trim();
+      if (!domain) {
+        throw new Error('Default domain is required');
+      }
+
+      if (req.method === 'GET') {
+        sendJson(res, 200, {
+          domain,
+          ...readTlsStatus('server', domain, domain),
+        });
+        return;
+      }
+
+      if (req.method === 'POST') {
+        const saved = saveTlsEntry('server', domain, body.certificatePem, body.privateKeyPem);
+        const output = runSyncScript('project');
+        sendJson(res, 200, {
+          ok: true,
+          message: output || `Saved default-domain certificate for ${domain}`,
+          domain,
+          ...readTlsStatus('server', domain, domain),
+          saved,
+        });
+        return;
+      }
+
+      if (req.method === 'DELETE') {
+        const deleted = deleteTlsEntry('server', domain);
+        const output = runSyncScript('project');
+        sendJson(res, 200, {
+          ok: true,
+          message: output || `Deleted default-domain certificate for ${domain}`,
+          domain,
+          ...readTlsStatus('server', domain, domain),
+          deleted,
+        });
+        return;
+      }
+    }
+
     const tlsProjectMatch = routePath.match(/^\/api\/tls\/projects\/(.+)$/);
     if (tlsProjectMatch) {
       const ref = decodeURIComponent(tlsProjectMatch[1]);
@@ -4815,7 +5123,19 @@ async function handleRequest(req, res) {
       if (body.accessPassword && String(body.accessPassword).trim()) {
         runProjectCtl(['password', '--password', String(body.accessPassword).trim(), repo]);
       }
-      sendJson(res, 200, { ok: true, message: output || 'Installed project' });
+      const meta = parseEnvFile(metaPathForRef(repo));
+      const projectPath = meta.APP_DIR || '';
+      const scripts = readPackageScripts(projectPath);
+      const dbScripts = scripts.filter(isDbScript);
+      sendJson(res, 200, {
+        ok: true,
+        message: output || 'Installed project',
+        repo,
+        project: meta.APP_DOMAIN || meta.PROJECT_SLUG || repo,
+        port: meta.APP_PORT || body.port || '',
+        scripts,
+        dbScripts,
+      });
       return;
     }
 
@@ -5103,6 +5423,7 @@ async function handleRequest(req, res) {
         sendJson(res, 200, {
           project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
           scripts,
+          dbScripts: scripts.filter(isDbScript),
         });
         return;
       }
@@ -5110,14 +5431,21 @@ async function handleRequest(req, res) {
       if (req.method === 'POST' && scriptAction) {
         const body = await readBody(req);
         const script = String(body.script || '').trim();
+        const dir = String(body.dir || '').trim();
         if (!script) {
           throw new Error('Missing script name');
         }
         if (scriptAction === 'activate') {
-          const output = runProjectCtl(['script', '--pm2', ref, script]);
+          const args = ['script', '--pm2'];
+          if (dir) args.push('--dir', dir);
+          args.push(ref, script);
+          const output = runProjectCtl(args);
           sendJson(res, 200, { ok: true, message: output || `Activated ${script}` });
         } else {
-          const output = runProjectCtl(['script', ref, script]);
+          const args = ['script'];
+          if (dir) args.push('--dir', dir);
+          args.push(ref, script);
+          const output = runProjectCtl(args);
           sendJson(res, 200, { ok: true, message: output || `Ran ${script}` });
         }
         return;
