@@ -655,17 +655,13 @@ ensure_remote_db_root_hosts() {
   local ssh_target=""
   local sql_file=""
   local remote_root_password=""
-  local -a remote_fields=()
-
   [[ "${machine_id}" != "${LOCAL_DB_MACHINE_ID}" ]] || return 0
 
   resolve_db_machine "${machine_id}"
   remote_root_password="${DB_MACHINE_ROOT_PASSWORD:-}"
   [[ -n "${remote_root_password}" ]] || die "Missing root password for DB machine ${machine_id}"
 
-  mapfile -t remote_fields < <(remote_db_bootstrap_ssh_details) || die "Missing SSH tunnel details for remote DB bootstrap"
-  ssh_key="${remote_fields[0]:-}"
-  ssh_target="${remote_fields[1]:-}"
+  IFS=$'\t' read -r ssh_key ssh_target < <(remote_db_bootstrap_ssh_details) || die "Missing SSH tunnel details for remote DB bootstrap"
   [[ -n "${ssh_key}" && -n "${ssh_target}" ]] || die "Invalid SSH tunnel details for remote DB bootstrap"
 
   sql_file="$(mktemp)"
