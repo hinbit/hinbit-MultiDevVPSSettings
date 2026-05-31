@@ -178,6 +178,23 @@ function createProjectEnvBackup(ref, projectPath) {
   };
 }
 
+function deleteProjectEnvBackup(ref, backupName) {
+  const dir = projectEnvBackupDir(ref);
+  const requested = path.basename(String(backupName || ''));
+  if (!requested || requested.includes('/') || requested.includes('\\')) {
+    throw new Error('Invalid backup name');
+  }
+  const backupPath = path.join(dir, requested);
+  if (!fs.existsSync(backupPath)) {
+    throw new Error(`Backup not found: ${requested}`);
+  }
+  fs.unlinkSync(backupPath);
+  return {
+    backupName: requested,
+    backupPath,
+  };
+}
+
 function resolveProjectEnvBackupPath(ref, backupName = 'latest.zip') {
   const dir = projectEnvBackupDir(ref);
   const requested = path.basename(String(backupName || 'latest.zip'));
@@ -2315,10 +2332,13 @@ function renderPage() {
         <a id="envDownloadBtn" class="btn ghost" href="#" download>Download zip</a>
         <button id="envBackupBtn" class="secondary" type="button">Backup</button>
         <button id="envRestoreBtn" class="danger" type="button">Restore latest</button>
+        <select id="envRestoreSelect" class="secondary" style="min-width: 240px;"></select>
+        <button id="envRestoreSelectedBtn" class="danger" type="button">Restore selected</button>
         <label class="btn ghost" style="cursor:pointer">
           <input id="envUploadInput" type="file" accept=".zip" hidden>
           Choose zip
         </label>
+        <a id="envDownloadZipBtn" class="btn ghost" href="#" download>Download zip</a>
         <button id="envUploadBtn" class="secondary" type="button">Upload zip</button>
         <button id="closeEnvBtn" class="ghost" type="button">Close</button>
       </div>
@@ -2430,8 +2450,11 @@ function renderPage() {
     const envDownloadBtn = document.getElementById('envDownloadBtn');
     const envBackupBtn = document.getElementById('envBackupBtn');
     const envRestoreBtn = document.getElementById('envRestoreBtn');
+    const envRestoreSelect = document.getElementById('envRestoreSelect');
+    const envRestoreSelectedBtn = document.getElementById('envRestoreSelectedBtn');
     const envUploadInput = document.getElementById('envUploadInput');
     const envUploadBtn = document.getElementById('envUploadBtn');
+    const envDownloadZipBtn = document.getElementById('envDownloadZipBtn');
     const closeEnvBtn = document.getElementById('closeEnvBtn');
     const envBackupsList = document.getElementById('envBackupsList');
     const progressPanel = document.getElementById('progressPanel');
@@ -2873,11 +2896,32 @@ function renderPage() {
       }
       listEl.innerHTML = backups.map((backup, index) => \`
         <div class="kv-item">
-          <div><strong>\${escapeHtml(backup.name || '')}</strong> \${backup.isLatest ? '<span class="pill">latest</span>' : ''}</div>
-          <div class="small">Saved: \${escapeHtml(new Date(backup.mtimeMs || Date.now()).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }))}</div>
-          <div class="small">Size: \${escapeHtml(formatBytes(backup.size || 0))}</div>
+          <div class="row spread" style="gap: 12px; align-items: flex-start;">
+            <div>
+              <div><strong>\${escapeHtml(backup.name || '')}</strong> \${backup.isLatest ? '<span class="pill">latest</span>' : ''}</div>
+              <div class="small">Saved: \${escapeHtml(new Date(backup.mtimeMs || Date.now()).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }))}</div>
+              <div class="small">Size: \${escapeHtml(formatBytes(backup.size || 0))}</div>
+            </div>
+            <div class="copy-actions">
+              <button class="secondary" type="button" data-env-backup-restore="\${escapeHtml(backup.name || '')}">Restore</button>
+              <button class="danger" type="button" data-env-backup-delete="\${escapeHtml(backup.name || '')}">Delete</button>
+            </div>
+          </div>
         </div>
       \`).join('');
+    }
+
+    function renderBackupSelect(selectEl, backups, selectedName = '') {
+      if (!selectEl) return;
+      const list = Array.isArray(backups) ? backups : [];
+      selectEl.innerHTML = list.length
+        ? list.map((backup) => \`
+          <option value="\${escapeHtml(backup.name || '')}"\${String(backup.name || '') === String(selectedName || '') ? ' selected' : ''}>
+            \${escapeHtml(backup.name || '')}\${backup.isLatest ? ' (latest)' : ''}
+          </option>
+        \`).join('')
+        : '<option value="">No backups available</option>';
+      selectEl.disabled = !list.length;
     }
 
     function openEnvPanel(ref, details, subtitle) {
@@ -2890,13 +2934,17 @@ function renderPage() {
       envTitle.textContent = 'Environment Values';
       envSubtitle.textContent = subtitle || '';
       envFlash.hidden = true;
+      const backups = Array.isArray(details.backups) ? details.backups : [];
       const entries = Object.entries(details.env || {})
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([key, value]) => [key, String(value)]);
       renderKeyValueList(envList, entries);
-      renderBackupList(envBackupsList, details.backups || []);
-      envRestoreBtn.disabled = !(Array.isArray(details.backups) && details.backups.length);
+      renderBackupList(envBackupsList, backups);
+      renderBackupSelect(envRestoreSelect, backups, details.latestBackup?.name || 'latest.zip');
+      envRestoreBtn.disabled = !backups.length;
+      envRestoreSelectedBtn.disabled = !backups.length;
       envDownloadBtn.href = \`\${API}/projects/\${ref}/env/download\`;
+      if (envDownloadZipBtn) envDownloadZipBtn.href = \`\${API}/projects/\${ref}/env/download\`;
       envPanel.hidden = false;
       setModalLocked(true);
     }
@@ -2906,6 +2954,7 @@ function renderPage() {
       currentEnvRef = '';
       envList.innerHTML = '';
       envBackupsList.innerHTML = '';
+      if (envRestoreSelect) envRestoreSelect.innerHTML = '';
       envFlash.hidden = true;
       envUploadInput.value = '';
       setModalLocked(false);
@@ -3115,6 +3164,15 @@ function renderPage() {
         body: JSON.stringify({ backupName }),
       });
       showMessage(envFlash, data.message || 'Environment backup restored');
+      await refresh();
+      await loadEnv(ref);
+    }
+
+    async function deleteEnvBackup(ref, backupName) {
+      const data = await api(\`/projects/\${ref}/env/backups/\${encodeURIComponent(backupName)}\`, {
+        method: 'DELETE',
+      });
+      showMessage(envFlash, data.message || 'Environment backup deleted');
       await refresh();
       await loadEnv(ref);
     }
@@ -3418,7 +3476,7 @@ function renderPage() {
       const ref = btn.dataset.ref;
       if (!ref) return;
       const ok = window.confirm(
-        'Restore the latest saved env backup for ' + decodeURIComponent(ref) + '? This will overwrite the current .env files and restart the project.',
+        'Restore the latest saved env backup for ' + decodeURIComponent(ref) + '? This will create an automatic backup first, then overwrite the current .env files and restart the project.',
       );
       if (!ok) return;
       btn.disabled = true;
@@ -3484,7 +3542,7 @@ function renderPage() {
     envRestoreBtn.addEventListener('click', async () => {
       if (!currentEnvRef) return;
       const ok = window.confirm(
-        'Restore the latest saved env backup for ' + decodeURIComponent(currentEnvRef) + '? This will overwrite the current .env files and restart the project.',
+        'Restore the latest saved env backup for ' + decodeURIComponent(currentEnvRef) + '? This will create an automatic backup first, then overwrite the current .env files and restart the project.',
       );
       if (!ok) return;
       envRestoreBtn.disabled = true;
@@ -3495,6 +3553,68 @@ function renderPage() {
         envPanel.hidden = false;
       } finally {
         envRestoreBtn.disabled = false;
+      }
+    });
+
+    document.addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-env-backup-restore]');
+      if (!btn) return;
+      if (!currentEnvRef) return;
+      const backupName = btn.dataset.envBackupRestore || 'latest.zip';
+      const ok = window.confirm(
+        'Restore backup "' + backupName + '" for ' + decodeURIComponent(currentEnvRef) + '? This will create an automatic backup first, then overwrite the current .env files and restart the project.',
+      );
+      if (!ok) return;
+      btn.disabled = true;
+      try {
+        showMessage(envFlash, 'Restoring ' + backupName + ' for ' + decodeURIComponent(currentEnvRef) + '...');
+        await restoreEnv(currentEnvRef, backupName);
+      } catch (error) {
+        showMessage(envFlash, error.message, false);
+        envPanel.hidden = false;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-env-backup-delete]');
+      if (!btn) return;
+      if (!currentEnvRef) return;
+      const backupName = btn.dataset.envBackupDelete || '';
+      if (!backupName) return;
+      const ok = window.confirm(
+        'Delete backup "' + backupName + '" for ' + decodeURIComponent(currentEnvRef) + '? This cannot be undone.',
+      );
+      if (!ok) return;
+      btn.disabled = true;
+      try {
+        showMessage(envFlash, 'Deleting ' + backupName + ' for ' + decodeURIComponent(currentEnvRef) + '...');
+        await deleteEnvBackup(currentEnvRef, backupName);
+      } catch (error) {
+        showMessage(envFlash, error.message, false);
+        envPanel.hidden = false;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    envRestoreSelectedBtn.addEventListener('click', async () => {
+      if (!currentEnvRef) return;
+      const backupName = envRestoreSelect && envRestoreSelect.value ? envRestoreSelect.value : 'latest.zip';
+      const ok = window.confirm(
+        'Restore backup "' + backupName + '" for ' + decodeURIComponent(currentEnvRef) + '? This will create an automatic backup first, then overwrite the current .env files and restart the project.',
+      );
+      if (!ok) return;
+      envRestoreSelectedBtn.disabled = true;
+      try {
+        showMessage(envFlash, 'Restoring ' + backupName + ' for ' + decodeURIComponent(currentEnvRef) + '...');
+        await restoreEnv(currentEnvRef, backupName);
+      } catch (error) {
+        showMessage(envFlash, error.message, false);
+        envPanel.hidden = false;
+      } finally {
+        envRestoreSelectedBtn.disabled = false;
       }
     });
 
@@ -3934,12 +4054,14 @@ async function handleRequest(req, res) {
       if (req.method === 'POST' && mode === 'restore') {
         const body = await readBody(req);
         const backupName = String(body.backupName || 'latest.zip');
+        const autoBackup = createProjectEnvBackup(ref, projectPath);
         const restored = restoreProjectEnvBackup(ref, projectPath, backupName);
         runProjectCtl(['restart', ref]);
         const refreshedBackups = listProjectEnvBackups(ref);
         sendJson(res, 200, {
           ok: true,
           message: `Environment backup restored for ${ref}`,
+          autoBackup,
           restored,
           backups: refreshedBackups,
           latestBackup: refreshedBackups[0] || null,
@@ -3956,6 +4078,22 @@ async function handleRequest(req, res) {
         sendJson(res, 200, { ok: true, message: `Environment files updated for ${ref}` });
         return;
       }
+    }
+
+    const envBackupDeleteMatch = pathname.match(/^\/api\/projects\/(.+?)\/env\/backups\/([^/]+)$/);
+    if (envBackupDeleteMatch && req.method === 'DELETE') {
+      const ref = decodeURIComponent(envBackupDeleteMatch[1]);
+      const backupName = decodeURIComponent(envBackupDeleteMatch[2]);
+      const deleted = deleteProjectEnvBackup(ref, backupName);
+      const refreshedBackups = listProjectEnvBackups(ref);
+      sendJson(res, 200, {
+        ok: true,
+        message: `Environment backup deleted for ${ref}`,
+        deleted,
+        backups: refreshedBackups,
+        latestBackup: refreshedBackups[0] || null,
+      });
+      return;
     }
 
     const pullPreflightMatch = pathname.match(/^\/api\/projects\/(.+?)\/pull-preflight$/);
