@@ -982,7 +982,7 @@ verify_https_vhost() {
   fi
 
   if [[ ! -s "${conf}" ]] || [[ ! -s "${cert}" ]] || ! grep -q 'listen 443 ssl' "${conf}"; then
-    die "HTTPS was requested for ${domain}, but the SSL vhost is not active yet. Check DNS, re-run app sync, and try again."
+    printf '[projectctl] Warning: HTTPS was requested for %s, but the SSL vhost is not active yet. The project will remain available over HTTP until DNS and certificate provisioning finish. Re-run app sync after the domain resolves to this VPS.\n' "${domain}" >&2
   fi
 }
 

@@ -389,6 +389,7 @@ function readDbMachines() {
       rootPassword: String(machine.rootPassword || machine.password || '').trim(),
       port: String(machine.port || '3306').trim() || '3306',
       notes: String(machine.notes || '').trim(),
+      originHost: String(machine.originHost || machine.remoteHost || '').trim(),
     })).filter((machine) => machine.name || machine.host || machine.rootUser || machine.rootPassword);
     if (!machines.some((machine) => machine.id === LOCAL_DB_MACHINE_ID)) {
       machines.unshift({ ...LOCAL_DB_MACHINE });
@@ -406,6 +407,22 @@ function writeDbMachines(machines) {
   }
   fs.writeFileSync(DB_MACHINES_FILE, `${JSON.stringify(list, null, 2)}\n`);
   fs.chmodSync(DB_MACHINES_FILE, 0o600);
+}
+
+function describeDbMachine(machine) {
+  const name = String(machine?.name || machine?.id || 'DB machine').trim() || 'DB machine';
+  const host = String(machine?.host || '').trim();
+  const originHost = String(machine?.originHost || '').trim();
+  const port = String(machine?.port || '').trim();
+  const notes = String(machine?.notes || '').trim();
+  const parts = [name];
+  if (originHost && originHost !== host) {
+    parts.push(`${originHost} via ${host}${port ? `:${port}` : ''}`.trim());
+  } else if (host) {
+    parts.push(port ? `${host}:${port}` : host);
+  }
+  if (notes) parts.push(notes);
+  return parts.filter(Boolean).join(' · ');
 }
 
 function readSshKeyRegistry() {
@@ -1196,7 +1213,7 @@ function renderDbMachineOptions(machines, selectedId = LOCAL_DB_MACHINE_ID) {
   const list = Array.isArray(machines) && machines.length ? machines : [{ ...LOCAL_DB_MACHINE }];
   return list.map((machine) => {
     const id = String(machine.id || '');
-    const label = `${machine.name || id}${machine.host ? ` · ${machine.host}` : ''}`;
+    const label = describeDbMachine(machine);
     return `<option value="${escapeHtml(id)}"${id === String(selectedId || '') ? ' selected' : ''}>${escapeHtml(label)}</option>`;
   }).join('');
 }
@@ -2663,7 +2680,19 @@ function renderPage() {
       const list = Array.isArray(machines) && machines.length ? machines : [{ id: '${LOCAL_DB_MACHINE_ID}', name: 'localhost (current)', host: '127.0.0.1' }];
       return list.map((machine) => {
         const id = String(machine.id || '');
-        const label = (machine.name || id) + (machine.host ? ' · ' + machine.host : '');
+        const name = (machine.name || id).trim() || id;
+        const host = String(machine.host || '').trim();
+        const originHost = String(machine.originHost || '').trim();
+        const port = String(machine.port || '').trim();
+        const notes = String(machine.notes || '').trim();
+        const labelParts = [name];
+        if (originHost && originHost !== host) {
+          labelParts.push((originHost + ' via ' + host + (port ? ':' + port : '')).trim());
+        } else if (host) {
+          labelParts.push(port ? (host + ':' + port) : host);
+        }
+        if (notes) labelParts.push(notes);
+        const label = labelParts.filter(Boolean).join(' · ');
         return '<option value="' + escapeHtml(id) + '"' + (id === String(selectedId || '') ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
       }).join('');
     }
@@ -2929,7 +2958,8 @@ function renderPage() {
         ['Database name', details.db?.DB_NAME || details.db?.DB_DATABASE || details.db?.MYSQL_DATABASE || details.db?.POSTGRES_DB || 'n/a'],
         ['Database user', details.db?.DB_USER || details.db?.MYSQL_USER || details.db?.POSTGRES_USER || 'n/a'],
         ['Database password', details.db?.DB_PASSWORD || details.db?.MYSQL_PASSWORD || details.db?.POSTGRES_PASSWORD || 'n/a'],
-        ['DB machine', details.dbMachineId || 'local-current'],
+        ['DB machine', details.dbMachineLabel || details.dbMachineId || 'local-current'],
+        ['DB machine host', details.dbMachineHost || 'n/a'],
         ['Database host', details.db?.DB_HOST || details.db?.MYSQL_HOST || details.db?.POSTGRES_HOST || 'n/a'],
         ['Database port', details.db?.DB_PORT || details.db?.MYSQL_PORT || details.db?.POSTGRES_PORT || 'n/a'],
         ['Allowed IPs', details.allowedIps || 'local only'],
@@ -4078,6 +4108,7 @@ async function handleRequest(req, res) {
       const projectMachineId = meta.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID;
       const accounts = readMysqlAccounts(dbUser, projectMachineId);
       const machines = readDbMachines();
+      const projectMachine = machines.find((item) => String(item.id) === String(projectMachineId)) || null;
 
       if (req.method === 'GET') {
         sendJson(res, 200, {
@@ -4089,6 +4120,9 @@ async function handleRequest(req, res) {
           dbPassword,
           allowedIps,
           dbMachineId: projectMachineId,
+          dbMachineLabel: projectMachine ? describeDbMachine(projectMachine) : projectMachineId,
+          dbMachineHost: projectMachine?.originHost || projectMachine?.host || 'n/a',
+          dbMachineNotes: projectMachine?.notes || '',
           machines,
           accounts,
         });
@@ -4116,6 +4150,21 @@ async function handleRequest(req, res) {
           dbPassword: refreshedDb.DB_PASSWORD || refreshedDb.MYSQL_PASSWORD || refreshedDb.POSTGRES_PASSWORD || '',
           allowedIps: refreshedMeta.MYSQL_ALLOWED_IPS || ips,
           dbMachineId: refreshedMeta.DB_MACHINE_ID || projectMachineId || LOCAL_DB_MACHINE_ID,
+          dbMachineLabel: (() => {
+            const currentMachineId = refreshedMeta.DB_MACHINE_ID || projectMachineId || LOCAL_DB_MACHINE_ID;
+            const currentMachine = readDbMachines().find((item) => String(item.id) === String(currentMachineId)) || null;
+            return currentMachine ? describeDbMachine(currentMachine) : currentMachineId;
+          })(),
+          dbMachineHost: (() => {
+            const currentMachineId = refreshedMeta.DB_MACHINE_ID || projectMachineId || LOCAL_DB_MACHINE_ID;
+            const currentMachine = readDbMachines().find((item) => String(item.id) === String(currentMachineId)) || null;
+            return currentMachine?.originHost || currentMachine?.host || 'n/a';
+          })(),
+          dbMachineNotes: (() => {
+            const currentMachineId = refreshedMeta.DB_MACHINE_ID || projectMachineId || LOCAL_DB_MACHINE_ID;
+            const currentMachine = readDbMachines().find((item) => String(item.id) === String(currentMachineId)) || null;
+            return currentMachine?.notes || '';
+          })(),
           machines: readDbMachines(),
           accounts: readMysqlAccounts(refreshedDb.DB_USER || refreshedDb.MYSQL_USER || refreshedDb.POSTGRES_USER || '', refreshedMeta.DB_MACHINE_ID || machineId || projectMachineId),
         });
