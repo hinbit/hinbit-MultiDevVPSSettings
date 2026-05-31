@@ -787,6 +787,7 @@ User=root
 WorkingDirectory=/root
 EnvironmentFile=-${SYSTEM_ENV_FILE}
 Environment=MANAGE_PORT=8090
+Environment=MANAGE_BIND_HOST=0.0.0.0
 Environment=TZ=Asia/Jerusalem
 ExecStart=${NODE_BIN} ${BIN_DIR}/manage-server.mjs
 Restart=always

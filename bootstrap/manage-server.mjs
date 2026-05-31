@@ -17,6 +17,7 @@ const PROJECTCTL = '/usr/local/bin/projectctl';
 const PM2 = 'pm2';
 const BASIC_USER = 'manage';
 const PORT = Number(process.env.MANAGE_PORT || 8090);
+const BIND_HOST = process.env.MANAGE_BIND_HOST || '0.0.0.0';
 const PASSWORD = process.env.MANAGE_PASSWORD || '';
 const LOCAL_DB_MACHINE_ID = 'local-current';
 const LOCAL_DB_MACHINE = {
@@ -4249,6 +4250,6 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`manage server listening on 127.0.0.1:${PORT}`);
+server.listen(PORT, BIND_HOST, () => {
+  console.log(`manage server listening on ${BIND_HOST}:${PORT}`);
 });
