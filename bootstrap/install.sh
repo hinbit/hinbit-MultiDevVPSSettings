@@ -275,7 +275,7 @@ PY
 
 install_system_files() {
   log "Installing app routing scripts and configs"
-  install -d "${STATE_DIR}" /etc/vps-projects "${NGINX_AVAIL}" "${NGINX_ENABLED}" /var/www/html
+  install -d "${STATE_DIR}" /etc/vps-projects /etc/vps-project-env-backups "${NGINX_AVAIL}" "${NGINX_ENABLED}" /var/www/html
 
   if [[ ! -f "${NGINX_AVAIL}/default" ]]; then
     cat > "${NGINX_AVAIL}/default" <<'EOF'

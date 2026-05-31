@@ -12,6 +12,7 @@ const SYSTEM_ENV_FILE = '/etc/vps-system.env';
 const DB_MACHINES_FILE = '/etc/vps-db-machines.json';
 const SSH_KEYS_FILE = '/etc/vps-ssh-keys.json';
 const SSH_KEYS_DIR = '/root/.ssh/vps-managed-keys';
+const PROJECT_ENV_BACKUP_DIR = '/etc/vps-project-env-backups';
 const PROJECTCTL = '/usr/local/bin/projectctl';
 const PM2 = 'pm2';
 const BASIC_USER = 'manage';
@@ -115,6 +116,97 @@ function readProjectEnv(projectPath) {
   }
 
   return { merged, files };
+}
+
+function projectEnvBackupDir(ref) {
+  return path.join(PROJECT_ENV_BACKUP_DIR, slugFromRef(ref || 'project'));
+}
+
+function ensureProjectEnvBackupDir(ref) {
+  const dir = projectEnvBackupDir(ref);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return dir;
+}
+
+function backupNameFromTimestamp(date = new Date()) {
+  return `env-backup-${date.toISOString().replace(/[:.]/g, '-')}.zip`;
+}
+
+function listProjectEnvBackups(ref) {
+  const dir = projectEnvBackupDir(ref);
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .filter((name) => name.endsWith('.zip'))
+    .map((name) => {
+      const filePath = path.join(dir, name);
+      const stat = fs.statSync(filePath);
+      return {
+        name,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        createdAt: stat.mtime.toISOString(),
+        isLatest: name === 'latest.zip',
+      };
+    })
+    .sort((a, b) => {
+      if (a.isLatest && !b.isLatest) return -1;
+      if (!a.isLatest && b.isLatest) return 1;
+      return b.mtimeMs - a.mtimeMs || a.name.localeCompare(b.name);
+    });
+}
+
+function createProjectEnvBackup(ref, projectPath) {
+  if (!projectPath || !fs.existsSync(projectPath)) {
+    throw new Error(`Missing project path for ${ref}`);
+  }
+  const dir = ensureProjectEnvBackupDir(ref);
+  const zip = createEnvZip(projectPath);
+  const archiveName = backupNameFromTimestamp();
+  const archivePath = path.join(dir, archiveName);
+  const latestPath = path.join(dir, 'latest.zip');
+  fs.writeFileSync(archivePath, zip);
+  fs.writeFileSync(latestPath, zip);
+  fs.chmodSync(archivePath, 0o600);
+  fs.chmodSync(latestPath, 0o600);
+  return {
+    archiveName,
+    latestName: 'latest.zip',
+    dir,
+    size: zip.length,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function resolveProjectEnvBackupPath(ref, backupName = 'latest.zip') {
+  const dir = projectEnvBackupDir(ref);
+  const requested = path.basename(String(backupName || 'latest.zip'));
+  if (!requested || requested.includes('/') || requested.includes('\\')) {
+    throw new Error('Invalid backup name');
+  }
+  const requestedPath = path.join(dir, requested);
+  if (fs.existsSync(requestedPath)) {
+    return requestedPath;
+  }
+  if (requested !== 'latest.zip') {
+    throw new Error(`Backup not found: ${requested}`);
+  }
+  const backups = listProjectEnvBackups(ref).filter((item) => item.name !== 'latest.zip');
+  if (!backups.length) {
+    throw new Error(`No env backups found for ${ref}`);
+  }
+  return path.join(dir, backups[0].name);
+}
+
+function restoreProjectEnvBackup(ref, projectPath, backupName = 'latest.zip') {
+  const backupPath = resolveProjectEnvBackupPath(ref, backupName);
+  const zipBuffer = fs.readFileSync(backupPath);
+  replaceEnvZip(projectPath, zipBuffer);
+  return {
+    backupName: path.basename(backupPath),
+    backupPath,
+    size: zipBuffer.length,
+  };
 }
 
 function readProjectDiskUsage(projectPath) {
@@ -2221,6 +2313,8 @@ function renderPage() {
       </div>
       <div class="actions">
         <a id="envDownloadBtn" class="btn ghost" href="#" download>Download zip</a>
+        <button id="envBackupBtn" class="secondary" type="button">Backup</button>
+        <button id="envRestoreBtn" class="danger" type="button">Restore latest</button>
         <label class="btn ghost" style="cursor:pointer">
           <input id="envUploadInput" type="file" accept=".zip" hidden>
           Choose zip
@@ -2231,6 +2325,10 @@ function renderPage() {
     </header>
     <div class="body">
       <div id="envFlash" class="flash" hidden></div>
+      <div class="kv-item">
+        <div class="small">Saved backups</div>
+        <div id="envBackupsList" class="stack"></div>
+      </div>
       <div id="envList" class="kv-list"></div>
     </div>
   </div>
@@ -2330,9 +2428,12 @@ function renderPage() {
     const envList = document.getElementById('envList');
     const envFlash = document.getElementById('envFlash');
     const envDownloadBtn = document.getElementById('envDownloadBtn');
+    const envBackupBtn = document.getElementById('envBackupBtn');
+    const envRestoreBtn = document.getElementById('envRestoreBtn');
     const envUploadInput = document.getElementById('envUploadInput');
     const envUploadBtn = document.getElementById('envUploadBtn');
     const closeEnvBtn = document.getElementById('closeEnvBtn');
+    const envBackupsList = document.getElementById('envBackupsList');
     const progressPanel = document.getElementById('progressPanel');
     const progressTitle = document.getElementById('progressTitle');
     const progressSubtitle = document.getElementById('progressSubtitle');
@@ -2511,6 +2612,8 @@ function renderPage() {
           <button class="secondary" data-action="mysql" data-ref="\${ref}">MySQL</button>
           <button class="secondary" data-action="ssh" data-ref="\${ref}">SSH</button>
           <button class="secondary" data-action="env" data-ref="\${ref}">Env</button>
+          <button class="secondary" data-action="env-backup" data-ref="\${ref}">Backup</button>
+          <button class="danger" data-action="env-restore" data-ref="\${ref}">Restore</button>
           <button class="secondary" data-action="scripts" data-ref="\${ref}">Scripts</button>
           <button class="secondary" data-action="log" data-ref="\${ref}">Log</button>
           <span class="pill">\${project.protected ? 'protected' : 'open'}</span>
@@ -2763,6 +2866,20 @@ function renderPage() {
         : '<div class="muted">No values found.</div>';
     }
 
+    function renderBackupList(listEl, backups) {
+      if (!Array.isArray(backups) || !backups.length) {
+        listEl.innerHTML = '<div class="muted">No saved backups yet.</div>';
+        return;
+      }
+      listEl.innerHTML = backups.map((backup, index) => \`
+        <div class="kv-item">
+          <div><strong>\${escapeHtml(backup.name || '')}</strong> \${backup.isLatest ? '<span class="pill">latest</span>' : ''}</div>
+          <div class="small">Saved: \${escapeHtml(new Date(backup.mtimeMs || Date.now()).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }))}</div>
+          <div class="small">Size: \${escapeHtml(formatBytes(backup.size || 0))}</div>
+        </div>
+      \`).join('');
+    }
+
     function openEnvPanel(ref, details, subtitle) {
       closeScriptsModal();
       closeDbPanel();
@@ -2777,6 +2894,8 @@ function renderPage() {
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([key, value]) => [key, String(value)]);
       renderKeyValueList(envList, entries);
+      renderBackupList(envBackupsList, details.backups || []);
+      envRestoreBtn.disabled = !(Array.isArray(details.backups) && details.backups.length);
       envDownloadBtn.href = \`\${API}/projects/\${ref}/env/download\`;
       envPanel.hidden = false;
       setModalLocked(true);
@@ -2786,6 +2905,7 @@ function renderPage() {
       envPanel.hidden = true;
       currentEnvRef = '';
       envList.innerHTML = '';
+      envBackupsList.innerHTML = '';
       envFlash.hidden = true;
       envUploadInput.value = '';
       setModalLocked(false);
@@ -2979,6 +3099,26 @@ function renderPage() {
       openEnvPanel(ref, data, data.project || ref);
     }
 
+    async function backupEnv(ref) {
+      const data = await api(\`/projects/\${ref}/env/backup\`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      showMessage(envFlash, data.message || 'Environment backup saved');
+      await loadEnv(ref);
+      await refresh();
+    }
+
+    async function restoreEnv(ref, backupName = 'latest.zip') {
+      const data = await api(\`/projects/\${ref}/env/restore\`, {
+        method: 'POST',
+        body: JSON.stringify({ backupName }),
+      });
+      showMessage(envFlash, data.message || 'Environment backup restored');
+      await refresh();
+      await loadEnv(ref);
+    }
+
     async function uploadEnv(ref, file) {
       const res = await fetch(\`\${API}/projects/\${ref}/env/upload\`, {
         method: 'POST',
@@ -3040,7 +3180,7 @@ function renderPage() {
       const action = btn.dataset.action;
       const ref = btn.dataset.ref;
       if (!action || !ref) return;
-      if (action === 'db' || action === 'env' || action === 'mysql') {
+      if (action === 'db' || action === 'env' || action === 'mysql' || action === 'env-backup' || action === 'env-restore') {
         return;
       }
       if (action === 'ssh') {
@@ -3256,6 +3396,44 @@ function renderPage() {
     });
 
     document.addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-action="env-backup"]');
+      if (!btn) return;
+      const ref = btn.dataset.ref;
+      if (!ref) return;
+      btn.disabled = true;
+      try {
+        showMessage(envFlash, 'Saving environment backup for ' + decodeURIComponent(ref) + '...');
+        await backupEnv(ref);
+      } catch (error) {
+        showMessage(envFlash, error.message, false);
+        envPanel.hidden = false;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-action="env-restore"]');
+      if (!btn) return;
+      const ref = btn.dataset.ref;
+      if (!ref) return;
+      const ok = window.confirm(
+        'Restore the latest saved env backup for ' + decodeURIComponent(ref) + '? This will overwrite the current .env files and restart the project.',
+      );
+      if (!ok) return;
+      btn.disabled = true;
+      try {
+        showMessage(envFlash, 'Restoring latest backup for ' + decodeURIComponent(ref) + '...');
+        await restoreEnv(ref, 'latest.zip');
+      } catch (error) {
+        showMessage(envFlash, error.message, false);
+        envPanel.hidden = false;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.addEventListener('click', async (event) => {
       const btn = event.target.closest('button[data-action="mysql"]');
       if (!btn) return;
       const ref = btn.dataset.ref;
@@ -3287,6 +3465,36 @@ function renderPage() {
         envPanel.hidden = false;
       } finally {
         envUploadBtn.disabled = false;
+      }
+    });
+
+    envBackupBtn.addEventListener('click', async () => {
+      if (!currentEnvRef) return;
+      envBackupBtn.disabled = true;
+      try {
+        await backupEnv(currentEnvRef);
+      } catch (error) {
+        showMessage(envFlash, error.message, false);
+        envPanel.hidden = false;
+      } finally {
+        envBackupBtn.disabled = false;
+      }
+    });
+
+    envRestoreBtn.addEventListener('click', async () => {
+      if (!currentEnvRef) return;
+      const ok = window.confirm(
+        'Restore the latest saved env backup for ' + decodeURIComponent(currentEnvRef) + '? This will overwrite the current .env files and restart the project.',
+      );
+      if (!ok) return;
+      envRestoreBtn.disabled = true;
+      try {
+        await restoreEnv(currentEnvRef, 'latest.zip');
+      } catch (error) {
+        showMessage(envFlash, error.message, false);
+        envPanel.hidden = false;
+      } finally {
+        envRestoreBtn.disabled = false;
       }
     });
 
@@ -3667,19 +3875,22 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const envMatch = pathname.match(/^\/api\/projects\/(.+?)\/env(?:\/(download|upload))?$/);
+    const envMatch = pathname.match(/^\/api\/projects\/(.+?)\/env(?:\/(download|upload|backup|restore|backups))?$/);
     if (envMatch) {
       const ref = decodeURIComponent(envMatch[1]);
       const mode = envMatch[2] || '';
       const meta = parseEnvFile(metaPathForRef(ref));
       const projectPath = meta.APP_DIR || '';
       const { files, env } = pickEnvDetails(projectPath);
+      const backups = listProjectEnvBackups(ref);
 
       if (req.method === 'GET' && !mode) {
         sendJson(res, 200, {
           project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
           files,
           env,
+          backups,
+          latestBackup: backups[0] || null,
         });
         return;
       }
@@ -3695,6 +3906,44 @@ async function handleRequest(req, res) {
           return;
         }
         res.end(zipBuffer);
+        return;
+      }
+
+      if (req.method === 'GET' && mode === 'backups') {
+        sendJson(res, 200, {
+          project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
+          backups,
+          latestBackup: backups[0] || null,
+        });
+        return;
+      }
+
+      if (req.method === 'POST' && mode === 'backup') {
+        const backup = createProjectEnvBackup(ref, projectPath);
+        const refreshedBackups = listProjectEnvBackups(ref);
+        sendJson(res, 200, {
+          ok: true,
+          message: `Environment backup saved for ${ref}`,
+          backup,
+          backups: refreshedBackups,
+          latestBackup: refreshedBackups[0] || null,
+        });
+        return;
+      }
+
+      if (req.method === 'POST' && mode === 'restore') {
+        const body = await readBody(req);
+        const backupName = String(body.backupName || 'latest.zip');
+        const restored = restoreProjectEnvBackup(ref, projectPath, backupName);
+        runProjectCtl(['restart', ref]);
+        const refreshedBackups = listProjectEnvBackups(ref);
+        sendJson(res, 200, {
+          ok: true,
+          message: `Environment backup restored for ${ref}`,
+          restored,
+          backups: refreshedBackups,
+          latestBackup: refreshedBackups[0] || null,
+        });
         return;
       }
 
