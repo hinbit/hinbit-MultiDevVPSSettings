@@ -178,6 +178,23 @@ function createProjectEnvBackup(ref, projectPath) {
   };
 }
 
+function deleteProjectEnvBackup(ref, backupName) {
+  const dir = projectEnvBackupDir(ref);
+  const requested = path.basename(String(backupName || ''));
+  if (!requested || requested.includes('/') || requested.includes('\\')) {
+    throw new Error('Invalid backup name');
+  }
+  const backupPath = path.join(dir, requested);
+  if (!fs.existsSync(backupPath)) {
+    throw new Error(`Backup not found: ${requested}`);
+  }
+  fs.unlinkSync(backupPath);
+  return {
+    backupName: requested,
+    backupPath,
+  };
+}
+
 function resolveProjectEnvBackupPath(ref, backupName = 'latest.zip') {
   const dir = projectEnvBackupDir(ref);
   const requested = path.basename(String(backupName || 'latest.zip'));
@@ -2877,9 +2894,17 @@ function renderPage() {
       }
       listEl.innerHTML = backups.map((backup, index) => \`
         <div class="kv-item">
-          <div><strong>\${escapeHtml(backup.name || '')}</strong> \${backup.isLatest ? '<span class="pill">latest</span>' : ''}</div>
-          <div class="small">Saved: \${escapeHtml(new Date(backup.mtimeMs || Date.now()).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }))}</div>
-          <div class="small">Size: \${escapeHtml(formatBytes(backup.size || 0))}</div>
+          <div class="row spread" style="gap: 12px; align-items: flex-start;">
+            <div>
+              <div><strong>\${escapeHtml(backup.name || '')}</strong> \${backup.isLatest ? '<span class="pill">latest</span>' : ''}</div>
+              <div class="small">Saved: \${escapeHtml(new Date(backup.mtimeMs || Date.now()).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }))}</div>
+              <div class="small">Size: \${escapeHtml(formatBytes(backup.size || 0))}</div>
+            </div>
+            <div class="copy-actions">
+              <button class="secondary" type="button" data-env-backup-restore="\${escapeHtml(backup.name || '')}">Restore</button>
+              <button class="danger" type="button" data-env-backup-delete="\${escapeHtml(backup.name || '')}">Delete</button>
+            </div>
+          </div>
         </div>
       \`).join('');
     }
@@ -3136,6 +3161,15 @@ function renderPage() {
         body: JSON.stringify({ backupName }),
       });
       showMessage(envFlash, data.message || 'Environment backup restored');
+      await refresh();
+      await loadEnv(ref);
+    }
+
+    async function deleteEnvBackup(ref, backupName) {
+      const data = await api(\`/projects/\${ref}/env/backups/\${encodeURIComponent(backupName)}\`, {
+        method: 'DELETE',
+      });
+      showMessage(envFlash, data.message || 'Environment backup deleted');
       await refresh();
       await loadEnv(ref);
     }
@@ -3439,7 +3473,7 @@ function renderPage() {
       const ref = btn.dataset.ref;
       if (!ref) return;
       const ok = window.confirm(
-        'Restore the latest saved env backup for ' + decodeURIComponent(ref) + '? This will overwrite the current .env files and restart the project.',
+        'Restore the latest saved env backup for ' + decodeURIComponent(ref) + '? This will create an automatic backup first, then overwrite the current .env files and restart the project.',
       );
       if (!ok) return;
       btn.disabled = true;
@@ -3505,7 +3539,7 @@ function renderPage() {
     envRestoreBtn.addEventListener('click', async () => {
       if (!currentEnvRef) return;
       const ok = window.confirm(
-        'Restore the latest saved env backup for ' + decodeURIComponent(currentEnvRef) + '? This will overwrite the current .env files and restart the project.',
+        'Restore the latest saved env backup for ' + decodeURIComponent(currentEnvRef) + '? This will create an automatic backup first, then overwrite the current .env files and restart the project.',
       );
       if (!ok) return;
       envRestoreBtn.disabled = true;
@@ -3519,11 +3553,54 @@ function renderPage() {
       }
     });
 
+    document.addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-env-backup-restore]');
+      if (!btn) return;
+      if (!currentEnvRef) return;
+      const backupName = btn.dataset.envBackupRestore || 'latest.zip';
+      const ok = window.confirm(
+        'Restore backup "' + backupName + '" for ' + decodeURIComponent(currentEnvRef) + '? This will create an automatic backup first, then overwrite the current .env files and restart the project.',
+      );
+      if (!ok) return;
+      btn.disabled = true;
+      try {
+        showMessage(envFlash, 'Restoring ' + backupName + ' for ' + decodeURIComponent(currentEnvRef) + '...');
+        await restoreEnv(currentEnvRef, backupName);
+      } catch (error) {
+        showMessage(envFlash, error.message, false);
+        envPanel.hidden = false;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-env-backup-delete]');
+      if (!btn) return;
+      if (!currentEnvRef) return;
+      const backupName = btn.dataset.envBackupDelete || '';
+      if (!backupName) return;
+      const ok = window.confirm(
+        'Delete backup "' + backupName + '" for ' + decodeURIComponent(currentEnvRef) + '? This cannot be undone.',
+      );
+      if (!ok) return;
+      btn.disabled = true;
+      try {
+        showMessage(envFlash, 'Deleting ' + backupName + ' for ' + decodeURIComponent(currentEnvRef) + '...');
+        await deleteEnvBackup(currentEnvRef, backupName);
+      } catch (error) {
+        showMessage(envFlash, error.message, false);
+        envPanel.hidden = false;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
     envRestoreSelectedBtn.addEventListener('click', async () => {
       if (!currentEnvRef) return;
       const backupName = envRestoreSelect && envRestoreSelect.value ? envRestoreSelect.value : 'latest.zip';
       const ok = window.confirm(
-        'Restore backup "' + backupName + '" for ' + decodeURIComponent(currentEnvRef) + '? This will overwrite the current .env files and restart the project.',
+        'Restore backup "' + backupName + '" for ' + decodeURIComponent(currentEnvRef) + '? This will create an automatic backup first, then overwrite the current .env files and restart the project.',
       );
       if (!ok) return;
       envRestoreSelectedBtn.disabled = true;
@@ -3974,12 +4051,14 @@ async function handleRequest(req, res) {
       if (req.method === 'POST' && mode === 'restore') {
         const body = await readBody(req);
         const backupName = String(body.backupName || 'latest.zip');
+        const autoBackup = createProjectEnvBackup(ref, projectPath);
         const restored = restoreProjectEnvBackup(ref, projectPath, backupName);
         runProjectCtl(['restart', ref]);
         const refreshedBackups = listProjectEnvBackups(ref);
         sendJson(res, 200, {
           ok: true,
           message: `Environment backup restored for ${ref}`,
+          autoBackup,
           restored,
           backups: refreshedBackups,
           latestBackup: refreshedBackups[0] || null,
@@ -3996,6 +4075,22 @@ async function handleRequest(req, res) {
         sendJson(res, 200, { ok: true, message: `Environment files updated for ${ref}` });
         return;
       }
+    }
+
+    const envBackupDeleteMatch = pathname.match(/^\/api\/projects\/(.+?)\/env\/backups\/([^/]+)$/);
+    if (envBackupDeleteMatch && req.method === 'DELETE') {
+      const ref = decodeURIComponent(envBackupDeleteMatch[1]);
+      const backupName = decodeURIComponent(envBackupDeleteMatch[2]);
+      const deleted = deleteProjectEnvBackup(ref, backupName);
+      const refreshedBackups = listProjectEnvBackups(ref);
+      sendJson(res, 200, {
+        ok: true,
+        message: `Environment backup deleted for ${ref}`,
+        deleted,
+        backups: refreshedBackups,
+        latestBackup: refreshedBackups[0] || null,
+      });
+      return;
     }
 
     const pullPreflightMatch = pathname.match(/^\/api\/projects\/(.+?)\/pull-preflight$/);
