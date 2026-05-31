@@ -138,6 +138,95 @@ project_db_value() {
   printf '%s' ""
 }
 
+repo_name_from_ref() {
+  local ref="$1"
+  printf '%s' "${ref##*/}"
+}
+
+sanitize_db_identifier() {
+  local value="$1"
+  value="$(printf '%s' "${value}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')"
+  printf '%s' "${value}"
+}
+
+project_default_db_identifier() {
+  local ref="${1:-${REPO_REF}}"
+  local name=""
+
+  name="$(sanitize_db_identifier "$(repo_name_from_ref "${ref}")")"
+  if [[ -z "${name}" ]]; then
+    name="$(sanitize_db_identifier "${PROJECT_SLUG:-}")"
+  fi
+  if [[ -z "${name}" ]]; then
+    name="$(sanitize_db_identifier "$(generate_secret)")"
+  fi
+  printf '%s' "${name}"
+}
+
+project_db_env_paths() {
+  local project_dir="${1:-${APP_DIR}}"
+  local candidate=""
+
+  [[ -d "${project_dir}" ]] || return 0
+
+  printf '%s\n' "${project_dir}/.env"
+  for candidate in .env.local .env.production .env.credentials .env.production.local .env.development; do
+    [[ -f "${project_dir}/${candidate}" ]] || continue
+    printf '%s\n' "${project_dir}/${candidate}"
+  done
+
+  if [[ -d "${project_dir}/server" ]]; then
+    printf '%s\n' "${project_dir}/server/.env"
+    for candidate in .env.local .env.production .env.credentials .env.production.local .env.development; do
+      [[ -f "${project_dir}/server/${candidate}" ]] || continue
+      printf '%s\n' "${project_dir}/server/${candidate}"
+    done
+  fi
+}
+
+sync_project_db_env() {
+  local project_dir="${1:-${APP_DIR}}"
+  local db_name="${2:-}"
+  local db_user="${3:-}"
+  local db_password="${4:-}"
+  local db_type="${5:-}"
+  local default_db_name=""
+  local default_db_user=""
+  local env_file=""
+
+  [[ -d "${project_dir}" ]] || return 0
+
+  default_db_name="$(project_default_db_identifier "${REPO_REF}")"
+  default_db_user="${default_db_name}"
+
+  [[ -n "${db_name}" ]] || db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
+  [[ -n "${db_user}" ]] || db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
+  [[ -n "${db_password}" ]] || db_password="$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)"
+  [[ -n "${db_type}" ]] || db_type="$(project_db_value DB_TYPE VITE_DB_TYPE)"
+
+  [[ -n "${db_name}" ]] || db_name="${default_db_name}"
+  [[ -n "${db_user}" ]] || db_user="${default_db_user}"
+  [[ -n "${db_password}" ]] || db_password="$(generate_secret)"
+  [[ -n "${db_type}" ]] || db_type="mysql"
+
+  while IFS= read -r env_file; do
+    [[ -n "${env_file}" ]] || continue
+    touch "${env_file}"
+    chmod 0600 "${env_file}"
+    update_meta_value "${env_file}" "DB_TYPE" "${db_type}"
+    update_meta_value "${env_file}" "VITE_DB_TYPE" "${db_type}"
+    update_meta_value "${env_file}" "DB_NAME" "${db_name}"
+    update_meta_value "${env_file}" "DB_DATABASE" "${db_name}"
+    update_meta_value "${env_file}" "MYSQL_DATABASE" "${db_name}"
+    update_meta_value "${env_file}" "DB_USER" "${db_user}"
+    update_meta_value "${env_file}" "MYSQL_USER" "${db_user}"
+    update_meta_value "${env_file}" "DB_PASSWORD" "${db_password}"
+    update_meta_value "${env_file}" "MYSQL_PASSWORD" "${db_password}"
+  done < <(project_db_env_paths "${project_dir}")
+
+  printf '%s\t%s\t%s\t%s\n' "${db_name}" "${db_user}" "${db_password}" "${db_type}"
+}
+
 generate_secret() {
   local secret=""
   secret="$(openssl rand -base64 18 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 18 || true)"
@@ -1379,6 +1468,11 @@ do_install() {
   fi
 
   sync_project_runtime_ports "${APP_PORT}" "${APP_DIR}"
+  local db_name=""
+  local db_user=""
+  local db_password=""
+  local db_type=""
+  IFS=$'\t' read -r db_name db_user db_password db_type < <(sync_project_db_env "${APP_DIR}")
 
   PACKAGE_MANAGER="$(cd "${APP_DIR}" && detect_package_manager)"
 
@@ -1400,12 +1494,6 @@ do_install() {
     maybe_build
   )
 
-  local db_name=""
-  local db_user=""
-  local db_password=""
-  db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
-  db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
-  db_password="$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)"
   if [[ -n "${db_name}" && -n "${db_user}" && -n "${db_password}" ]]; then
     sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "" "${DB_MACHINE_ID}"
   fi

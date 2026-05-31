@@ -13,6 +13,7 @@ Role:
 Changes made:
 - Installed and configured the manage UI service.
 - Set up nginx for the manage UI and project hosting.
+- Restored the visible `Manage SSL` entry in the portal and manage header.
 - Added the portal landing page at `/` and kept the main manage dashboard at `/manage/`.
 - Added `/manage/tls/` for certificate handling in the UI.
 - Added support for per-server certificates, per-project certificates, and a default app-domain certificate fallback.
@@ -22,6 +23,7 @@ Changes made:
   - scans `client/package.json`
   - shows DB-related scripts with Run / Activate buttons
 - Updated project install/update logic so the requested app port is written into project env files.
+- Updated fresh project installs so missing DB name, user, password, and MySQL variants are generated and written into project env files automatically.
 - Updated project startup detection so dev-style repos with a real `prod` script boot in production mode instead of launching Vite dev mode.
 - Configured MySQL access to the remote DB machine through the SSH tunnel endpoint on the web host.
 - Cleaned up stale tunnel artifacts after Cloudflare Tunnel was no longer used for the public path.

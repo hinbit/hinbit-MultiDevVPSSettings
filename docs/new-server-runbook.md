@@ -146,6 +146,7 @@ What the installer does:
 - clones the GitHub repo into `/var/www/<owner-repo>`
 - assigns a PM2 name and port
 - writes the chosen port into the project env files so the runtime keeps the requested app port
+- generates DB name, user, and password values automatically if the repo env does not already define them
 - maps the domain in `/etc/app-map.csv`
 - runs `app-sync.sh` to build nginx and TLS
 - creates a per-project SSH upload user

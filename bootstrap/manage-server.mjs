@@ -2368,6 +2368,7 @@ function renderPortalPage() {
     </div>
     <div class="top-actions">
       <a class="btn ghost" href="/manage/">Projects</a>
+      <a class="btn ghost" href="/manage/tls/">Manage SSL</a>
       <a class="btn ghost" href="/manage/ssh-keys/">SSH Keys</a>
       <a class="btn ghost" href="/manage/vault/">DB Vault</a>
       <a class="btn ghost" href="/manage/db-machines/">DB Machines</a>
@@ -3130,6 +3131,7 @@ function renderPage() {
     </div>
     <div class="actions">
       <a class="btn ghost" href="/">Portal</a>
+      <a class="btn ghost" href="/manage/tls/">Manage SSL</a>
       <a class="btn ghost" href="/manage/tls/">TLS / Certificates</a>
       <a class="btn ghost" href="/phpmyadmin/">phpMyAdmin</a>
       <button class="secondary" id="refreshBtn" type="button">Refresh</button>
