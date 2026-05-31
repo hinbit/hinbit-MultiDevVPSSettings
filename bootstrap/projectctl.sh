@@ -678,7 +678,7 @@ GRANT ALL PRIVILEGES ON *.* TO 'root'@'::1' WITH GRANT OPTION;
 FLUSH PRIVILEGES;
 EOF
 
-  if ! ssh -i "${ssh_key}" -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new "${ssh_target}" "sudo -n mysql --protocol=socket -uroot --batch --skip-column-names" < "${sql_file}" >/dev/null 2>&1; then
+  if ! ssh -i "${ssh_key}" -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new "${ssh_target}" "sudo -n env MYSQL_PWD=$(shell_quote "${remote_root_password}") mysql --protocol=socket -uroot --batch --skip-column-names" < "${sql_file}" >/dev/null 2>&1; then
     rm -f "${sql_file}"
     die "Unable to bootstrap root access on remote DB machine ${machine_id}"
   fi
@@ -769,6 +769,7 @@ sync_project_db_machine_env() {
   local machine_root_password="${5:-}"
   local env_file="${APP_DIR}/.env.machine"
   local db_type=""
+  local project_env=""
 
   touch "${env_file}"
   chmod 0600 "${env_file}"
@@ -782,6 +783,15 @@ sync_project_db_machine_env() {
     update_meta_value "${env_file}" "MYSQL_USER" "${machine_root_user}"
     update_meta_value "${env_file}" "MYSQL_PASSWORD" "${machine_root_password}"
   fi
+
+  for project_env in "${APP_DIR}/.env" "${APP_DIR}/server/.env"; do
+    [[ -f "${project_env}" ]] || continue
+    update_meta_value "${project_env}" "DB_MACHINE_ID" "${machine_id}"
+    update_meta_value "${project_env}" "DB_HOST" "${machine_host}"
+    update_meta_value "${project_env}" "DB_PORT" "${machine_port}"
+    update_meta_value "${project_env}" "MYSQL_HOST" "${machine_host}"
+    update_meta_value "${project_env}" "MYSQL_PORT" "${machine_port}"
+  done
 }
 
 read_project_db_machine_accounts() {
@@ -1710,13 +1720,14 @@ do_script() {
   local runner
   local pm2_script_name
   local pm2_script_suffix="${script}"
-  local script_path="${APP_DIR}"
+  local script_path=""
 
   slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
 
   [[ -d "${APP_DIR}" ]] || die "Missing app directory: ${APP_DIR}"
+  script_path="${APP_DIR}"
   [[ -n "${script}" ]] || die "Missing package script name"
   [[ "${script}" =~ ^[A-Za-z0-9:_-]+$ ]] || die "Invalid script name: ${script}"
   if [[ -n "${script_dir}" ]]; then
