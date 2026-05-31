@@ -178,6 +178,7 @@ This will:
 - create/update the project DB user and grants
 - switch the project to the new DB machine
 - restart the project
+- bootstrap the remote MySQL root host entries over the SSH tunnel when the target is a remote DB machine and they are missing
 
 If the DB machine cannot be reached or the root credentials are wrong, the UI returns an error and the move does not complete.
 

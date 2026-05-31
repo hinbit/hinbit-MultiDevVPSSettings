@@ -24,6 +24,7 @@ Changes made:
   - shows DB-related scripts with Run / Activate buttons
 - Updated project install/update logic so the requested app port is written into project env files.
 - Updated fresh project installs so missing DB name, user, password, and MySQL variants are generated and written into project env files automatically.
+- Added a remote DB bootstrap step so the selected remote machine gets the MySQL root host entries it needs before project DB creation runs through the SSH tunnel.
 - Updated project startup detection so dev-style repos with a real `prod` script boot in production mode instead of launching Vite dev mode.
 - Configured MySQL access to the remote DB machine through the SSH tunnel endpoint on the web host.
 - Cleaned up stale tunnel artifacts after Cloudflare Tunnel was no longer used for the public path.

@@ -632,6 +632,64 @@ resolve_db_machine() {
   fi
 }
 
+remote_db_bootstrap_ssh_details() {
+  local service_file="/etc/systemd/system/vps-mysql-tunnel.service"
+  local exec_line=""
+  local ssh_key=""
+  local ssh_target=""
+
+  [[ -f "${service_file}" ]] || return 1
+  exec_line="$(grep -E '^ExecStart=' "${service_file}" | tail -n1 | sed 's/^ExecStart=//')"
+  [[ -n "${exec_line}" ]] || return 1
+
+  ssh_key="$(printf '%s\n' "${exec_line}" | awk '{for (i = 1; i <= NF; i++) { if ($i == "-i") { print $(i + 1); exit } }}')"
+  ssh_target="$(printf '%s\n' "${exec_line}" | awk '{print $NF}')"
+  [[ -n "${ssh_key}" && -n "${ssh_target}" ]] || return 1
+
+  printf '%s\t%s\n' "${ssh_key}" "${ssh_target}"
+}
+
+ensure_remote_db_root_hosts() {
+  local machine_id="${1:-${LOCAL_DB_MACHINE_ID}}"
+  local ssh_key=""
+  local ssh_target=""
+  local sql_file=""
+  local remote_root_password=""
+  local -a remote_fields=()
+
+  [[ "${machine_id}" != "${LOCAL_DB_MACHINE_ID}" ]] || return 0
+
+  resolve_db_machine "${machine_id}"
+  remote_root_password="${DB_MACHINE_ROOT_PASSWORD:-}"
+  [[ -n "${remote_root_password}" ]] || die "Missing root password for DB machine ${machine_id}"
+
+  mapfile -t remote_fields < <(remote_db_bootstrap_ssh_details) || die "Missing SSH tunnel details for remote DB bootstrap"
+  ssh_key="${remote_fields[0]:-}"
+  ssh_target="${remote_fields[1]:-}"
+  [[ -n "${ssh_key}" && -n "${ssh_target}" ]] || die "Invalid SSH tunnel details for remote DB bootstrap"
+
+  sql_file="$(mktemp)"
+  cat > "${sql_file}" <<EOF
+CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY $(sql_quote "${remote_root_password}");
+ALTER USER 'root'@'127.0.0.1' IDENTIFIED BY $(sql_quote "${remote_root_password}");
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;
+CREATE USER IF NOT EXISTS 'root'@'localhost' IDENTIFIED BY $(sql_quote "${remote_root_password}");
+ALTER USER 'root'@'localhost' IDENTIFIED BY $(sql_quote "${remote_root_password}");
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;
+CREATE USER IF NOT EXISTS 'root'@'::1' IDENTIFIED BY $(sql_quote "${remote_root_password}");
+ALTER USER 'root'@'::1' IDENTIFIED BY $(sql_quote "${remote_root_password}");
+GRANT ALL PRIVILEGES ON *.* TO 'root'@'::1' WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+EOF
+
+  if ! ssh -i "${ssh_key}" -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new "${ssh_target}" "sudo -n mysql --protocol=socket -uroot --batch --skip-column-names" < "${sql_file}" >/dev/null 2>&1; then
+    rm -f "${sql_file}"
+    die "Unable to bootstrap root access on remote DB machine ${machine_id}"
+  fi
+
+  rm -f "${sql_file}"
+}
+
 mysql_exec_machine() {
   local query="$1"
   [[ -n "${DB_MACHINE_HOST:-}" ]] || die "Missing DB machine host"
@@ -1789,6 +1847,7 @@ sync_mysql_permissions() {
   user_q="$(sql_quote "${db_user}")"
   pass_q="$(sql_quote "${db_password}")"
   resolve_db_machine "${machine_id}"
+  ensure_remote_db_root_hosts "${machine_id}"
   mysql_exec_machine "SELECT 1;"
 
   if [[ -n "${new_ips}" ]]; then
