@@ -8,6 +8,9 @@ Assumptions:
 - DNS for app domains already points to the app VPS before TLS issuance.
 - You have GitHub SSH access ready on the app VPS.
 
+If you use Cloudflare Tunnel for the manage UI, run the tunnel on the app VPS that serves `/manage/` and map the hostname to the local manage port.
+That setup avoids exposing the manage host publicly on `80/443`.
+
 ## 1. Prepare the app VPS
 
 SSH into the app server as `root` and clone this repo:
@@ -39,6 +42,33 @@ The installer will set up:
 - UFW and fail2ban
 - the `/manage/` system portal
 - `projectctl`
+
+## Optional Cloudflare Tunnel for manage
+
+Use this when you want `multidev.seach.co.il` to reach the manage UI without opening inbound HTTP/HTTPS on the server.
+
+On the app VPS:
+
+1. Install and start `cloudflared` with your tunnel token.
+2. Point the hostname at the local manage service:
+
+```text
+multidev.seach.co.il -> http://127.0.0.1:8090
+```
+
+3. Make sure the tunnel config includes an ingress rule for the manage hostname and a fallback 404:
+
+```yaml
+ingress:
+  - hostname: multidev.seach.co.il
+    service: http://127.0.0.1:8090
+  - service: http_status:404
+```
+
+4. Keep the manage UI bound to `127.0.0.1:8090` or `0.0.0.0:8090` on the app VPS.
+5. Do not point the tunnel at the DB host unless the DB host is the machine actually serving `/manage/`.
+
+In the current UI layout, `/` is the portal landing page and `/manage/` is the project dashboard.
 
 ## 2. Prepare the DB machine
 
@@ -184,4 +214,3 @@ Check these first:
 - `projectctl mysql owner/repo`
 - PM2 logs for the project
 - nginx config and TLS status for the domain
-

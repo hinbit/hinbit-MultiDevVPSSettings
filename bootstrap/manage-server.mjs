@@ -2023,6 +2023,135 @@ function escapeHtml(value) {
     .replace(/"/g, '&quot;');
 }
 
+function renderPortalPage() {
+  const projects = projectView();
+  const dbMachines = readDbMachines();
+  const sshKeys = readSshKeys();
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MultiDev Portal</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font-family: Inter, system-ui, sans-serif; background: radial-gradient(circle at top, #11213d 0, #08111f 50%, #05070c 100%); color: #e5eef8; padding-top: 84px; }
+    header, main { max-width: 1200px; margin: 0 auto; padding: 24px; }
+    header { display: flex; justify-content: space-between; align-items: end; gap: 16px; }
+    h1, h2 { margin: 0 0 12px; }
+    .muted { color: #94a3b8; }
+    .small { font-size: 12px; color: #94a3b8; }
+    .grid { display: grid; gap: 16px; }
+    .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .card {
+      display: grid;
+      gap: 10px;
+      padding: 18px;
+      border-radius: 18px;
+      border: 1px solid rgba(148,163,184,0.18);
+      background: linear-gradient(180deg, rgba(11,18,32,0.92), rgba(8,15,29,0.92));
+      text-decoration: none;
+      color: inherit;
+      min-height: 160px;
+    }
+    .card:hover { border-color: rgba(96,165,250,0.5); transform: translateY(-1px); }
+    .card-title { font-size: 22px; font-weight: 800; margin: 0; }
+    .card-desc { color: #cbd5e1; line-height: 1.5; }
+    .card-meta { color: #93c5fd; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+    .top-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .btn {
+      background: linear-gradient(180deg, #38bdf8, #0ea5e9);
+      color: #00111d;
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn.ghost { background: transparent; color: #dbeafe; border: 1px solid #2a3b59; }
+    .hinbit-brand {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      z-index: 80;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(8, 15, 29, 0.82);
+      border: 1px solid rgba(148,163,184,0.22);
+      box-shadow: 0 12px 32px rgba(0,0,0,0.25);
+      text-decoration: none;
+      color: #e5eef8;
+      backdrop-filter: blur(12px);
+    }
+    .hinbit-brand img { width: 22px; height: 22px; display: block; object-fit: contain; }
+    .hinbit-brand span { font-size: 12px; font-weight: 700; letter-spacing: 0.02em; white-space: nowrap; }
+    @media (max-width: 860px) {
+      .cards { grid-template-columns: 1fr; }
+      header { align-items: start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <a class="hinbit-brand" href="https://hinbit.com" target="_blank" rel="noreferrer">
+    <img src="https://hinbit.com/hebrew_site/hinbit-logo-symbol.png" alt="Hinbit">
+    <span>Powered by Hinbit Development</span>
+  </a>
+  <header>
+    <div>
+      <h1>MultiDev Portal</h1>
+      <div class="muted">Choose the area you want to manage.</div>
+      <div class="small">${escapeHtml(String(projects.length))} projects, ${escapeHtml(String(sshKeys.length))} SSH keys, ${escapeHtml(String(dbMachines.length))} DB machines</div>
+    </div>
+    <div class="top-actions">
+      <a class="btn ghost" href="/manage/">Projects</a>
+      <a class="btn ghost" href="/manage/ssh-keys/">SSH Keys</a>
+      <a class="btn ghost" href="/manage/vault/">DB Vault</a>
+      <a class="btn ghost" href="/manage/db-machines/">DB Machines</a>
+    </div>
+  </header>
+  <main class="grid cards">
+    <a class="card" href="/manage/">
+      <div class="card-meta">Projects</div>
+      <h2 class="card-title">Manage Projects</h2>
+      <div class="card-desc">Install, update, restart, and inspect running projects, PM2 apps, logs, env files, and domain wiring.</div>
+    </a>
+    <a class="card" href="/manage/ssh-keys/">
+      <div class="card-meta">SSH</div>
+      <h2 class="card-title">Manage SSH Keys</h2>
+      <div class="card-desc">Create, export, import, and memoize server SSH keys for GitHub and deployment access.</div>
+    </a>
+    <a class="card" href="/manage/vault/">
+      <div class="card-meta">Database</div>
+      <h2 class="card-title">DB Vault</h2>
+      <div class="card-desc">View project database credentials with quick copy actions.</div>
+    </a>
+    <a class="card" href="/manage/db-machines/">
+      <div class="card-meta">Machines</div>
+      <h2 class="card-title">DB Machines</h2>
+      <div class="card-desc">Register and edit local or remote DB machines, root credentials, and allowed IPs.</div>
+    </a>
+    <a class="card" href="/phpmyadmin/">
+      <div class="card-meta">Database UI</div>
+      <h2 class="card-title">phpMyAdmin</h2>
+      <div class="card-desc">Open the MySQL admin UI for database inspection and maintenance.</div>
+    </a>
+    <a class="card" href="/manage/">
+      <div class="card-meta">Dashboard</div>
+      <h2 class="card-title">Project Dashboard</h2>
+      <div class="card-desc">Jump to the full project list and PM2 management screen.</div>
+    </a>
+  </main>
+</body>
+</html>`;
+}
+
 function renderPage() {
   const dbMachines = readDbMachines();
   const dbMachineOptions = renderDbMachineOptions(dbMachines, LOCAL_DB_MACHINE_ID);
@@ -3732,9 +3861,14 @@ async function handleRequest(req, res) {
 
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const pathname = url.pathname.replace(/\/+$/, '') || '/';
+  const routePath = pathname === '/manage'
+    ? '/manage'
+    : pathname.startsWith('/manage/')
+      ? pathname.slice('/manage'.length)
+      : pathname;
 
   try {
-    if (req.method === 'GET' && (pathname === '/vault' || pathname === '/manage/vault')) {
+    if (req.method === 'GET' && routePath === '/vault') {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-store',
@@ -3743,7 +3877,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    if (req.method === 'GET' && (pathname === '/db-machines' || pathname === '/manage/db-machines')) {
+    if (req.method === 'GET' && routePath === '/db-machines') {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-store',
@@ -3752,7 +3886,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    if (req.method === 'GET' && (pathname === '/ssh-keys' || pathname === '/manage/ssh-keys')) {
+    if (req.method === 'GET' && routePath === '/ssh-keys') {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-store',
@@ -3761,7 +3895,16 @@ async function handleRequest(req, res) {
       return;
     }
 
-    if (req.method === 'GET' && (pathname === '/' || pathname === '/manage')) {
+    if (req.method === 'GET' && routePath === '/') {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(renderPortalPage());
+      return;
+    }
+
+    if (req.method === 'GET' && routePath === '/manage') {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-store',
@@ -3770,17 +3913,17 @@ async function handleRequest(req, res) {
       return;
     }
 
-    if (req.method === 'GET' && pathname === '/api/projects') {
+    if (req.method === 'GET' && routePath === '/api/projects') {
       sendJson(res, 200, { projects: projectView() });
       return;
     }
 
-    if (req.method === 'GET' && pathname === '/api/system') {
+    if (req.method === 'GET' && routePath === '/api/system') {
       sendJson(res, 200, { system: getSystemStats() });
       return;
     }
 
-    if (pathname === '/api/db-machines') {
+    if (routePath === '/api/db-machines') {
       if (req.method === 'GET') {
         sendJson(res, 200, { machines: readDbMachines() });
         return;
@@ -3799,7 +3942,7 @@ async function handleRequest(req, res) {
       }
     }
 
-    if (pathname === '/api/ssh-keys') {
+    if (routePath === '/api/ssh-keys') {
       if (req.method === 'GET') {
         sendJson(res, 200, { keys: readSshKeys() });
         return;
@@ -3818,7 +3961,7 @@ async function handleRequest(req, res) {
       }
     }
 
-    if (pathname === '/api/ssh-keys/export' && (req.method === 'GET' || req.method === 'HEAD')) {
+    if (routePath === '/api/ssh-keys/export' && (req.method === 'GET' || req.method === 'HEAD')) {
       const zipBuffer = createSshKeysZip();
       res.writeHead(200, {
         'Content-Type': 'application/zip',
@@ -3832,7 +3975,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    if (pathname === '/api/ssh-keys/import' && req.method === 'POST') {
+    if (routePath === '/api/ssh-keys/import' && req.method === 'POST') {
       const body = await readBinaryBody(req);
       if (!body || !body.length) {
         throw new Error('Missing zip upload body');
@@ -3846,7 +3989,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const sshKeyMatch = pathname.match(/^\/api\/ssh-keys\/(.+)$/);
+    const sshKeyMatch = routePath.match(/^\/api\/ssh-keys\/(.+)$/);
     if (sshKeyMatch && req.method === 'DELETE') {
       const keyId = decodeURIComponent(sshKeyMatch[1]);
       deleteSshKey(keyId);
@@ -3872,14 +4015,14 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const dbMachineDeleteMatch = pathname.match(/^\/api\/db-machines\/(.+)$/);
+    const dbMachineDeleteMatch = routePath.match(/^\/api\/db-machines\/(.+)$/);
     if (dbMachineDeleteMatch && req.method === 'DELETE') {
       deleteDbMachine(decodeURIComponent(dbMachineDeleteMatch[1]));
       sendJson(res, 200, { ok: true, message: 'DB machine deleted', machines: readDbMachines() });
       return;
     }
 
-    if (req.method === 'POST' && pathname === '/api/projects') {
+    if (req.method === 'POST' && routePath === '/api/projects') {
       const body = await readBody(req);
       const repo = repoRefFromArg(body.repo || '');
       const args = ['install'];
@@ -3909,7 +4052,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const dbMatch = pathname.match(/^\/api\/projects\/(.+?)\/db$/);
+    const dbMatch = routePath.match(/^\/api\/projects\/(.+?)\/db$/);
     if (dbMatch) {
       const ref = decodeURIComponent(dbMatch[1]);
       const meta = parseEnvFile(metaPathForRef(ref));
@@ -3922,7 +4065,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const mysqlMatch = pathname.match(/^\/api\/projects\/(.+?)\/mysql$/);
+    const mysqlMatch = routePath.match(/^\/api\/projects\/(.+?)\/mysql$/);
     if (mysqlMatch) {
       const ref = decodeURIComponent(mysqlMatch[1]);
       const meta = parseEnvFile(metaPathForRef(ref));
@@ -3980,7 +4123,7 @@ async function handleRequest(req, res) {
       }
     }
 
-    const sshMatch = pathname.match(/^\/api\/projects\/(.+?)\/ssh$/);
+    const sshMatch = routePath.match(/^\/api\/projects\/(.+?)\/ssh$/);
     if (sshMatch) {
       const ref = decodeURIComponent(sshMatch[1]);
       const meta = parseEnvFile(metaPathForRef(ref));
@@ -3996,7 +4139,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const envMatch = pathname.match(/^\/api\/projects\/(.+?)\/env(?:\/(download|upload|backup|restore|backups))?$/);
+    const envMatch = routePath.match(/^\/api\/projects\/(.+?)\/env(?:\/(download|upload|backup|restore|backups))?$/);
     if (envMatch) {
       const ref = decodeURIComponent(envMatch[1]);
       const mode = envMatch[2] || '';
@@ -4081,7 +4224,7 @@ async function handleRequest(req, res) {
       }
     }
 
-    const envBackupDeleteMatch = pathname.match(/^\/api\/projects\/(.+?)\/env\/backups\/([^/]+)$/);
+    const envBackupDeleteMatch = routePath.match(/^\/api\/projects\/(.+?)\/env\/backups\/([^/]+)$/);
     if (envBackupDeleteMatch && req.method === 'DELETE') {
       const ref = decodeURIComponent(envBackupDeleteMatch[1]);
       const backupName = decodeURIComponent(envBackupDeleteMatch[2]);
@@ -4097,7 +4240,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const pullPreflightMatch = pathname.match(/^\/api\/projects\/(.+?)\/pull-preflight$/);
+    const pullPreflightMatch = routePath.match(/^\/api\/projects\/(.+?)\/pull-preflight$/);
     if (pullPreflightMatch) {
       const ref = decodeURIComponent(pullPreflightMatch[1]);
       const meta = parseEnvFile(metaPathForRef(ref));
@@ -4120,7 +4263,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const updateStreamMatch = pathname.match(/^\/api\/projects\/(.+?)\/update-stream$/);
+    const updateStreamMatch = routePath.match(/^\/api\/projects\/(.+?)\/update-stream$/);
     if (updateStreamMatch) {
       const ref = decodeURIComponent(updateStreamMatch[1]);
       if (req.method !== 'POST') {
@@ -4133,7 +4276,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const logClearMatch = pathname.match(/^\/api\/projects\/(.+?)\/logs\/clear$/);
+    const logClearMatch = routePath.match(/^\/api\/projects\/(.+?)\/logs\/clear$/);
     if (logClearMatch) {
       const ref = decodeURIComponent(logClearMatch[1]);
       if (req.method !== 'POST') {
@@ -4163,7 +4306,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const scriptsMatch = pathname.match(/^\/api\/projects\/(.+?)\/scripts(?:\/(run|activate))?$/);
+    const scriptsMatch = routePath.match(/^\/api\/projects\/(.+?)\/scripts(?:\/(run|activate))?$/);
     if (scriptsMatch) {
       const ref = decodeURIComponent(scriptsMatch[1]);
       const scriptAction = scriptsMatch[2] || '';
@@ -4195,7 +4338,7 @@ async function handleRequest(req, res) {
       }
     }
 
-    const actionMatch = pathname.match(/^\/api\/projects\/(.+?)\/(restart|update|stop|uninstall|password|logs)$/);
+    const actionMatch = routePath.match(/^\/api\/projects\/(.+?)\/(restart|update|stop|uninstall|password|logs)$/);
     if (actionMatch) {
       const ref = decodeURIComponent(actionMatch[1]);
       const action = actionMatch[2];

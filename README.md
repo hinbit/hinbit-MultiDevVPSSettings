@@ -20,6 +20,7 @@ Bootstrap for a clean Ubuntu VPS that hosts multiple Node/React apps behind ngin
 - app-specific databases
 - DNS records
 - Cloudflare configuration
+- Cloudflare Tunnel
 
 ## Files
 
@@ -69,6 +70,16 @@ Optional environment variables:
 - `--env-file` to inject a repo `.env` before build/start
 - `--entrypoint` to force the PM2-managed runtime file or command when auto-detection is not enough
 - when a domain is set, `VITE_ALLOWED_HOSTS` and `CORS_ORIGIN` are exported into the PM2 runtime
+
+Manage access can be exposed either directly on public `80/443` with nginx and Let's Encrypt, or through Cloudflare Tunnel.
+If you use a tunnel, run `cloudflared` on the server that hosts the manage UI and route the hostname to the local manage port:
+
+```text
+multidev.seach.co.il -> http://127.0.0.1:8090
+```
+
+The tunnel should point to the machine serving `/manage/`, not the separate DB host unless you intentionally want that host to proxy the UI.
+The root path `/` now serves the portal landing page, and `/manage/` serves the project dashboard.
 
 ## Runtime layout
 
