@@ -2196,6 +2196,103 @@ function formatBytes(bytes) {
   return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
 }
 
+function fmtTime(ms) {
+  if (!ms) return 'n/a';
+  const diff = Date.now() - Number(ms);
+  if (!Number.isFinite(diff) || diff < 0) return 'n/a';
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hrs = Math.floor(min / 60);
+  if (hrs < 24) return `${hrs}h`;
+  return `${Math.floor(hrs / 24)}d`;
+}
+
+function projectStatusClass(status) {
+  const value = String(status || '').toLowerCase();
+  if (value.includes('online')) return 'status-online';
+  if (value.includes('launch')) return 'status-launching';
+  if (value.includes('error')) return 'status-errored';
+  return 'status-stopped';
+}
+
+function renderProjectActions(project) {
+  const ref = encodeURIComponent(project.repo || project.slug || '');
+  const passwordRef = escapeHtml(ref);
+  return `
+        <div class="actions">
+          ${project.domain ? '<a class="btn ghost" href="https://' + escapeHtml(project.domain) + '/" target="_blank" rel="noreferrer">Open</a>' : ''}
+          <a class="btn ghost" href="/manage/tls/?ref=${escapeHtml(ref)}">SSL</a>
+          <button class="secondary" data-action="update" data-ref="${escapeHtml(ref)}">Pull</button>
+          <button class="secondary" data-action="restart" data-ref="${escapeHtml(ref)}">Restart</button>
+          <button class="secondary" data-action="stop" data-ref="${escapeHtml(ref)}">Stop</button>
+          <button class="danger" data-action="uninstall" data-ref="${escapeHtml(ref)}">Kill</button>
+          <button class="secondary" data-action="db" data-ref="${escapeHtml(ref)}">DB</button>
+          <button class="secondary" data-action="mysql" data-ref="${escapeHtml(ref)}">MySQL</button>
+          <button class="secondary" data-action="ssh" data-ref="${escapeHtml(ref)}">SSH</button>
+          <button class="secondary" data-action="env" data-ref="${escapeHtml(ref)}">Env</button>
+          <button class="secondary" data-action="env-backup" data-ref="${escapeHtml(ref)}">Backup</button>
+          <button class="danger" data-action="env-restore" data-ref="${escapeHtml(ref)}">Restore</button>
+          <button class="secondary" data-action="scripts" data-ref="${escapeHtml(ref)}">Scripts</button>
+          <button class="secondary" data-action="log" data-ref="${escapeHtml(ref)}">Log</button>
+          <span class="pill">${project.protected ? 'protected' : 'open'}</span>
+        </div>
+        <div class="space"></div>
+        <div class="stack">
+          <input data-password-for="${passwordRef}" type="password" placeholder="Project password">
+          <div class="actions">
+            <button class="secondary" data-action="protect" data-ref="${escapeHtml(ref)}">Set password</button>
+            <button class="ghost" data-action="clear-password" data-ref="${escapeHtml(ref)}">Clear password</button>
+          </div>
+        </div>
+  `;
+}
+
+function renderProjectRows(projects) {
+  if (!Array.isArray(projects) || !projects.length) {
+    return '<tr><td colspan="11" class="muted">No projects found.</td></tr>';
+  }
+  return projects.map((project) => `
+        <tr>
+          <td>
+            <div><strong>${escapeHtml(project.repo || project.slug || '')}</strong></div>
+            <div class="small">${escapeHtml(project.path || '')}</div>
+          </td>
+          <td>
+            <div>${project.domain ? `<a href="https://${escapeHtml(project.domain)}/" target="_blank" rel="noreferrer">${escapeHtml(project.domain)}</a>` : '<span class="muted">n/a</span>'}</div>
+            <div class="small">${project.https === 'yes' ? 'HTTPS' : 'HTTP only'} · <span class="pill ${escapeHtml(project.sslStatusClass || 'neutral')}">${escapeHtml(project.sslStatus || 'n/a')}</span></div>
+          </td>
+          <td>
+            <div><code>${escapeHtml(project.pm2 || '')}</code></div>
+            <div class="small">${escapeHtml(project.scriptPath || '')}</div>
+          </td>
+          <td>${escapeHtml(project.port || '')}</td>
+          <td>${escapeHtml(formatBytes(project.memory || 0))}</td>
+          <td>${escapeHtml(project.diskHuman || formatBytes(project.disk || 0))}</td>
+          <td><span class="${projectStatusClass(project.status)}">${escapeHtml(project.status || '')}</span></td>
+          <td>${project.protected ? 'yes' : 'no'}</td>
+          <td><span class="pill ${escapeHtml(project.sslStatusClass || 'neutral')}">${escapeHtml(project.sslStatus || 'n/a')}</span></td>
+          <td>${escapeHtml(project.branch || '')}</td>
+          <td class="small">
+            kind: ${escapeHtml(project.kind || '')}<br>
+            type: ${escapeHtml(project.type || '')}<br>
+            pm: ${escapeHtml(project.packageManager || '')}<br>
+            restarts: ${escapeHtml(String(project.restarts ?? 0))}<br>
+            uptime: ${escapeHtml(fmtTime(project.uptime))}<br>
+            env: ${escapeHtml(project.nodeEnv || '')}<br>
+            ram: ${escapeHtml(project.memory ? formatBytes(project.memory) : '0 B')}<br>
+            disk: ${escapeHtml(project.diskHuman || formatBytes(project.disk || 0))}<br>
+            ssh: ${escapeHtml(project.sshUser || 'n/a')}<br>
+            mysql ips: ${escapeHtml(project.mysqlAllowedIps || 'local only')}
+          </td>
+        </tr>
+        <tr class="project-actions-row">
+          <td colspan="11">${renderProjectActions(project)}</td>
+        </tr>
+  `).join('');
+}
+
 function getSystemStats() {
   const load = os.loadavg();
   const cores = Math.max(1, os.cpus().length);
@@ -2990,25 +3087,7 @@ function renderTlsPage(selectedRef = '') {
 function renderPage() {
   const projects = projectView();
   const initialProjects = JSON.stringify(projects).replace(/</g, '\\u003c');
-  const initialProjectsRows = projects.length
-    ? projects.map((project) => `
-        <tr>
-          <td colspan="11">
-            <div><strong>${escapeHtml(project.repo || project.slug || '')}</strong></div>
-            <div class="small">
-              ${project.domain ? `<a href="https://${escapeHtml(project.domain)}/" target="_blank" rel="noreferrer">${escapeHtml(project.domain)}</a>` : '<span class="muted">n/a</span>'}
-              · ${escapeHtml(project.status || 'n/a')}
-              · ${project.https === 'yes' ? 'HTTPS' : 'HTTP only'}
-              · PM2 <code>${escapeHtml(project.pm2 || '')}</code>
-              · Port <code>${escapeHtml(project.port || '')}</code>
-              · DB <code>${escapeHtml(project.dbName || '')}</code>
-              · Branch <code>${escapeHtml(project.branch || '')}</code>
-            </div>
-            <div class="small">${escapeHtml(project.path || '')}</div>
-          </td>
-        </tr>
-      `).join('')
-    : '<tr><td colspan="11" class="muted">No projects found.</td></tr>';
+  const initialProjectsRows = renderProjectRows(projects);
   const dbMachines = readDbMachines();
   const dbMachineOptions = renderDbMachineOptions(dbMachines, LOCAL_DB_MACHINE_ID);
   return `<!doctype html>
