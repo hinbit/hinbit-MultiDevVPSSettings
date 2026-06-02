@@ -3045,6 +3045,21 @@ function renderPage() {
     .pill.neutral { background: #1f2937; border-color: #334155; color: #cbd5e1; }
     .table-wrap { overflow: auto; }
     .flash { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #0b1220; border: 1px solid #22304a; white-space: pre-wrap; }
+    .install-warning {
+      margin-top: 8px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(127, 29, 29, 0.22);
+      border: 1px solid rgba(248, 113, 113, 0.4);
+      color: #fecaca;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .install-warning code {
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid rgba(248, 113, 113, 0.25);
+      color: #fff1f2;
+    }
     .scripts-panel { background: #08111f; border: 1px solid #22304a; border-radius: 18px; box-shadow: 0 30px 80px rgba(0,0,0,0.35); margin: 0 24px 24px; }
     .modal-panel {
       position: fixed;
@@ -3143,6 +3158,7 @@ function renderPage() {
       <div class="grid two">
         <label>GitHub repo
           <input id="repo" placeholder="shaykid/RepoName" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          <div id="installRepoWarning" class="install-warning">Repo to install: <code>(none)</code></div>
         </label>
         <label>Domain
           <input id="domain" placeholder="example.com">
@@ -3457,6 +3473,7 @@ function renderPage() {
     const logClearErrBtn = document.getElementById('logClearErrBtn');
     const logRefreshBtn = document.getElementById('logRefreshBtn');
     const closeLogBtn = document.getElementById('closeLogBtn');
+    const installRepoWarning = document.getElementById('installRepoWarning');
     let currentScriptsRef = '';
     let currentInstallScriptsRef = '';
     let currentDbRef = '';
@@ -4734,6 +4751,15 @@ function renderPage() {
         .replace(/"/g, '&quot;');
     }
 
+    function updateInstallRepoWarning() {
+      if (!installRepoWarning) return;
+      const repoInput = document.getElementById('repo');
+      const repo = repoInput ? repoInput.value.trim() : '';
+      installRepoWarning.innerHTML = repo
+        ? 'Repo to install: <code>' + escapeHtml(repo) + '</code>'
+        : 'Repo to install: <code>(none)</code>';
+    }
+
     if (toggleAccessPasswordBtn) {
       toggleAccessPasswordBtn.addEventListener('click', () => {
         const input = document.getElementById('accessPassword');
@@ -4744,6 +4770,13 @@ function renderPage() {
         toggleAccessPasswordBtn.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
       });
     }
+
+    const repoInput = document.getElementById('repo');
+    if (repoInput) {
+      repoInput.addEventListener('input', updateInstallRepoWarning);
+      repoInput.addEventListener('change', updateInstallRepoWarning);
+    }
+    updateInstallRepoWarning();
 
     refresh().catch((error) => showMessage(listResult, error.message, false));
     setInterval(async () => {
