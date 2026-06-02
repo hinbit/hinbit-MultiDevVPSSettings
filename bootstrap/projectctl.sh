@@ -11,6 +11,23 @@ PORT_MIN="${PROJECT_PORT_START:-3000}"
 PORT_MAX="${PROJECT_PORT_END:-9999}"
 LOCAL_DB_MACHINE_ID="local-current"
 LOCAL_DB_MACHINE_HOST="127.0.0.1"
+COMMON_RESERVED_PORTS=(
+  3000
+  3001
+  3002
+  3306
+  5432
+  6379
+  8080
+  8081
+  8443
+  8787
+  8788
+  9000
+  9200
+  9306
+  10000
+)
 ENV_CANDIDATES=(
   .env
   .env.local
@@ -1275,6 +1292,17 @@ used_ports() {
   } | sort -n -u
 }
 
+is_common_reserved_port() {
+  local port="$1"
+  local reserved=""
+
+  for reserved in "${COMMON_RESERVED_PORTS[@]}"; do
+    [[ "${port}" == "${reserved}" ]] && return 0
+  done
+
+  return 1
+}
+
 pick_port() {
   local start="${1:-${PORT_MIN}}"
   local end="${2:-${PORT_MAX}}"
@@ -1283,6 +1311,9 @@ pick_port() {
   used="$(used_ports)"
 
   for port in $(seq "${start}" "${end}"); do
+    if is_common_reserved_port "${port}"; then
+      continue
+    fi
     if ! printf '%s\n' "${used}" | grep -qx "${port}"; then
       printf '%s' "${port}"
       return
@@ -1290,6 +1321,16 @@ pick_port() {
   done
 
   die "No free port found in range ${start}-${end}"
+}
+
+project_has_split_runtime() {
+  local key=""
+  for key in GUI_PORT GUI_API_BASE_URL CONNECTOR_PORT CONNECTOR_TARGET_URL; do
+    if [[ -n "$(project_db_value "${key}")" ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 write_meta() {
@@ -1322,20 +1363,29 @@ sync_project_runtime_ports() {
   local candidate=""
   local subdir=""
   local env_file=""
+  local split_runtime=0
 
   [[ -n "${port}" ]] || return 0
   [[ -d "${project_dir}" ]] || return 0
+  if project_has_split_runtime; then
+    split_runtime=1
+  fi
 
   env_file="${project_dir}/.env"
   touch "${env_file}"
   chmod 0600 "${env_file}"
-  update_meta_value "${env_file}" "PORT" "${port}"
+  if [[ "${split_runtime}" -eq 0 ]]; then
+    update_meta_value "${env_file}" "PORT" "${port}"
+  fi
   update_meta_value "${env_file}" "APP_PORT" "${port}"
+  normalize_env_file_shell_safe "${env_file}"
 
   for candidate in .env.local .env.production .env.credentials .env.production.local .env.development; do
     env_file="${project_dir}/${candidate}"
     [[ -f "${env_file}" ]] || continue
-    update_meta_value "${env_file}" "PORT" "${port}"
+    if [[ "${split_runtime}" -eq 0 ]]; then
+      update_meta_value "${env_file}" "PORT" "${port}"
+    fi
     update_meta_value "${env_file}" "APP_PORT" "${port}"
     normalize_env_file_shell_safe "${env_file}"
   done
@@ -1345,7 +1395,9 @@ sync_project_runtime_ports() {
     for candidate in .env .env.local .env.production .env.credentials .env.production.local .env.development; do
       env_file="${project_dir}/${subdir}/${candidate}"
       [[ -f "${env_file}" ]] || continue
-      update_meta_value "${env_file}" "PORT" "${port}"
+      if [[ "${split_runtime}" -eq 0 ]]; then
+        update_meta_value "${env_file}" "PORT" "${port}"
+      fi
       update_meta_value "${env_file}" "APP_PORT" "${port}"
       normalize_env_file_shell_safe "${env_file}"
     done
