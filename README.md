@@ -61,6 +61,7 @@ projectctl uninstall owner/repo
 - `Merge .env (default)` keeps the current VPS env values after the pull and appends any new upstream env keys
 - `Stash all` stashes every local change before pulling
 `projectctl` now rewrites project `.env` files in a shell-safe form, so values with spaces are quoted automatically and remain safe for scripts that source the file.
+`projectctl` also skips common reserved ports when auto-picking a new app port, and it preserves split-app internal ports such as CherryWrapper's `PORT=8787` instead of overwriting them with the public UI port.
 
 Run an ad-hoc package script from an existing project:
 

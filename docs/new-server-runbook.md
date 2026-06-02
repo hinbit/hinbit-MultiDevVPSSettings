@@ -202,6 +202,7 @@ When local changes exist, the update prompt offers:
 - `Stash all` to stash every local change before pulling
 
 The merge path also normalizes project `.env` files into a shell-safe format, so values with spaces are quoted automatically and keep working in scripts that source the file.
+When choosing new ports, `projectctl` skips common reserved ports and preserves split-app internal ports instead of overwriting them with the public app port.
 
 ## 8. Env backup and restore
 
