@@ -3461,7 +3461,8 @@ function renderPage() {
       </div>
       <div class="actions">
         <button id="pullConfirmNoBtn" class="ghost" type="button">Cancel</button>
-        <button id="pullConfirmYesBtn" class="secondary" type="button" autofocus>Yes, stash and pull</button>
+        <button id="pullConfirmMergeBtn" class="secondary" type="button" autofocus>Merge .env (default)</button>
+        <button id="pullConfirmStashBtn" class="ghost" type="button">Stash all</button>
       </div>
     </header>
     <div class="body">
@@ -3561,7 +3562,8 @@ function renderPage() {
     const pullConfirmFlash = document.getElementById('pullConfirmFlash');
     const pullConfirmSummary = document.getElementById('pullConfirmSummary');
     const pullConfirmBody = document.getElementById('pullConfirmBody');
-    const pullConfirmYesBtn = document.getElementById('pullConfirmYesBtn');
+    const pullConfirmMergeBtn = document.getElementById('pullConfirmMergeBtn');
+    const pullConfirmStashBtn = document.getElementById('pullConfirmStashBtn');
     const pullConfirmNoBtn = document.getElementById('pullConfirmNoBtn');
     const logPanel = document.getElementById('logPanel');
     const logTitle = document.getElementById('logTitle');
@@ -4138,10 +4140,10 @@ function renderPage() {
       currentPullRef = ref;
       pullConfirmTitle.textContent = 'Local changes detected';
       const changes = Array.isArray(preflight?.changes) ? preflight.changes.length : 0;
-      pullConfirmSubtitle.textContent = decodeURIComponent(ref) + ' · ' + changes + ' local change' + (changes === 1 ? '' : 's') + ' · stash before pull';
+      pullConfirmSubtitle.textContent = decodeURIComponent(ref) + ' · ' + changes + ' local change' + (changes === 1 ? '' : 's') + ' · merge .env or stash all before pull';
       pullConfirmFlash.hidden = true;
-      pullConfirmSummary.innerHTML = '<div class="small">' + escapeHtml(preflight?.message || 'Git reported local changes in this project. Stash them first, then pull the remote branch.') + '</div>' +
-        '<div class="small">Default action: Yes, stash and pull.</div>';
+      pullConfirmSummary.innerHTML = '<div class="small">' + escapeHtml(preflight?.message || 'Git reported local changes in this project. Merge .env values first, or stash everything, then pull the remote branch.') + '</div>' +
+        '<div class="small">Default action: Merge .env and keep the current VPS values after pull.</div>';
       pullConfirmBody.textContent = Array.isArray(preflight?.changes) && preflight.changes.length
         ? preflight.changes.map((line) => '  ' + line).join('\\n')
         : '(no change list available)';
@@ -4149,17 +4151,17 @@ function renderPage() {
       setModalLocked(true);
     }
 
-    function closePullConfirmPanel(accept = false) {
+    function closePullConfirmPanel(mode = '') {
       pullConfirmPanel.hidden = true;
       currentPullRef = '';
       pullConfirmBody.textContent = '';
       pullConfirmSummary.innerHTML = '';
       pullConfirmFlash.hidden = true;
-      resolvePullConfirm(accept);
+      resolvePullConfirm(mode);
       setModalLocked(false);
     }
 
-    function confirmPullStash(ref, preflight) {
+    function confirmPullMode(ref, preflight) {
       return new Promise((resolve) => {
         pullConfirmResolve = resolve;
         openPullConfirmPanel(ref, preflight);
@@ -4212,19 +4214,19 @@ function renderPage() {
       await loadLog(ref, currentLogType);
     }
 
-    async function runPullWithProgress(ref, stash = false) {
+    async function runPullWithProgress(ref, mode = 'merge-env') {
       if (progressAbort) {
         progressAbort.abort();
       }
       progressAbort = new AbortController();
       openProgressPanel(
         decodeURIComponent(ref),
-        stash
-          ? 'Pulling ' + decodeURIComponent(ref) + ' with auto-stash'
+        mode === 'stash-all'
+          ? 'Pulling ' + decodeURIComponent(ref) + ' with stash-all'
           : 'Pulling ' + decodeURIComponent(ref),
       );
       try {
-        const res = await fetch(API + '/projects/' + ref + '/update-stream?stash=' + (stash ? '1' : '0'), {
+        const res = await fetch(API + '/projects/' + ref + '/update-stream?mode=' + encodeURIComponent(mode), {
           method: 'POST',
           credentials: 'same-origin',
           signal: progressAbort.signal,
@@ -4417,15 +4419,15 @@ function renderPage() {
           if (preflight && preflight.exists === false) {
             throw new Error(preflight.message || 'Git repository not found');
           }
-          let stash = false;
+          let mode = 'merge-env';
           if (preflight && preflight.dirty) {
-            stash = await confirmPullStash(ref, preflight);
-            if (!stash) {
+            mode = await confirmPullMode(ref, preflight);
+            if (!mode) {
               showMessage(listResult, 'Pull cancelled', false);
               return;
             }
           }
-          await runPullWithProgress(ref, stash || Boolean(preflight && preflight.dirty));
+          await runPullWithProgress(ref, mode);
         } catch (error) {
           showMessage(progressFlash, error.message, false);
           progressPanel.hidden = false;
@@ -4465,8 +4467,9 @@ function renderPage() {
     closeSshBtn.addEventListener('click', closeSshPanel);
     closeEnvBtn.addEventListener('click', closeEnvPanel);
     closeProgressBtn.addEventListener('click', closeProgressPanel);
-    pullConfirmNoBtn.addEventListener('click', () => closePullConfirmPanel(false));
-    pullConfirmYesBtn.addEventListener('click', () => closePullConfirmPanel(true));
+    pullConfirmNoBtn.addEventListener('click', () => closePullConfirmPanel(''));
+    pullConfirmMergeBtn.addEventListener('click', () => closePullConfirmPanel('merge-env'));
+    pullConfirmStashBtn.addEventListener('click', () => closePullConfirmPanel('stash-all'));
     closeLogBtn.addEventListener('click', closeLogPanel);
     sshCopyUserBtn.addEventListener('click', async () => {
       const user = sshDetails.querySelector('code');
@@ -5551,7 +5554,7 @@ async function handleRequest(req, res) {
         changes: gitStatus.lines || [],
         message: gitStatus.exists
           ? (gitStatus.dirty
-            ? `Local changes detected in ${ref}. Stash them before pulling?`
+            ? `Local changes detected in ${ref}. Merge .env values or stash all changes before pulling?`
             : `Repository is clean for ${ref}.`)
           : `Git repository not found for ${ref}.`,
       });
@@ -5566,8 +5569,16 @@ async function handleRequest(req, res) {
         res.end('Method not allowed');
         return;
       }
-      const stash = url.searchParams.get('stash') === '1';
-      streamProjectCtl(res, ['update', ref], stash ? { PROJECTCTL_PULL_STASH: 'yes' } : {});
+      const legacyStash = url.searchParams.get('stash') === '1';
+      const requestedMode = String(url.searchParams.get('mode') || '').toLowerCase();
+      const pullMode = requestedMode === 'stash-all' || requestedMode === 'stash'
+        ? 'stash-all'
+        : requestedMode === 'merge-env' || requestedMode === 'merge' || requestedMode === 'env'
+          ? 'merge-env'
+          : legacyStash
+            ? 'merge-env'
+            : 'merge-env';
+      streamProjectCtl(res, ['update', ref], { PROJECTCTL_PULL_MODE: pullMode });
       return;
     }
 

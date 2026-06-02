@@ -53,7 +53,7 @@ Defaults:
   - `projectctl password` enables or clears nginx basic auth for a project's domain
   - `projectctl mysql` manages MySQL access IPs and DB machine placement for a project's DB user
   - `projectctl ssh` shows or rotates the project's SSH/SFTP upload credentials
-  - `projectctl update` prompts before stashing local changes; set PROJECTCTL_PULL_STASH=yes|no to force the choice
+  - `projectctl update` prompts before pulling local changes; set PROJECTCTL_PULL_MODE=merge-env|stash-all to force the choice
 EOF
 }
 
@@ -254,15 +254,27 @@ is_preserved_env_file() {
   return 1
 }
 
-confirm_stash_before_pull() {
+confirm_pull_mode_before_pull() {
   local repo_dir="${1:-${APP_DIR}}"
   local dirty_status="${2:-}"
   local label="${3:-${REPO_REF:-${PROJECT_SLUG:-project}}}"
   local answer=""
-  local pref="${PROJECTCTL_PULL_STASH:-}"
+  local pref="${PROJECTCTL_PULL_MODE:-}"
 
   case "${pref,,}" in
+    merge-env|merge|env|default)
+      printf '%s' 'merge-env'
+      return 0
+      ;;
+    stash-all|stash|all)
+      printf '%s' 'stash-all'
+      return 0
+      ;;
+  esac
+
+  case "${PROJECTCTL_PULL_STASH:-}" in
     yes|y|true|1)
+      printf '%s' 'merge-env'
       return 0
       ;;
     no|n|false|0)
@@ -275,18 +287,25 @@ confirm_stash_before_pull() {
     if [[ -n "${dirty_status}" ]]; then
       printf '%s\n' "${dirty_status}" | sed 's/^/[projectctl]   /'
     fi
-    read -r -p "[projectctl] Stash local changes before pulling? [Y/n] " answer || answer=""
-    answer="${answer:-Y}"
+    printf '[projectctl]   1) Merge .env (default; keep current VPS env values after pull)\n'
+    printf '[projectctl]   2) Stash all local changes before pulling\n'
+    read -r -p "[projectctl] Choose [M]erge .env/[s]tash all/[c]ancel? [M/s/c] " answer || answer=""
+    answer="${answer:-M}"
     case "${answer,,}" in
-      n|no)
+      s|stash|stash-all|2)
+        printf '%s' 'stash-all'
+        return 0
+        ;;
+      c|cancel|n|no)
         return 1
         ;;
     esac
+    printf '%s' 'merge-env'
     return 0
   fi
 
-  printf '[projectctl] Local changes detected in %s; auto-stashing before pull (set PROJECTCTL_PULL_STASH=no to skip)\n' "${label}" >&2
-  return 0
+  printf '[projectctl] Local changes detected in %s; auto-merging .env before pull (set PROJECTCTL_PULL_MODE=stash-all to stash everything)\n' "${label}" >&2
+  printf '%s' 'merge-env'
 }
 
 pull_repo_with_optional_stash() {
@@ -294,11 +313,14 @@ pull_repo_with_optional_stash() {
   local branch="${2:-${BRANCH}}"
   local repo_url="${3:-${REPO_URL}}"
   local dirty_status=""
+  local dirty_paths=()
   local did_stash=0
+  local pull_mode=""
   local env_backup_dir=""
   local pull_rc=0
   local non_env_dirty_status=""
   local non_env_dirty_paths=()
+  local all_dirty_status=""
   local line=""
   local path=""
 
@@ -313,30 +335,33 @@ pull_repo_with_optional_stash() {
     [[ -n "${line}" ]] || continue
     path="${line:3}"
     [[ -n "${path}" ]] || continue
-    if is_preserved_env_file "${path}"; then
-      continue
+    dirty_paths+=("${path}")
+    if ! is_preserved_env_file "${path}"; then
+      non_env_dirty_paths+=("${path}")
     fi
-    non_env_dirty_paths+=("${path}")
   done <<< "${dirty_status}"
-  if [[ ${#non_env_dirty_paths[@]} -gt 0 ]]; then
-    non_env_dirty_status="$(printf '%s\n' "${non_env_dirty_paths[@]}")"
-    if ! confirm_stash_before_pull "${repo_dir}" "${non_env_dirty_status}" "${REPO_REF:-${PROJECT_SLUG:-project}}"; then
-      die "Pull cancelled"
-    fi
-    git -C "${repo_dir}" stash push -u -m "projectctl auto-stash before pull ${REPO_REF:-${PROJECT_SLUG:-project}} $(date -u +%Y-%m-%dT%H:%M:%SZ)" -- "${non_env_dirty_paths[@]}"
-    did_stash=1
+  if [[ ${#dirty_paths[@]} -gt 0 ]]; then
+    pull_mode="$(confirm_pull_mode_before_pull "${repo_dir}" "${dirty_status}" "${REPO_REF:-${PROJECT_SLUG:-project}}")" || die "Pull cancelled"
   fi
 
   env_backup_dir="$(mktemp -d)"
 
-  for file in "${ENV_CANDIDATES[@]}"; do
-    [[ -f "${repo_dir}/${file}" ]] || continue
-    mkdir -p "${env_backup_dir}/$(dirname "${file}")"
-    cp -p "${repo_dir}/${file}" "${env_backup_dir}/${file}"
-    if git -C "${repo_dir}" ls-files --error-unmatch -- "${file}" >/dev/null 2>&1; then
-      git -C "${repo_dir}" checkout -- "${file}" >/dev/null 2>&1 || true
+  if [[ "${pull_mode:-merge-env}" == "merge-env" ]]; then
+    for file in "${ENV_CANDIDATES[@]}"; do
+      [[ -f "${repo_dir}/${file}" ]] || continue
+      mkdir -p "${env_backup_dir}/$(dirname "${file}")"
+      cp -p "${repo_dir}/${file}" "${env_backup_dir}/${file}"
+      if git -C "${repo_dir}" ls-files --error-unmatch -- "${file}" >/dev/null 2>&1; then
+        git -C "${repo_dir}" checkout -- "${file}" >/dev/null 2>&1 || true
+      fi
+    done
+  else
+    all_dirty_status="${dirty_status}"
+    if [[ -n "${all_dirty_status}" ]]; then
+      git -C "${repo_dir}" stash push -u -m "projectctl auto-stash before pull ${REPO_REF:-${PROJECT_SLUG:-project}} $(date -u +%Y-%m-%dT%H:%M:%SZ)" -- "${dirty_paths[@]}"
+      did_stash=1
     fi
-  done
+  fi
 
   set +e
   git -C "${repo_dir}" remote set-url origin "${repo_url}" >/dev/null 2>&1
@@ -355,14 +380,16 @@ pull_repo_with_optional_stash() {
     fi
   fi
 
-  for file in "${ENV_CANDIDATES[@]}"; do
-    [[ -f "${env_backup_dir}/${file}" ]] || continue
-    mkdir -p "${repo_dir}/$(dirname "${file}")"
-    cp -p "${env_backup_dir}/${file}" "${repo_dir}/${file}"
-    if git -C "${repo_dir}" ls-files --error-unmatch -- "${file}" >/dev/null 2>&1; then
-      git -C "${repo_dir}" update-index --skip-worktree -- "${file}" >/dev/null 2>&1 || true
-    fi
-  done
+  if [[ "${pull_mode:-merge-env}" == "merge-env" ]]; then
+    for file in "${ENV_CANDIDATES[@]}"; do
+      [[ -f "${env_backup_dir}/${file}" ]] || continue
+      mkdir -p "${repo_dir}/$(dirname "${file}")"
+      cp -p "${env_backup_dir}/${file}" "${repo_dir}/${file}"
+      if git -C "${repo_dir}" ls-files --error-unmatch -- "${file}" >/dev/null 2>&1; then
+        git -C "${repo_dir}" update-index --skip-worktree -- "${file}" >/dev/null 2>&1 || true
+      fi
+    done
+  fi
 
   rm -rf "${env_backup_dir}" >/dev/null 2>&1 || true
 
