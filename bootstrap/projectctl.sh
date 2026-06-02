@@ -1394,6 +1394,48 @@ package_script_runner() {
   esac
 }
 
+package_json_has_script() {
+  local project_dir="$1"
+  local script="$2"
+
+  [[ -f "${project_dir}/package.json" ]] || return 1
+  node -e '
+    const fs = require("fs");
+    const projectDir = process.argv[1];
+    const scriptName = process.argv[2];
+    try {
+      const pkg = JSON.parse(fs.readFileSync(`${projectDir}/package.json`, "utf8"));
+      process.exit(pkg && pkg.scripts && Object.prototype.hasOwnProperty.call(pkg.scripts, scriptName) ? 0 : 1);
+    } catch {
+      process.exit(1);
+    }
+  ' "${project_dir}" "${script}"
+}
+
+run_package_script_in_dir() {
+  local project_dir="$1"
+  local script="$2"
+
+  (
+    cd "${project_dir}"
+    PACKAGE_MANAGER="$(detect_package_manager)"
+    /bin/bash -lc "$(package_script_runner "${script}")"
+  )
+}
+
+run_install_db_scripts() {
+  local project_dir="${1:-${APP_DIR}}"
+  local script
+
+  [[ -d "${project_dir}" ]] || return 0
+  for script in db:init db:seed; do
+    if package_json_has_script "${project_dir}" "${script}"; then
+      printf '[projectctl] running %s in %s\n' "${script}" "${project_dir}"
+      run_package_script_in_dir "${project_dir}" "${script}"
+    fi
+  done
+}
+
 clone_or_pull() {
   if [[ -d "${APP_DIR}/.git" ]]; then
     pull_repo_with_optional_stash "${APP_DIR}" "${BRANCH}" "${REPO_URL}"
@@ -1557,6 +1599,8 @@ do_install() {
     install_deps
     maybe_build
   )
+
+  run_install_db_scripts "${APP_DIR}"
 
   if [[ -n "${db_name}" && -n "${db_user}" && -n "${db_password}" ]]; then
     sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "" "${DB_MACHINE_ID}"

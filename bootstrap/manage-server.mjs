@@ -3142,7 +3142,7 @@ function renderPage() {
       <h2>New Project</h2>
       <div class="grid two">
         <label>GitHub repo
-          <input id="repo" placeholder="shaykid/RepoName">
+          <input id="repo" placeholder="shaykid/RepoName" autocomplete="off">
         </label>
         <label>Domain
           <input id="domain" placeholder="example.com">
@@ -4686,6 +4686,14 @@ function renderPage() {
         });
         showMessage(installResult, result.message || 'Installed');
         renderInstallDbScripts(result.repo || payload.repo, result.dbScripts || [], result.project || result.repo || payload.repo);
+        for (const id of ['repo', 'domain', 'branch', 'pm2Name', 'port', 'entrypoint']) {
+          const el = document.getElementById(id);
+          if (el) el.value = '';
+        }
+        const envText = document.getElementById('envText');
+        if (envText) envText.value = '';
+        const accessPassword = document.getElementById('accessPassword');
+        if (accessPassword) accessPassword.value = '';
         await refresh();
       } catch (error) {
         renderInstallDbScripts('', []);

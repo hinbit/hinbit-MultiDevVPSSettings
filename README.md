@@ -68,6 +68,7 @@ projectctl script --dir server owner/repo db:seed
 When you install a project from `/manage/`, the UI now scans the repo for DB-related scripts across the root, `server/`, and `client/` package manifests and shows the runnable ones after install.
 If the project repo does not already define DB name, user, and password values, the installer now generates them automatically and writes them into the project env files so the DB and MySQL panels are populated on first install.
 `projectctl install` also stamps the requested port into the project env files so the runtime uses the selected app port consistently.
+If the repo defines root-level `db:init` and `db:seed` scripts, a fresh install runs them automatically so the new database starts with schema and seed data.
 
 Optional environment variables:
 
