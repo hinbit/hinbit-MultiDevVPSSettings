@@ -4760,6 +4760,18 @@ function renderPage() {
         : 'Repo to install: <code>(none)</code>';
     }
 
+    function resetInstallForm() {
+      for (const id of ['repo', 'domain', 'branch', 'pm2Name', 'port', 'entrypoint']) {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+      }
+      const envText = document.getElementById('envText');
+      if (envText) envText.value = '';
+      const accessPassword = document.getElementById('accessPassword');
+      if (accessPassword) accessPassword.value = '';
+      updateInstallRepoWarning();
+    }
+
     if (toggleAccessPasswordBtn) {
       toggleAccessPasswordBtn.addEventListener('click', () => {
         const input = document.getElementById('accessPassword');
@@ -4773,10 +4785,16 @@ function renderPage() {
 
     const repoInput = document.getElementById('repo');
     if (repoInput) {
+      repoInput.value = '';
       repoInput.addEventListener('input', updateInstallRepoWarning);
       repoInput.addEventListener('change', updateInstallRepoWarning);
     }
     updateInstallRepoWarning();
+
+    window.addEventListener('pageshow', () => {
+      resetInstallForm();
+    });
+    window.setTimeout(resetInstallForm, 0);
 
     refresh().catch((error) => showMessage(listResult, error.message, false));
     setInterval(async () => {
