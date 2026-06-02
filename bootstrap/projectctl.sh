@@ -1809,7 +1809,7 @@ do_script() {
     (
       cd "${script_path}"
       pm2 delete "${pm2_script_name}" >/dev/null 2>&1 || true
-      env TZ=Asia/Jerusalem PORT="${APP_PORT}" pm2 start /bin/bash --name "${pm2_script_name}" --no-autorestart --time -- -lc 'set -a; [ -f .env ] && . ./.env; [ -f .env.machine ] && . ./.env.machine; set +a; '"${runner}"
+      env TZ=Asia/Jerusalem PORT="${APP_PORT}" pm2 start /bin/bash --name "${pm2_script_name}" --no-autorestart --time -- -lc 'set -a; [ -f .env ] && . ./.env; [ -f .env.machine ] && . ./.env.machine; set +a; '"${runner}"'; exit $?'
     )
     pm2 save
     printf '[projectctl] activated %s script %s as %s\n' "${REPO_REF}" "${script}" "${pm2_script_name}"
@@ -1818,7 +1818,7 @@ do_script() {
 
   (
     cd "${script_path}"
-    /bin/bash -lc 'set -a; [ -f .env ] && . ./.env; [ -f .env.machine ] && . ./.env.machine; set +a; '"${runner}"
+    /bin/bash -lc 'set -a; [ -f .env ] && . ./.env; [ -f .env.machine ] && . ./.env.machine; set +a; '"${runner}"'; exit $?'
   )
   printf '[projectctl] ran %s script %s\n' "${REPO_REF}" "${script}"
 }
