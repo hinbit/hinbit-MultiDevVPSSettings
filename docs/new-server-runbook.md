@@ -201,6 +201,8 @@ When local changes exist, the update prompt offers:
 - `Merge .env (default)` to keep the current VPS env values after the pull and append any new upstream env keys
 - `Stash all` to stash every local change before pulling
 
+The merge path also normalizes project `.env` files into a shell-safe format, so values with spaces are quoted automatically and keep working in scripts that source the file.
+
 ## 8. Env backup and restore
 
 The manage dashboard supports:

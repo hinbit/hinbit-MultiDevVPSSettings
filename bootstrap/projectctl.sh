@@ -184,6 +184,63 @@ project_db_env_paths() {
   fi
 }
 
+normalize_env_file_shell_safe() {
+  local env_file="$1"
+  local tmp=""
+
+  [[ -f "${env_file}" ]] || return 0
+
+  tmp="$(mktemp)"
+  python3 - "$env_file" "$tmp" <<'PY'
+import re
+import sys
+
+source_path, target_path = sys.argv[1:3]
+line_re = re.compile(r'^([ \t]*)(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*=(.*)$')
+
+def unquote(value):
+  if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+    inner = value[1:-1]
+    if value[0] == '"':
+      inner = (
+        inner.replace('\\n', '\n')
+        .replace('\\r', '\r')
+        .replace('\\t', '\t')
+        .replace('\\"', '"')
+        .replace('\\\\', '\\')
+      )
+    return inner
+  return value
+
+def shell_quote(value):
+  return "'" + value.replace("'", "'\"'\"'") + "'"
+
+with open(source_path, 'r', encoding='utf-8', errors='surrogateescape') as handle:
+  lines = handle.read().splitlines(True)
+
+out = []
+for line in lines:
+  stripped = line.strip()
+  if not stripped or stripped.startswith('#'):
+    out.append(line)
+    continue
+
+  match = line_re.match(line.rstrip('\n'))
+  if not match:
+    out.append(line)
+    continue
+
+  indent, key, raw_value = match.groups()
+  value = unquote(raw_value.strip())
+  out.append(f"{indent}{key}={shell_quote(value)}\n")
+
+with open(target_path, 'w', encoding='utf-8', errors='surrogateescape') as handle:
+  handle.writelines(out)
+PY
+  cp -p "${tmp}" "${env_file}"
+  rm -f "${tmp}" >/dev/null 2>&1 || true
+}
+
 sync_project_db_env() {
   local project_dir="${1:-${APP_DIR}}"
   local db_name="${2:-}"
@@ -222,6 +279,7 @@ sync_project_db_env() {
     update_meta_value "${env_file}" "MYSQL_USER" "${db_user}"
     update_meta_value "${env_file}" "DB_PASSWORD" "${db_password}"
     update_meta_value "${env_file}" "MYSQL_PASSWORD" "${db_password}"
+    normalize_env_file_shell_safe "${env_file}"
   done < <(project_db_env_paths "${project_dir}")
 
   printf '%s\t%s\t%s\t%s\n' "${db_name}" "${db_user}" "${db_password}" "${db_type}"
@@ -388,6 +446,10 @@ pull_repo_with_optional_stash() {
       if git -C "${repo_dir}" ls-files --error-unmatch -- "${file}" >/dev/null 2>&1; then
         git -C "${repo_dir}" update-index --skip-worktree -- "${file}" >/dev/null 2>&1 || true
       fi
+    done
+    for file in "${ENV_CANDIDATES[@]}"; do
+      [[ -f "${repo_dir}/${file}" ]] || continue
+      normalize_env_file_shell_safe "${repo_dir}/${file}"
     done
   fi
 
@@ -861,6 +923,9 @@ update_meta_value() {
     }
   ' "${meta}" > "${tmp}"
   mv "${tmp}" "${meta}"
+  if [[ "${meta}" == /var/www/* ]]; then
+    normalize_env_file_shell_safe "${meta}"
+  fi
 }
 
 merge_env_file_preserving_current_values() {
@@ -1272,6 +1337,7 @@ sync_project_runtime_ports() {
     [[ -f "${env_file}" ]] || continue
     update_meta_value "${env_file}" "PORT" "${port}"
     update_meta_value "${env_file}" "APP_PORT" "${port}"
+    normalize_env_file_shell_safe "${env_file}"
   done
 
   for subdir in server client; do
@@ -1281,6 +1347,7 @@ sync_project_runtime_ports() {
       [[ -f "${env_file}" ]] || continue
       update_meta_value "${env_file}" "PORT" "${port}"
       update_meta_value "${env_file}" "APP_PORT" "${port}"
+      normalize_env_file_shell_safe "${env_file}"
     done
   done
 }

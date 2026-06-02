@@ -60,6 +60,7 @@ projectctl uninstall owner/repo
 `projectctl update` now prompts with two choices when local changes exist:
 - `Merge .env (default)` keeps the current VPS env values after the pull and appends any new upstream env keys
 - `Stash all` stashes every local change before pulling
+`projectctl` now rewrites project `.env` files in a shell-safe form, so values with spaces are quoted automatically and remain safe for scripts that source the file.
 
 Run an ad-hoc package script from an existing project:
 
