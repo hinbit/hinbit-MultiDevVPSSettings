@@ -2988,6 +2988,27 @@ function renderTlsPage(selectedRef = '') {
 }
 
 function renderPage() {
+  const projects = projectView();
+  const initialProjects = JSON.stringify(projects).replace(/</g, '\\u003c');
+  const initialProjectsRows = projects.length
+    ? projects.map((project) => `
+        <tr>
+          <td colspan="11">
+            <div><strong>${escapeHtml(project.repo || project.slug || '')}</strong></div>
+            <div class="small">
+              ${project.domain ? `<a href="https://${escapeHtml(project.domain)}/" target="_blank" rel="noreferrer">${escapeHtml(project.domain)}</a>` : '<span class="muted">n/a</span>'}
+              · ${escapeHtml(project.status || 'n/a')}
+              · ${project.https === 'yes' ? 'HTTPS' : 'HTTP only'}
+              · PM2 <code>${escapeHtml(project.pm2 || '')}</code>
+              · Port <code>${escapeHtml(project.port || '')}</code>
+              · DB <code>${escapeHtml(project.dbName || '')}</code>
+              · Branch <code>${escapeHtml(project.branch || '')}</code>
+            </div>
+            <div class="small">${escapeHtml(project.path || '')}</div>
+          </td>
+        </tr>
+      `).join('')
+    : '<tr><td colspan="11" class="muted">No projects found.</td></tr>';
   const dbMachines = readDbMachines();
   const dbMachineOptions = renderDbMachineOptions(dbMachines, LOCAL_DB_MACHINE_ID);
   return `<!doctype html>
@@ -3221,7 +3242,7 @@ function renderPage() {
               <th>Details</th>
             </tr>
           </thead>
-          <tbody id="projectsBody"></tbody>
+          <tbody id="projectsBody">${initialProjectsRows}</tbody>
         </table>
       </div>
       <div id="listResult" class="flash" hidden></div>
@@ -3392,6 +3413,7 @@ function renderPage() {
   </div>
   <script>
     const API = '/manage/api';
+    const initialProjects = ${initialProjects};
     const projectsBody = document.getElementById('projectsBody');
     const listResult = document.getElementById('listResult');
     const installResult = document.getElementById('installResult');
@@ -3484,7 +3506,7 @@ function renderPage() {
     let currentLogType = 'out';
     let currentPullRef = '';
     let pullConfirmResolve = null;
-    let currentProjects = [];
+    let currentProjects = initialProjects.slice();
     let currentDbMachines = [];
     let progressAbort = null;
     let logTimer = null;
@@ -3702,6 +3724,8 @@ function renderPage() {
         </tr>
       \`).join('');
     }
+
+    renderProjects(currentProjects);
 
     function openScriptsModal(ref, scripts, subtitle) {
       closeDbPanel();
