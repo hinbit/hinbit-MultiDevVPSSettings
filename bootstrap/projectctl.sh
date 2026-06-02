@@ -1394,7 +1394,7 @@ package_script_runner() {
   esac
 }
 
-package_json_has_script() {
+package_json_has_script_in_dir() {
   local project_dir="$1"
   local script="$2"
 
@@ -1426,13 +1426,30 @@ run_package_script_in_dir() {
 run_install_db_scripts() {
   local project_dir="${1:-${APP_DIR}}"
   local script
+  local script_dir
+  declare -A seen_scripts=()
 
   [[ -d "${project_dir}" ]] || return 0
   for script in db:init db:seed; do
-    if package_json_has_script "${project_dir}" "${script}"; then
-      printf '[projectctl] running %s in %s\n' "${script}" "${project_dir}"
-      run_package_script_in_dir "${project_dir}" "${script}"
-    fi
+    for script_dir in "" "server" "client"; do
+      [[ -z "${seen_scripts[$script]:-}" ]] || break
+      if [[ -n "${script_dir}" ]]; then
+        [[ -d "${project_dir}/${script_dir}" ]] || continue
+        if ! package_json_has_script_in_dir "${project_dir}/${script_dir}" "${script}"; then
+          continue
+        fi
+        printf '[projectctl] running %s in %s/%s\n' "${script}" "${project_dir}" "${script_dir}"
+        run_package_script_in_dir "${project_dir}/${script_dir}" "${script}"
+      else
+        if ! package_json_has_script_in_dir "${project_dir}" "${script}"; then
+          continue
+        fi
+        printf '[projectctl] running %s in %s\n' "${script}" "${project_dir}"
+        run_package_script_in_dir "${project_dir}" "${script}"
+      fi
+      seen_scripts["${script}"]=1
+      break
+    done
   done
 }
 

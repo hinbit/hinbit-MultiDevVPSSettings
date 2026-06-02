@@ -3142,7 +3142,7 @@ function renderPage() {
       <h2>New Project</h2>
       <div class="grid two">
         <label>GitHub repo
-          <input id="repo" placeholder="shaykid/RepoName" autocomplete="off">
+          <input id="repo" placeholder="shaykid/RepoName" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
         </label>
         <label>Domain
           <input id="domain" placeholder="example.com">
@@ -4668,16 +4668,41 @@ function renderPage() {
     document.getElementById('installBtn').addEventListener('click', async () => {
       currentInstallScriptsRef = '';
       renderInstallDbScripts('', []);
+      const repo = document.getElementById('repo').value.trim();
+      const domain = document.getElementById('domain').value.trim();
+      const branch = document.getElementById('branch').value.trim();
+      const pm2Name = document.getElementById('pm2Name').value.trim();
+      const port = document.getElementById('port').value.trim();
+      const dbMachineId = dbMachineSelect ? dbMachineSelect.value : '${LOCAL_DB_MACHINE_ID}';
+      const entrypoint = document.getElementById('entrypoint').value.trim();
+      const envText = document.getElementById('envText').value;
+      const accessPassword = document.getElementById('accessPassword').value;
+      const summary = [
+        'Repo: ' + (repo || '(empty)'),
+        'Domain: ' + (domain || '(none)'),
+        'Branch: ' + (branch || '(default)'),
+        'PM2: ' + (pm2Name || '(default)'),
+        'Port: ' + (port || '(auto)'),
+        'DB machine: ' + (dbMachineId || '(local-current)'),
+        'Entrypoint: ' + (entrypoint || '(auto-detect)'),
+      ].join('\n');
+      if (!repo) {
+        showMessage(installResult, 'GitHub repo is required', false);
+        return;
+      }
+      if (!window.confirm('Install project with these settings?\n\n' + summary)) {
+        return;
+      }
       const payload = {
-        repo: document.getElementById('repo').value.trim(),
-        domain: document.getElementById('domain').value.trim(),
-        branch: document.getElementById('branch').value.trim(),
-        pm2Name: document.getElementById('pm2Name').value.trim(),
-        port: document.getElementById('port').value.trim(),
-        dbMachineId: dbMachineSelect ? dbMachineSelect.value : '${LOCAL_DB_MACHINE_ID}',
-        entrypoint: document.getElementById('entrypoint').value.trim(),
-        envText: document.getElementById('envText').value,
-        accessPassword: document.getElementById('accessPassword').value,
+        repo,
+        domain,
+        branch,
+        pm2Name,
+        port,
+        dbMachineId,
+        entrypoint,
+        envText,
+        accessPassword,
       };
       try {
         const result = await api('/projects', {
