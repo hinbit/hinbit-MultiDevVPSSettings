@@ -4805,12 +4805,12 @@ function renderPage() {
         'Port: ' + (port || '(auto)'),
         'DB machine: ' + (dbMachineId || '(local-current)'),
         'Entrypoint: ' + (entrypoint || '(auto-detect)'),
-      ].join('\n');
+      ].join('\\n');
       if (!repo) {
         showMessage(installResult, 'GitHub repo is required', false);
         return;
       }
-      if (!window.confirm('Install project with these settings?\n\n' + summary)) {
+      if (!window.confirm('Install project with these settings?\\n\\n' + summary)) {
         return;
       }
       const payload = {
