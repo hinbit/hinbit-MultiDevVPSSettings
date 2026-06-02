@@ -193,9 +193,13 @@ projectctl restart owner/repo
 
 `projectctl update` will:
 - pull the repo
-- preserve local env files
+- preserve local env files by default via `Merge .env`
 - rebuild when the repo has a build script
 - restart PM2 and sidecar services
+
+When local changes exist, the update prompt offers:
+- `Merge .env (default)` to keep the current VPS env values after the pull
+- `Stash all` to stash every local change before pulling
 
 ## 8. Env backup and restore
 

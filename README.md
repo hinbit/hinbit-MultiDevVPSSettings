@@ -57,6 +57,10 @@ projectctl restart owner/repo
 projectctl uninstall owner/repo
 ```
 
+`projectctl update` now prompts with two choices when local changes exist:
+- `Merge .env (default)` keeps the current VPS env files and restores them after the pull
+- `Stash all` stashes every local change before pulling
+
 Run an ad-hoc package script from an existing project:
 
 ```bash
