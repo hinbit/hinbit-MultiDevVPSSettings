@@ -184,6 +184,8 @@ awk -F, -v OFS=, '
   }
 ' "${SOURCE_CSV}" > "${NORMALIZED_CSV}"
 
+install -m 0644 "${NORMALIZED_CSV}" "${CSV}"
+
 while IFS=, read -r domain port type https; do
   [[ -z "${domain:-}" ]] && continue
   [[ "${domain}" == "domain" ]] && continue
