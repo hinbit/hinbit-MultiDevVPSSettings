@@ -168,9 +168,8 @@ awk -F, -v OFS=, '
     gsub(/\r/, "", $2);
     gsub(/\r/, "", $3);
     gsub(/\r/, "", $4);
-    if (!($1 in seen_order)) {
+    if (!seen[$1]++) {
       order[++count] = $1;
-      seen_order[$1] = 1;
     }
     rows[$1] = $1 OFS $2 OFS $3 OFS $4;
   }
