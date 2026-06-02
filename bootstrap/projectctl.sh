@@ -384,7 +384,7 @@ pull_repo_with_optional_stash() {
     for file in "${ENV_CANDIDATES[@]}"; do
       [[ -f "${env_backup_dir}/${file}" ]] || continue
       mkdir -p "${repo_dir}/$(dirname "${file}")"
-      cp -p "${env_backup_dir}/${file}" "${repo_dir}/${file}"
+      merge_env_file_preserving_current_values "${env_backup_dir}/${file}" "${repo_dir}/${file}" "${repo_dir}/${file}"
       if git -C "${repo_dir}" ls-files --error-unmatch -- "${file}" >/dev/null 2>&1; then
         git -C "${repo_dir}" update-index --skip-worktree -- "${file}" >/dev/null 2>&1 || true
       fi
@@ -861,6 +861,71 @@ update_meta_value() {
     }
   ' "${meta}" > "${tmp}"
   mv "${tmp}" "${meta}"
+}
+
+merge_env_file_preserving_current_values() {
+  local current_file="$1"
+  local new_file="$2"
+  local dest_file="$3"
+  local tmp
+  tmp="$(mktemp)"
+
+  if [[ ! -f "${current_file}" && ! -f "${new_file}" ]]; then
+    : > "${dest_file}"
+    rm -f "${tmp}" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if [[ ! -f "${current_file}" ]]; then
+    cp -p "${new_file}" "${dest_file}"
+    rm -f "${tmp}" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if [[ ! -f "${new_file}" ]]; then
+    cp -p "${current_file}" "${dest_file}"
+    rm -f "${tmp}" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  python3 - "$current_file" "$new_file" "$tmp" <<'PY'
+import os
+import re
+import sys
+
+current_path, new_path, out_path = sys.argv[1:4]
+line_re = re.compile(r'^([ \t]*)([A-Za-z_][A-Za-z0-9_]*)[ \t]*=(.*)$')
+
+def read_lines(path):
+    with open(path, 'r', encoding='utf-8', errors='surrogateescape') as handle:
+        return handle.read().splitlines(True)
+
+current_lines = read_lines(current_path)
+new_lines = read_lines(new_path)
+seen = set()
+out = []
+
+for line in current_lines:
+    match = line_re.match(line)
+    if match:
+        seen.add(match.group(2))
+    out.append(line)
+
+for line in new_lines:
+    match = line_re.match(line)
+    if not match:
+        continue
+    key = match.group(2)
+    if key in seen:
+        continue
+    seen.add(key)
+    out.append(line)
+
+with open(out_path, 'w', encoding='utf-8', errors='surrogateescape') as handle:
+    handle.writelines(out)
+PY
+  cp -p "${tmp}" "${dest_file}"
+  rm -f "${tmp}" >/dev/null 2>&1 || true
 }
 
 ensure_meta_dir() {

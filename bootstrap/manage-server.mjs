@@ -4140,10 +4140,10 @@ function renderPage() {
       currentPullRef = ref;
       pullConfirmTitle.textContent = 'Local changes detected';
       const changes = Array.isArray(preflight?.changes) ? preflight.changes.length : 0;
-      pullConfirmSubtitle.textContent = decodeURIComponent(ref) + ' · ' + changes + ' local change' + (changes === 1 ? '' : 's') + ' · merge .env or stash all before pull';
+      pullConfirmSubtitle.textContent = decodeURIComponent(ref) + ' · ' + changes + ' local change' + (changes === 1 ? '' : 's') + ' · merge .env values or stash all before pull';
       pullConfirmFlash.hidden = true;
       pullConfirmSummary.innerHTML = '<div class="small">' + escapeHtml(preflight?.message || 'Git reported local changes in this project. Merge .env values first, or stash everything, then pull the remote branch.') + '</div>' +
-        '<div class="small">Default action: Merge .env and keep the current VPS values after pull.</div>';
+        '<div class="small">Default action: Merge .env and keep current VPS values, then append any new upstream env keys.</div>';
       pullConfirmBody.textContent = Array.isArray(preflight?.changes) && preflight.changes.length
         ? preflight.changes.map((line) => '  ' + line).join('\\n')
         : '(no change list available)';

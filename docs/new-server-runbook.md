@@ -198,7 +198,7 @@ projectctl restart owner/repo
 - restart PM2 and sidecar services
 
 When local changes exist, the update prompt offers:
-- `Merge .env (default)` to keep the current VPS env values after the pull
+- `Merge .env (default)` to keep the current VPS env values after the pull and append any new upstream env keys
 - `Stash all` to stash every local change before pulling
 
 ## 8. Env backup and restore
