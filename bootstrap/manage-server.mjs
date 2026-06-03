@@ -14,6 +14,7 @@ const DB_MACHINES_FILE = '/etc/vps-db-machines.json';
 const SSH_KEYS_FILE = '/etc/vps-ssh-keys.json';
 const SSH_KEYS_DIR = '/root/.ssh/vps-managed-keys';
 const PROJECT_ENV_BACKUP_DIR = '/etc/vps-project-env-backups';
+const MANAGE_VERSION_FILE = '/etc/vps-manage-version.json';
 const TLS_CUSTOM_DIR = '/etc/vps-custom-certs';
 const TLS_SERVER_DIR = path.join(TLS_CUSTOM_DIR, 'server');
 const TLS_PROJECT_DIR = path.join(TLS_CUSTOM_DIR, 'projects');
@@ -309,6 +310,30 @@ function readProjectGitInfo(projectPath) {
       commitShort: '',
       commitDate: '',
     };
+  }
+}
+
+function readManageBuildInfo() {
+  const fallback = {
+    commit: '',
+    commitShort: '',
+    commitDate: '',
+    repo: 'hinbit/hinbit-MultiDevVPSSettings',
+  };
+  try {
+    if (!fs.existsSync(MANAGE_VERSION_FILE)) return fallback;
+    const data = JSON.parse(fs.readFileSync(MANAGE_VERSION_FILE, 'utf8'));
+    const commit = String(data.commit || data.sha || '').trim();
+    const commitShort = String(data.commitShort || data.short || commit.slice(0, 12)).trim();
+    const commitDate = String(data.commitDate || data.date || '').trim();
+    return {
+      commit,
+      commitShort,
+      commitDate,
+      repo: String(data.repo || fallback.repo).trim() || fallback.repo,
+    };
+  } catch {
+    return fallback;
   }
 }
 
@@ -1373,8 +1398,8 @@ function renderVaultPage() {
     .muted { color: #94a3b8; }
     .panel { background: rgba(8, 15, 29, 0.88); border: 1px solid rgba(148,163,184,0.2); border-radius: 18px; padding: 20px; box-shadow: 0 12px 40px rgba(0,0,0,0.35); }
     .table-wrap { overflow: auto; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; vertical-align: top; padding: 10px; border-bottom: 1px solid rgba(148,163,184,0.16); }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th, td { text-align: left; vertical-align: top; padding: 10px; border-bottom: 1px solid rgba(148,163,184,0.16); overflow-wrap: anywhere; word-break: break-word; }
     th { color: #93c5fd; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
     code { background: #0b1220; padding: 2px 6px; border-radius: 6px; }
     .actions { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -2432,6 +2457,7 @@ function renderProjectRows(projects) {
           <td>
             <div><strong>${escapeHtml(project.repo || project.slug || '')}</strong></div>
             <div class="small">${escapeHtml(project.path || '')}</div>
+            <div class="small">version: ${escapeHtml(project.gitCommitShort || 'n/a')} · ${escapeHtml(project.gitCommitDate ? new Date(project.gitCommitDate).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }) : 'n/a')}</div>
           </td>
           <td>
             <div>${project.domain ? `<a href="https://${escapeHtml(project.domain)}/" target="_blank" rel="noreferrer">${escapeHtml(project.domain)}</a>` : '<span class="muted">n/a</span>'}</div>
@@ -3271,6 +3297,8 @@ function renderPage() {
   const initialProjectsRows = renderProjectRows(projects);
   const dbMachines = readDbMachines();
   const dbMachineOptions = renderDbMachineOptions(dbMachines, LOCAL_DB_MACHINE_ID, true);
+  const manageBuild = readManageBuildInfo();
+  const manageBuildDate = manageBuild.commitDate ? new Date(manageBuild.commitDate).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }) : 'n/a';
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -3424,6 +3452,7 @@ function renderPage() {
       <h1>MultiDev Manage</h1>
       <div class="muted">Projects, PM2 controls, logs, and per-domain protection from one page.</div>
       <div id="systemStats" class="small">Loading machine stats...</div>
+      <div class="small">Dashboard version: <code>${escapeHtml(manageBuild.commitShort || 'n/a')}</code> · ${escapeHtml(manageBuildDate)} · ${escapeHtml(manageBuild.repo || 'hinbit/hinbit-MultiDevVPSSettings')}</div>
     </div>
     <div class="actions">
       <a class="btn ghost" href="/">Portal</a>
@@ -3487,6 +3516,19 @@ function renderPage() {
       <h2>Running Projects</h2>
       <div class="table-wrap">
         <table>
+          <colgroup>
+            <col style="width: 19%">
+            <col style="width: 16%">
+            <col style="width: 11%">
+            <col style="width: 6%">
+            <col style="width: 6%">
+            <col style="width: 12%">
+            <col style="width: 7%">
+            <col style="width: 4%">
+            <col style="width: 7%">
+            <col style="width: 7%">
+            <col style="width: 15%">
+          </colgroup>
           <thead>
             <tr>
               <th>Repo</th>
