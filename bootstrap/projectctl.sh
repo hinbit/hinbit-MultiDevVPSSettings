@@ -670,6 +670,12 @@ sql_quote() {
   printf "'%s'" "${value}"
 }
 
+shell_quote() {
+  local value
+  value="$(printf '%s' "$1" | sed "s/'/'\"'\"'/g")"
+  printf "'%s'" "${value}"
+}
+
 sql_ident() {
   local value
   value="$(printf '%s' "$1" | sed 's/`/``/g')"
