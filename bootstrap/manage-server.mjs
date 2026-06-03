@@ -3571,10 +3571,10 @@ function renderPage() {
             <label>Custom DB port
               <input id="mysqlCustomPort" type="number" min="1" max="65535" placeholder="3306">
             </label>
-            <label>Custom DB root user
+            <label>Custom DB root user <span class="muted">(optional)</span>
               <input id="mysqlCustomRootUser" type="text" placeholder="root">
             </label>
-            <label>Custom DB root password
+            <label>Custom DB root password <span class="muted">(optional)</span>
               <input id="mysqlCustomRootPassword" type="password" placeholder="••••••••">
             </label>
             <label>Custom DB notes
@@ -5720,7 +5720,9 @@ async function handleRequest(req, res) {
             rootPassword: body.customMachineRootPassword || '',
             notes: body.customMachineNotes || '',
           }, { id: CUSTOM_DB_MACHINE_ID, name: 'Custom DB machine', host: '', rootUser: 'root', rootPassword: '', port: '3306', notes: '' });
-          args.push('--db-name', dbName, '--db-user', dbUser, '--db-password', dbPassword);
+          if (dbName) args.push('--db-name', dbName);
+          if (dbUser) args.push('--db-user', dbUser);
+          if (dbPassword) args.push('--db-password', dbPassword);
           args.push(
             '--machine', CUSTOM_DB_MACHINE_ID,
             '--machine-name', normalizedCustomMachine.name,
