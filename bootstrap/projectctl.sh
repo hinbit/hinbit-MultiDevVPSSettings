@@ -1651,22 +1651,82 @@ start_kind_target() {
   esac
 }
 
+ecosystem_pm2_name() {
+  local ecosystem_file="${1:-}"
+
+  [[ -n "${ecosystem_file}" ]] || return 1
+  [[ -f "${APP_DIR}/${ecosystem_file}" ]] || [[ -f "${ecosystem_file}" ]] || return 1
+
+  node - "${ecosystem_file}" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const { pathToFileURL } = require('url');
+
+async function loadConfig(file) {
+  const resolved = path.resolve(file);
+  if (resolved.endsWith('.mjs')) {
+    const mod = await import(pathToFileURL(resolved).href);
+    return mod && mod.default ? mod.default : mod;
+  }
+  if (resolved.endsWith('.yml') || resolved.endsWith('.yaml')) {
+    return null;
+  }
+  delete require.cache[resolved];
+  return require(resolved);
+}
+
+(async () => {
+  try {
+    const file = process.argv[2];
+    const config = await loadConfig(file);
+    let name = '';
+    if (config) {
+      if (typeof config.name === 'string' && config.name.trim()) {
+        name = config.name.trim();
+      } else if (Array.isArray(config.apps) && config.apps.length > 0 && config.apps[0] && typeof config.apps[0].name === 'string' && config.apps[0].name.trim()) {
+        name = config.apps[0].name.trim();
+      } else if (config.apps && typeof config.apps.name === 'string' && config.apps.name.trim()) {
+        name = config.apps.name.trim();
+      }
+    }
+    if (name) {
+      process.stdout.write(name);
+    } else {
+      process.exit(1);
+    }
+  } catch (error) {
+    process.exit(1);
+  }
+})();
+NODE
+}
+
 refresh_project_start_kind() {
   local meta="$1"
   local detected=""
+  local ecosystem_name=""
 
   [[ -n "${meta}" ]] || return 0
   [[ -f "${meta}" ]] || return 0
   [[ -d "${APP_DIR}" ]] || return 0
 
   detected="$(cd "${APP_DIR}" && detect_start_kind)"
-  if [[ -n "${detected}" && "${detected}" != "${START_KIND:-}" ]]; then
-    START_KIND="${detected}"
-    START_TARGET="$(start_kind_target "${START_KIND}")"
-    APP_TYPE="$(start_kind_family "${START_KIND}")"
-    update_meta_value "${meta}" "START_KIND" "${START_KIND}"
-    update_meta_value "${meta}" "START_TARGET" "${START_TARGET}"
-    update_meta_value "${meta}" "APP_TYPE" "${APP_TYPE}"
+  if [[ -n "${detected}" ]]; then
+    if [[ "${detected}" != "${START_KIND:-}" ]]; then
+      START_KIND="${detected}"
+      START_TARGET="$(start_kind_target "${START_KIND}")"
+      APP_TYPE="$(start_kind_family "${START_KIND}")"
+      update_meta_value "${meta}" "START_KIND" "${START_KIND}"
+      update_meta_value "${meta}" "START_TARGET" "${START_TARGET}"
+      update_meta_value "${meta}" "APP_TYPE" "${APP_TYPE}"
+    fi
+    if [[ "${START_KIND:-}" == ecosystem:* && -n "${START_TARGET:-}" ]]; then
+      ecosystem_name="$(ecosystem_pm2_name "${START_TARGET}" 2>/dev/null || true)"
+      if [[ -n "${ecosystem_name}" && "${PM2_NAME:-}" != "${ecosystem_name}" ]]; then
+        PM2_NAME="${ecosystem_name}"
+        update_meta_value "${meta}" "PM2_NAME" "${PM2_NAME}"
+      fi
+    fi
   fi
 }
 
@@ -2227,6 +2287,12 @@ do_install() {
   fi
   START_TARGET="$(start_kind_target "${START_KIND}")"
   APP_TYPE="$(start_kind_family "${START_KIND}")"
+  if [[ "${START_KIND}" == ecosystem:* && -n "${START_TARGET}" ]]; then
+    ecosystem_name="$(ecosystem_pm2_name "${START_TARGET}" 2>/dev/null || true)"
+    if [[ -n "${ecosystem_name}" ]]; then
+      PM2_NAME="${ecosystem_name}"
+    fi
+  fi
 
   if [[ "${custom_db_machine}" -eq 0 ]]; then
     resolve_db_machine "${DB_MACHINE_ID}"
