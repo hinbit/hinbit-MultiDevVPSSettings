@@ -2156,6 +2156,8 @@ do_install() {
   REPO_URL="$(repo_url_from_ref "${REPO_REF}")"
   PROJECT_SLUG="$(slug_from_ref "${REPO_REF}")"
   APP_DIR="${APP_ROOT}/${PROJECT_SLUG}"
+  local meta
+  meta="$(meta_path_for_slug "${PROJECT_SLUG}")"
   BRANCH="$(branch_from_repo "${REPO_REF}" "${branch}")"
   PM2_NAME="${pm2_name:-${PROJECT_SLUG}}"
   APP_PORT="${forced_port:-$(pick_port)}"
@@ -2206,6 +2208,17 @@ do_install() {
     custom_db_machine=1
   fi
 
+  if [[ "${custom_db_machine}" -eq 0 ]]; then
+    resolve_db_machine "${DB_MACHINE_ID}"
+    write_meta "${meta}"
+    chmod 0644 "${meta}"
+    sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
+  else
+    write_meta "${meta}"
+    chmod 0644 "${meta}"
+    sync_project_db_machine_env "custom" "" "" "" "" "Custom / manual DB machine" "Configure DB host and credentials in MySQL Access after install"
+  fi
+
   PACKAGE_MANAGER="$(cd "${APP_DIR}" && detect_package_manager)"
 
   if [[ -n "${entrypoint}" ]]; then
@@ -2227,24 +2240,12 @@ do_install() {
   )
 
   if [[ "${custom_db_machine}" -eq 0 ]]; then
-    run_install_db_scripts "${APP_DIR}"
     if [[ -n "${db_name}" && -n "${db_user}" && -n "${db_password}" ]]; then
       sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "" "${DB_MACHINE_ID}"
     fi
+    run_install_db_scripts "${APP_DIR}"
   else
     printf '[projectctl] custom DB machine selected for %s; skipping automatic DB bootstrap until MySQL Access is filled in.\n' "${REPO_REF}"
-  fi
-
-  meta="$(meta_path_for_slug "${PROJECT_SLUG}")"
-  if [[ "${custom_db_machine}" -eq 0 ]]; then
-    resolve_db_machine "${DB_MACHINE_ID}"
-  fi
-  write_meta "${meta}"
-  chmod 0644 "${meta}"
-  if [[ "${custom_db_machine}" -eq 0 ]]; then
-    sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
-  else
-    sync_project_db_machine_env "custom" "" "" "" "" "Custom / manual DB machine" "Configure DB host and credentials in MySQL Access after install"
   fi
 
   ensure_project_ssh_user "${SSH_UPLOAD_USER}" "${SSH_UPLOAD_PASSWORD}" "${APP_DIR}"
@@ -2266,6 +2267,10 @@ do_update() {
   local ref="$1"
   local slug
   local meta
+  local db_name=""
+  local db_user=""
+  local db_password=""
+  local db_type=""
 
   slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
@@ -2286,6 +2291,7 @@ do_update() {
   fi
 
   [[ -d "${APP_DIR}/.git" ]] || die "Missing git repo at ${APP_DIR}"
+  IFS=$'\t' read -r db_name db_user db_password db_type < <(sync_project_db_env "${APP_DIR}")
 
   (
     cd "${APP_DIR}"
@@ -2298,6 +2304,10 @@ do_update() {
     install_deps
     maybe_build
   )
+
+  if [[ "${DB_MACHINE_ID}" != "custom" && -n "${db_name}" && -n "${db_user}" && -n "${db_password}" ]]; then
+    sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "${MYSQL_ALLOWED_IPS:-}" "${DB_MACHINE_ID}"
+  fi
   refresh_project_start_kind "${meta}"
 
   if [[ -z "${SSH_UPLOAD_USER:-}" ]]; then
