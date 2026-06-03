@@ -2506,6 +2506,29 @@ function getSystemStats() {
   const total = os.totalmem();
   const free = os.freemem();
   const used = total - free;
+  let diskTotal = 0;
+  let diskUsed = 0;
+  let diskFree = 0;
+  let diskPercent = 0;
+  let diskMount = '/';
+  try {
+    const df = execFileSync('df', ['-B1', '--output=size,used,avail,pcent,target', '/'], { encoding: 'utf8' })
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean);
+    if (df.length >= 2) {
+      const parts = df[df.length - 1].trim().split(/\s+/);
+      if (parts.length >= 5) {
+        diskTotal = Number(parts[0]) || 0;
+        diskUsed = Number(parts[1]) || 0;
+        diskFree = Number(parts[2]) || 0;
+        diskPercent = Number(String(parts[3]).replace('%', '')) || 0;
+        diskMount = parts[4] || '/';
+      }
+    }
+  } catch {
+    // Ignore disk stat failures.
+  }
   return {
     load1: load[0],
     load5: load[1],
@@ -2516,6 +2539,11 @@ function getSystemStats() {
     memoryFree: free,
     memoryUsed: used,
     memoryPercent: (used / total) * 100,
+    diskTotal,
+    diskUsed,
+    diskFree,
+    diskPercent,
+    diskMount,
     uptimeSeconds: os.uptime(),
   };
 }
@@ -3974,7 +4002,8 @@ function renderPage() {
       }
       const cpuLoad = Number(stats.cpuLoadPercent || 0).toFixed(1) + '%';
       const memory = formatBytes(stats.memoryUsed || 0) + ' / ' + formatBytes(stats.memoryTotal || 0) + ' (' + Number(stats.memoryPercent || 0).toFixed(1) + '%)';
-      systemStats.textContent = 'CPU load: ' + Number(stats.load1 || 0).toFixed(2) + ' (' + cpuLoad + ') · Memory: ' + memory;
+      const disk = formatBytes(stats.diskUsed || 0) + ' / ' + formatBytes(stats.diskTotal || 0) + ' (' + Number(stats.diskPercent || 0).toFixed(1) + '%)';
+      systemStats.textContent = 'CPU load: ' + Number(stats.load1 || 0).toFixed(2) + ' (' + cpuLoad + ') · Memory: ' + memory + ' · Disk: ' + disk + ' @ ' + (stats.diskMount || '/');
     }
 
     async function api(path, options = {}) {
