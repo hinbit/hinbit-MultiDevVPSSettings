@@ -1029,36 +1029,74 @@ sync_project_db_machine_env() {
   local env_file="${APP_DIR}/.env.machine"
   local db_type=""
   local project_env=""
+  local custom_mode="no"
 
   touch "${env_file}"
   chmod 0600 "${env_file}"
+  if [[ "${machine_id}" == "custom" ]]; then
+    custom_mode="yes"
+  fi
   update_meta_value "${env_file}" "DB_MACHINE_ID" "${machine_id}"
-  [[ -n "${machine_name}" ]] && update_meta_value "${env_file}" "DB_MACHINE_NAME" "${machine_name}"
-  [[ -n "${machine_host}" ]] && update_meta_value "${env_file}" "DB_MACHINE_HOST" "${machine_host}"
-  [[ -n "${machine_port}" ]] && update_meta_value "${env_file}" "DB_MACHINE_PORT" "${machine_port}"
-  [[ -n "${machine_root_user}" ]] && update_meta_value "${env_file}" "DB_MACHINE_ROOT_USER" "${machine_root_user}"
-  [[ -n "${machine_root_password}" ]] && update_meta_value "${env_file}" "DB_MACHINE_ROOT_PASSWORD" "${machine_root_password}"
-  [[ -n "${machine_notes}" ]] && update_meta_value "${env_file}" "DB_MACHINE_NOTES" "${machine_notes}"
-  [[ -n "${machine_host}" ]] && update_meta_value "${env_file}" "DB_HOST" "${machine_host}"
-  [[ -n "${machine_port}" ]] && update_meta_value "${env_file}" "DB_PORT" "${machine_port}"
-  [[ -n "${machine_host}" ]] && update_meta_value "${env_file}" "MYSQL_HOST" "${machine_host}"
-  [[ -n "${machine_port}" ]] && update_meta_value "${env_file}" "MYSQL_PORT" "${machine_port}"
+  if [[ "${custom_mode}" == "yes" ]]; then
+    update_meta_value "${env_file}" "DB_MACHINE_NAME" "${machine_name}"
+    update_meta_value "${env_file}" "DB_MACHINE_HOST" "${machine_host}"
+    update_meta_value "${env_file}" "DB_MACHINE_PORT" "${machine_port}"
+    update_meta_value "${env_file}" "DB_MACHINE_ROOT_USER" "${machine_root_user}"
+    update_meta_value "${env_file}" "DB_MACHINE_ROOT_PASSWORD" "${machine_root_password}"
+    update_meta_value "${env_file}" "DB_MACHINE_NOTES" "${machine_notes}"
+    update_meta_value "${env_file}" "DB_HOST" "${machine_host}"
+    update_meta_value "${env_file}" "DB_PORT" "${machine_port}"
+    update_meta_value "${env_file}" "MYSQL_HOST" "${machine_host}"
+    update_meta_value "${env_file}" "MYSQL_PORT" "${machine_port}"
+  else
+    [[ -n "${machine_name}" ]] && update_meta_value "${env_file}" "DB_MACHINE_NAME" "${machine_name}"
+    [[ -n "${machine_host}" ]] && update_meta_value "${env_file}" "DB_MACHINE_HOST" "${machine_host}"
+    [[ -n "${machine_port}" ]] && update_meta_value "${env_file}" "DB_MACHINE_PORT" "${machine_port}"
+    [[ -n "${machine_root_user}" ]] && update_meta_value "${env_file}" "DB_MACHINE_ROOT_USER" "${machine_root_user}"
+    [[ -n "${machine_root_password}" ]] && update_meta_value "${env_file}" "DB_MACHINE_ROOT_PASSWORD" "${machine_root_password}"
+    [[ -n "${machine_notes}" ]] && update_meta_value "${env_file}" "DB_MACHINE_NOTES" "${machine_notes}"
+    [[ -n "${machine_host}" ]] && update_meta_value "${env_file}" "DB_HOST" "${machine_host}"
+    [[ -n "${machine_port}" ]] && update_meta_value "${env_file}" "DB_PORT" "${machine_port}"
+    [[ -n "${machine_host}" ]] && update_meta_value "${env_file}" "MYSQL_HOST" "${machine_host}"
+    [[ -n "${machine_port}" ]] && update_meta_value "${env_file}" "MYSQL_PORT" "${machine_port}"
+  fi
   db_type="$(project_db_value DB_TYPE VITE_DB_TYPE)"
   if [[ "${db_type,,}" == "mysql" ]]; then
-    [[ -n "${machine_root_user}" ]] && update_meta_value "${env_file}" "MYSQL_USER" "${machine_root_user}"
-    [[ -n "${machine_root_password}" ]] && update_meta_value "${env_file}" "MYSQL_PASSWORD" "${machine_root_password}"
+    if [[ "${custom_mode}" == "yes" ]]; then
+      update_meta_value "${env_file}" "MYSQL_USER" "${machine_root_user}"
+      update_meta_value "${env_file}" "MYSQL_PASSWORD" "${machine_root_password}"
+    else
+      [[ -n "${machine_root_user}" ]] && update_meta_value "${env_file}" "MYSQL_USER" "${machine_root_user}"
+      [[ -n "${machine_root_password}" ]] && update_meta_value "${env_file}" "MYSQL_PASSWORD" "${machine_root_password}"
+    fi
   fi
 
   for project_env in "${APP_DIR}/.env" "${APP_DIR}/server/.env"; do
     [[ -f "${project_env}" ]] || continue
     update_meta_value "${project_env}" "DB_MACHINE_ID" "${machine_id}"
-    [[ -n "${machine_name}" ]] && update_meta_value "${project_env}" "DB_MACHINE_NAME" "${machine_name}"
-    [[ -n "${machine_host}" ]] && update_meta_value "${project_env}" "DB_HOST" "${machine_host}"
-    [[ -n "${machine_port}" ]] && update_meta_value "${project_env}" "DB_PORT" "${machine_port}"
-    [[ -n "${machine_host}" ]] && update_meta_value "${project_env}" "MYSQL_HOST" "${machine_host}"
-    [[ -n "${machine_port}" ]] && update_meta_value "${project_env}" "MYSQL_PORT" "${machine_port}"
-    [[ -n "${machine_root_user}" ]] && update_meta_value "${project_env}" "DB_MACHINE_ROOT_USER" "${machine_root_user}"
-    [[ -n "${machine_root_password}" ]] && update_meta_value "${project_env}" "DB_MACHINE_ROOT_PASSWORD" "${machine_root_password}"
+    if [[ "${custom_mode}" == "yes" ]]; then
+      update_meta_value "${project_env}" "DB_MACHINE_NAME" "${machine_name}"
+      update_meta_value "${project_env}" "DB_MACHINE_HOST" "${machine_host}"
+      update_meta_value "${project_env}" "DB_MACHINE_PORT" "${machine_port}"
+      update_meta_value "${project_env}" "DB_MACHINE_NOTES" "${machine_notes}"
+      update_meta_value "${project_env}" "DB_HOST" "${machine_host}"
+      update_meta_value "${project_env}" "DB_PORT" "${machine_port}"
+      update_meta_value "${project_env}" "MYSQL_HOST" "${machine_host}"
+      update_meta_value "${project_env}" "MYSQL_PORT" "${machine_port}"
+      update_meta_value "${project_env}" "DB_MACHINE_ROOT_USER" "${machine_root_user}"
+      update_meta_value "${project_env}" "DB_MACHINE_ROOT_PASSWORD" "${machine_root_password}"
+    else
+      [[ -n "${machine_name}" ]] && update_meta_value "${project_env}" "DB_MACHINE_NAME" "${machine_name}"
+      [[ -n "${machine_host}" ]] && update_meta_value "${project_env}" "DB_MACHINE_HOST" "${machine_host}"
+      [[ -n "${machine_port}" ]] && update_meta_value "${project_env}" "DB_MACHINE_PORT" "${machine_port}"
+      [[ -n "${machine_notes}" ]] && update_meta_value "${project_env}" "DB_MACHINE_NOTES" "${machine_notes}"
+      [[ -n "${machine_host}" ]] && update_meta_value "${project_env}" "DB_HOST" "${machine_host}"
+      [[ -n "${machine_port}" ]] && update_meta_value "${project_env}" "DB_PORT" "${machine_port}"
+      [[ -n "${machine_host}" ]] && update_meta_value "${project_env}" "MYSQL_HOST" "${machine_host}"
+      [[ -n "${machine_port}" ]] && update_meta_value "${project_env}" "MYSQL_PORT" "${machine_port}"
+      [[ -n "${machine_root_user}" ]] && update_meta_value "${project_env}" "DB_MACHINE_ROOT_USER" "${machine_root_user}"
+      [[ -n "${machine_root_password}" ]] && update_meta_value "${project_env}" "DB_MACHINE_ROOT_PASSWORD" "${machine_root_password}"
+    fi
   done
 }
 
