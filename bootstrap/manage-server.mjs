@@ -5859,9 +5859,12 @@ async function handleRequest(req, res) {
         const refreshedDb = pickDbDetails(projectPath).db;
         const refreshedMachineContext = resolveProjectMysqlMachine(refreshedMeta, projectPath);
         const refreshedMachine = refreshedMachineContext.machine || readDbMachines().find((item) => String(item.id) === String(refreshedMeta.DB_MACHINE_ID || projectMachineId)) || null;
+        const message = body.moveData
+          ? (output || 'MySQL data moved')
+          : (useCustomMachine ? 'Custom connection saved for this project' : (output || 'MySQL permissions updated'));
         sendJson(res, 200, {
           ok: true,
-          message: output || 'MySQL permissions updated',
+          message,
           project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
           files,
           db: refreshedDb,
