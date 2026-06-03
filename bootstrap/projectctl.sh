@@ -337,6 +337,97 @@ PY
   rm -f "${tmp}" >/dev/null 2>&1 || true
 }
 
+env_file_value_exact() {
+  local env_file="$1"
+  shift
+  local key=""
+  local line=""
+  local value=""
+
+  [[ -f "${env_file}" ]] || return 1
+
+  for key in "$@"; do
+    line="$(grep -hE "^[[:space:]]*${key}=" "${env_file}" 2>/dev/null | tail -n1 || true)"
+    if [[ -n "${line}" ]] || grep -qE "^[[:space:]]*${key}=" "${env_file}" 2>/dev/null; then
+      value="${line#*=}"
+      if [[ "${#value}" -ge 2 && "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+        value="${value:1:${#value}-2}"
+      elif [[ "${#value}" -ge 2 && "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+      printf '%s' "${value}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+normalize_project_deployment_env_file() {
+  local env_file="$1"
+  local key=""
+  local value=""
+  local chosen=""
+  local app_domain="${APP_DOMAIN:-}"
+  local app_https="${APP_HTTPS:-yes}"
+  local base_url="https"
+
+  [[ -f "${env_file}" ]] || return 0
+  if [[ "${app_https,,}" == "no" ]]; then
+    base_url="http"
+  fi
+
+  is_localish_value() {
+    local candidate="${1:-}"
+    case "${candidate,,}" in
+      ''|local|localhost|127.0.0.1|::1|dev|development|testing|test|local-current)
+        return 0
+        ;;
+    esac
+    return 1
+  }
+
+  for key in SERVER_LOCATION APP_LOCATION LOCATION DEPLOY_LOCATION DEPLOY_TARGET TARGET_LOCATION RUNTIME_TARGET SERVER_MODE; do
+    value="$(env_file_value_exact "${env_file}" "${key}" 2>/dev/null || true)"
+    if is_localish_value "${value}"; then
+      update_meta_value "${env_file}" "${key}" "web"
+    fi
+  done
+
+  for key in NODE_ENV APP_ENV ENVIRONMENT MODE DEPLOYMENT RUNTIME_ENV BUILD_ENV STAGE; do
+    value="$(env_file_value_exact "${env_file}" "${key}" 2>/dev/null || true)"
+    if is_localish_value "${value}"; then
+      update_meta_value "${env_file}" "${key}" "production"
+    fi
+  done
+
+  for key in SERVER_URL APP_URL BASE_URL PUBLIC_URL SITE_URL ORIGIN_URL WEB_URL API_BASE_URL FRONTEND_URL BACKEND_URL NEXT_PUBLIC_SITE_URL NEXT_PUBLIC_API_URL NUXT_PUBLIC_SITE_URL VITE_API_BASE_URL VITE_APP_URL VITE_SERVER_URL; do
+    value="$(env_file_value_exact "${env_file}" "${key}" 2>/dev/null || true)"
+    chosen=""
+    if ! is_localish_value "${value}" && [[ -n "${value}" ]]; then
+      continue
+    fi
+
+    for suffix in WEB PRODUCTION PROD REMOTE LIVE; do
+      chosen="$(env_file_value_exact "${env_file}" "${key}_${suffix}" 2>/dev/null || true)"
+      if ! is_localish_value "${chosen}" && [[ -n "${chosen}" ]]; then
+        break
+      fi
+      chosen=""
+    done
+
+    if [[ -z "${chosen}" && -n "${app_domain}" ]]; then
+      chosen="${base_url}://${app_domain}"
+    fi
+
+    if [[ -n "${chosen}" ]]; then
+      update_meta_value "${env_file}" "${key}" "${chosen}"
+    fi
+  done
+
+  normalize_env_file_shell_safe "${env_file}"
+}
+
 sync_project_db_env() {
   local project_dir="${1:-${APP_DIR}}"
   local db_name="${2:-}"
@@ -2108,6 +2199,9 @@ do_install() {
   local db_type=""
   local custom_db_machine=0
   IFS=$'\t' read -r db_name db_user db_password db_type < <(sync_project_db_env "${APP_DIR}")
+  normalize_project_deployment_env_file "${APP_DIR}/.env"
+  normalize_project_deployment_env_file "${APP_DIR}/server/.env"
+  normalize_project_deployment_env_file "${APP_DIR}/client/.env"
   if [[ "${DB_MACHINE_ID}" == "custom" ]]; then
     custom_db_machine=1
   fi
@@ -2198,6 +2292,9 @@ do_update() {
     pull_repo_with_optional_stash "${APP_DIR}" "${BRANCH}" "${REPO_URL}"
     seed_project_env_from_templates "${APP_DIR}"
     sync_project_runtime_ports "${APP_PORT}" "${APP_DIR}"
+    normalize_project_deployment_env_file "${APP_DIR}/.env"
+    normalize_project_deployment_env_file "${APP_DIR}/server/.env"
+    normalize_project_deployment_env_file "${APP_DIR}/client/.env"
     install_deps
     maybe_build
   )
