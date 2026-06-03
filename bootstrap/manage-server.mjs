@@ -4717,6 +4717,12 @@ function renderPage() {
           ips,
           machineId: CUSTOM_DB_MACHINE_ID,
           customMachine,
+          customMachineHost: customMachine ? customMachine.host : '',
+          customMachineName: customMachine ? customMachine.name : '',
+          customMachinePort: customMachine ? customMachine.port : '',
+          customMachineRootUser: customMachine ? customMachine.rootUser : '',
+          customMachineRootPassword: customMachine ? customMachine.rootPassword : '',
+          customMachineNotes: customMachine ? customMachine.notes : '',
           dbName: projectDbName,
           dbUser: projectDbUser,
           dbPassword: projectDbPassword,
@@ -5807,13 +5813,22 @@ async function handleRequest(req, res) {
         const ips = String(body.ips || '').trim();
         const machineId = String(body.machineId || projectMachineId || LOCAL_DB_MACHINE_ID).trim();
         const customMachineInput = body.customMachine && typeof body.customMachine === 'object' ? body.customMachine : null;
+        const customMachine = customMachineInput ? {
+          id: String(customMachineInput.id || CUSTOM_DB_MACHINE_ID).trim() || CUSTOM_DB_MACHINE_ID,
+          name: String(customMachineInput.name || body.customMachineName || '').trim(),
+          host: String(customMachineInput.host || body.customMachineHost || '').trim(),
+          port: String(customMachineInput.port || body.customMachinePort || '').trim(),
+          rootUser: String(customMachineInput.rootUser || body.customMachineRootUser || '').trim(),
+          rootPassword: String(customMachineInput.rootPassword || body.customMachineRootPassword || ''),
+          notes: String(customMachineInput.notes || body.customMachineNotes || '').trim(),
+        } : null;
         const dbName = String(body.dbName || '').trim();
         const dbUser = String(body.dbUser || '').trim();
         const dbPassword = String(body.dbPassword || '');
-        const useCustomMachine = machineId === CUSTOM_DB_MACHINE_ID || Boolean(customMachineInput);
+        const useCustomMachine = machineId === CUSTOM_DB_MACHINE_ID || Boolean(customMachine);
         const args = ['mysql'];
         if (useCustomMachine) {
-          const normalizedCustomMachine = normalizeDbMachine(customMachineInput || {
+          const normalizedCustomMachine = normalizeDbMachine(customMachine || {
             id: CUSTOM_DB_MACHINE_ID,
             name: body.customMachineName || '',
             host: body.customMachineHost || '',
