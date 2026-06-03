@@ -2094,7 +2094,7 @@ start_pm2() {
   (
     cd "${APP_DIR}"
     case "${START_KIND}" in
-      ecosystem)
+      ecosystem:*)
         start_with_env pm2 start "${START_TARGET}" --name "${PM2_NAME}" --update-env --time
         ;;
       npm-prod)
