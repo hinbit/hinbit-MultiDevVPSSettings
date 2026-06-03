@@ -115,6 +115,52 @@ function parseEnvFile(filePath) {
   return data;
 }
 
+function parseEnvText(text) {
+  const data = {};
+  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  for (const rawLine of lines) {
+    const line = String(rawLine || '').trim();
+    if (!line || line.startsWith('#')) continue;
+    const idx = line.indexOf('=');
+    if (idx === -1) continue;
+    const key = line.slice(0, idx).trim();
+    if (!key) continue;
+    let value = line.slice(idx + 1).trim();
+    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
+      const quote = value[0];
+      value = value.slice(1, -1);
+      if (quote === '"') {
+        value = value
+          .replace(/\\n/g, '\n')
+          .replace(/\\r/g, '\r')
+          .replace(/\\t/g, '\t')
+          .replace(/\\(["\\$`])/g, '$1');
+      }
+    }
+    data[key] = value;
+  }
+  return data;
+}
+
+function shellQuoteEnvValue(value) {
+  const raw = String(value ?? '');
+  return `"${raw
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\$/g, '\\$')
+    .replace(/`/g, '\\`')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t')}"`;
+}
+
+function serializeEnvText(env) {
+  const entries = Object.entries(env || {})
+    .filter(([key]) => String(key || '').trim())
+    .sort(([a], [b]) => a.localeCompare(b));
+  return entries.map(([key, value]) => `${key}=${shellQuoteEnvValue(value)}`).join('\n') + (entries.length ? '\n' : '');
+}
+
 function readProjectEnv(projectPath) {
   const merged = {};
   const files = [];
@@ -126,6 +172,17 @@ function readProjectEnv(projectPath) {
   }
 
   return { merged, files };
+}
+
+function chooseProjectEnvSaveTarget(projectPath, files = []) {
+  const fileSet = new Set((Array.isArray(files) ? files : []).map((file) => path.resolve(file)));
+  for (let i = ENV_CANDIDATES.length - 1; i >= 0; i -= 1) {
+    const candidate = path.join(projectPath || '', ENV_CANDIDATES[i]);
+    if (fileSet.has(path.resolve(candidate))) {
+      return candidate;
+    }
+  }
+  return path.join(projectPath || '', '.env');
 }
 
 function projectEnvBackupDir(ref) {
@@ -516,7 +573,11 @@ function pickDbDetails(projectPath) {
 
 function pickEnvDetails(projectPath) {
   const { merged, files } = readProjectEnv(projectPath);
-  return { files, env: merged };
+  return {
+    files,
+    env: merged,
+    saveTarget: chooseProjectEnvSaveTarget(projectPath, files),
+  };
 }
 
 function readProjectGitStatus(projectPath) {
@@ -3444,6 +3505,7 @@ function renderPage() {
     .kv-list { display: grid; gap: 10px; }
     .kv-item { display: grid; gap: 4px; padding: 12px; border: 1px solid #22304a; border-radius: 12px; background: #0b1220; }
     .kv-item code { white-space: pre-wrap; word-break: break-word; }
+    .env-editor { min-height: 280px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.5; }
     .copy-actions { display: flex; flex-wrap: wrap; gap: 6px; }
     .copy-actions .btn, .copy-actions button { padding: 8px 10px; font-size: 12px; }
     .hinbit-brand {
@@ -3724,6 +3786,19 @@ function renderPage() {
     <div class="body">
       <div id="envFlash" class="flash" hidden></div>
       <div class="kv-item">
+        <div class="row spread" style="gap: 12px; align-items: flex-start;">
+          <div>
+            <div class="small">Editable env file</div>
+            <div class="small">Saved to <code id="envSaveTarget">(n/a)</code> as shell-safe quoted assignments.</div>
+          </div>
+          <div class="copy-actions">
+            <button id="envReloadBtn" class="ghost" type="button">Reload</button>
+            <button id="envSaveBtn" class="secondary" type="button">Save env</button>
+          </div>
+        </div>
+        <textarea id="envEditor" class="env-editor" spellcheck="false" placeholder="KEY=&quot;value&quot;"></textarea>
+      </div>
+      <div class="kv-item">
         <div class="small">Saved backups</div>
         <div id="envBackupsList" class="stack"></div>
       </div>
@@ -3851,6 +3926,10 @@ function renderPage() {
     const envUploadInput = document.getElementById('envUploadInput');
     const envUploadBtn = document.getElementById('envUploadBtn');
     const envDownloadZipBtn = document.getElementById('envDownloadZipBtn');
+    const envEditor = document.getElementById('envEditor');
+    const envSaveBtn = document.getElementById('envSaveBtn');
+    const envReloadBtn = document.getElementById('envReloadBtn');
+    const envSaveTarget = document.getElementById('envSaveTarget');
     const closeEnvBtn = document.getElementById('closeEnvBtn');
     const envBackupsList = document.getElementById('envBackupsList');
     const progressPanel = document.getElementById('progressPanel');
@@ -3886,6 +3965,7 @@ function renderPage() {
     let currentMysqlRef = '';
     let currentSshRef = '';
     let currentEnvRef = '';
+    let currentEnvDetails = null;
     let currentLogRef = '';
     let currentLogType = 'out';
     let currentPullRef = '';
@@ -3926,6 +4006,26 @@ function renderPage() {
         unit += 1;
       }
       return (size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)) + ' ' + units[unit];
+    }
+
+    function shellQuoteEnvValue(value) {
+      const raw = String(value ?? '');
+      const backtick = String.fromCharCode(96);
+      return '"' + raw
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/\$/g, '\\$')
+        .replace(new RegExp(backtick, 'g'), '\\' + backtick)
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r')
+        .replace(/\t/g, '\\t') + '"';
+    }
+
+    function serializeEnvTextFromObject(env) {
+      const entries = Object.entries(env || {})
+        .filter(([key]) => String(key || '').trim())
+        .sort(([a], [b]) => a.localeCompare(b));
+      return entries.map(([key, value]) => key + '=' + shellQuoteEnvValue(value)).join('\n') + (entries.length ? '\n' : '');
     }
 
     function renderDbMachineSelectOptions(machines, selectedId, includeCustom = false) {
@@ -4432,6 +4532,7 @@ function renderPage() {
       closeProgressPanel();
       closeLogPanel();
       currentEnvRef = ref;
+      currentEnvDetails = details || null;
       envTitle.textContent = 'Environment Values';
       envSubtitle.textContent = subtitle || '';
       envFlash.hidden = true;
@@ -4440,12 +4541,18 @@ function renderPage() {
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([key, value]) => [key, String(value)]);
       renderKeyValueList(envList, entries);
+      if (envEditor) {
+        envEditor.value = serializeEnvTextFromObject(details.env || {});
+      }
       renderBackupList(envBackupsList, backups);
       renderBackupSelect(envRestoreSelect, backups, details.latestBackup?.name || 'latest.zip');
       envRestoreBtn.disabled = !backups.length;
       envRestoreSelectedBtn.disabled = !backups.length;
       envDownloadBtn.href = \`\${API}/projects/\${ref}/env/download\`;
       if (envDownloadZipBtn) envDownloadZipBtn.href = \`\${API}/projects/\${ref}/env/download\`;
+      if (envSaveTarget) {
+        envSaveTarget.textContent = details.saveTarget ? details.saveTarget.split('/').pop() : '(n/a)';
+      }
       envPanel.hidden = false;
       setModalLocked(true);
     }
@@ -4453,11 +4560,14 @@ function renderPage() {
     function closeEnvPanel() {
       envPanel.hidden = true;
       currentEnvRef = '';
+      currentEnvDetails = null;
       envList.innerHTML = '';
       envBackupsList.innerHTML = '';
       if (envRestoreSelect) envRestoreSelect.innerHTML = '';
       envFlash.hidden = true;
       envUploadInput.value = '';
+      if (envEditor) envEditor.value = '';
+      if (envSaveTarget) envSaveTarget.textContent = '(n/a)';
       setModalLocked(false);
     }
 
@@ -4647,6 +4757,17 @@ function renderPage() {
     async function loadEnv(ref) {
       const data = await api(\`/projects/\${ref}/env\`);
       openEnvPanel(ref, data, data.project || ref);
+    }
+
+    async function saveEnv(ref) {
+      const envText = envEditor ? envEditor.value : '';
+      const data = await api(\`/projects/\${ref}/env/save\`, {
+        method: 'POST',
+        body: JSON.stringify({ envText }),
+      });
+      showMessage(envFlash, data.message || 'Environment values saved');
+      await refresh();
+      await loadEnv(ref);
     }
 
     async function backupEnv(ref) {
@@ -5091,6 +5212,36 @@ function renderPage() {
         envBackupBtn.disabled = false;
       }
     });
+
+    if (envSaveBtn) {
+      envSaveBtn.addEventListener('click', async () => {
+        if (!currentEnvRef) return;
+        envSaveBtn.disabled = true;
+        try {
+          await saveEnv(currentEnvRef);
+        } catch (error) {
+          showMessage(envFlash, error.message, false);
+          envPanel.hidden = false;
+        } finally {
+          envSaveBtn.disabled = false;
+        }
+      });
+    }
+
+    if (envReloadBtn) {
+      envReloadBtn.addEventListener('click', async () => {
+        if (!currentEnvRef) return;
+        envReloadBtn.disabled = true;
+        try {
+          await loadEnv(currentEnvRef);
+        } catch (error) {
+          showMessage(envFlash, error.message, false);
+          envPanel.hidden = false;
+        } finally {
+          envReloadBtn.disabled = false;
+        }
+      });
+    }
 
     envRestoreBtn.addEventListener('click', async () => {
       if (!currentEnvRef) return;
@@ -5909,13 +6060,13 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const envMatch = routePath.match(/^\/api\/projects\/(.+?)\/env(?:\/(download|upload|backup|restore|backups))?$/);
+    const envMatch = routePath.match(/^\/api\/projects\/(.+?)\/env(?:\/(download|upload|backup|restore|backups|save))?$/);
     if (envMatch) {
       const ref = decodeURIComponent(envMatch[1]);
       const mode = envMatch[2] || '';
       const meta = parseEnvFile(metaPathForRef(ref));
       const projectPath = meta.APP_DIR || '';
-      const { files, env } = pickEnvDetails(projectPath);
+      const { files, env, saveTarget } = pickEnvDetails(projectPath);
       const backups = listProjectEnvBackups(ref);
 
       if (req.method === 'GET' && !mode) {
@@ -5923,6 +6074,7 @@ async function handleRequest(req, res) {
           project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
           files,
           env,
+          saveTarget,
           backups,
           latestBackup: backups[0] || null,
         });
@@ -5959,6 +6111,36 @@ async function handleRequest(req, res) {
           ok: true,
           message: `Environment backup saved for ${ref}`,
           backup,
+          backups: refreshedBackups,
+          latestBackup: refreshedBackups[0] || null,
+        });
+        return;
+      }
+
+      if (req.method === 'POST' && mode === 'save') {
+        if (!projectPath || !fs.existsSync(projectPath)) {
+          throw new Error(`Project path not found for ${ref}`);
+        }
+        const body = await readBody(req);
+        const parsedEnv = parseEnvText(body.envText || '');
+        const targetPath = chooseProjectEnvSaveTarget(projectPath, files);
+        if (!targetPath) {
+          throw new Error(`Unable to choose env save target for ${ref}`);
+        }
+        const autoBackup = createProjectEnvBackup(ref, projectPath);
+        fs.writeFileSync(targetPath, serializeEnvText(parsedEnv), 'utf8');
+        fs.chmodSync(targetPath, 0o600);
+        runProjectCtl(['restart', ref]);
+        const refreshed = pickEnvDetails(projectPath);
+        const refreshedBackups = listProjectEnvBackups(ref);
+        sendJson(res, 200, {
+          ok: true,
+          message: `Environment values saved for ${ref} in ${path.basename(targetPath)}`,
+          autoBackup,
+          project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
+          files: refreshed.files,
+          env: refreshed.env,
+          saveTarget: refreshed.saveTarget,
           backups: refreshedBackups,
           latestBackup: refreshedBackups[0] || null,
         });
