@@ -48,6 +48,36 @@ Recommended:
 - `PREINSTALL_REQUIREMENTS.md`
 - `EMBEDDING_GUIDE.md` if the app has a special embedding or model setup
 
+## Script Location and Naming Contract
+
+Multidev works best when the repo has a clear, canonical script layout.
+
+Preferred location:
+- keep the canonical install/runtime scripts in the root `package.json`
+- if `server/` or `client/` have their own `package.json`, root scripts should proxy to them
+- do not rely on a manual command that only lives inside a subfolder
+
+Preferred names:
+- `start` for the production runtime entry
+- `prod` if the project needs an explicit production command separate from `start`
+- `build` for the production build step
+- `install:all` for a full dependency install across root, `server/`, and `client/`
+- `db:init`, `db:seed`, `db:migrate` for schema and seed flows
+
+Good examples:
+- `npm start`
+- `npm run prod`
+- `npm run build`
+- `npm run db:init`
+- `npm run db:seed`
+
+If the real runtime script only exists in `server/` or `client/`, make a root-level alias for it so Multidev can detect and run it consistently.
+
+Avoid:
+- only-named local commands that do not map to one of the canonical names above
+- hidden install steps that require a human to `cd server` or `cd client`
+- changing the runtime command after install without exposing it through `package.json`
+
 ## Environment File Contract
 
 The repo should ship env templates with all keys the app expects.

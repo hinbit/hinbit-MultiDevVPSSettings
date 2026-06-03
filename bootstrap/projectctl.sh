@@ -161,22 +161,24 @@ project_db_value() {
   printf '%s' ""
 }
 
-project_db_password_from_existing_project() {
+project_db_credentials_from_existing_project() {
   local db_name="$1"
-  local db_user="$2"
 
   [[ -n "${db_name}" ]] || return 0
-  [[ -n "${db_user}" ]] || return 0
 
-  python3 - "${META_DIR}" "${db_name}" "${db_user}" <<'PY'
+  python3 - "${APP_ROOT}" "${db_name}" <<'PY'
 import glob
 import os
 import sys
 
-meta_dir, db_name, db_user = sys.argv[1:4]
+app_root, db_name = sys.argv[1:3]
 keys_name = ("DB_NAME", "DB_DATABASE", "MYSQL_DATABASE", "POSTGRES_DB")
 keys_user = ("DB_USER", "MYSQL_USER", "POSTGRES_USER")
 keys_password = ("DB_PASSWORD", "MYSQL_PASSWORD", "POSTGRES_PASSWORD")
+candidate_patterns = (
+    os.path.join(app_root, "*", ".env"),
+    os.path.join(app_root, "*", "server", ".env"),
+)
 
 def parse_env(path):
     data = {}
@@ -196,15 +198,19 @@ def parse_env(path):
         return {}
     return data
 
-for path in sorted(glob.glob(os.path.join(meta_dir, "*.env"))):
+paths = []
+for pattern in candidate_patterns:
+    paths.extend(glob.glob(pattern))
+
+for path in sorted(set(paths)):
     data = parse_env(path)
     if not data:
         continue
     existing_name = next((str(data.get(key, "")).strip() for key in keys_name if str(data.get(key, "")).strip()), "")
     existing_user = next((str(data.get(key, "")).strip() for key in keys_user if str(data.get(key, "")).strip()), "")
     existing_password = next((str(data.get(key, "")).strip() for key in keys_password if str(data.get(key, "")).strip()), "")
-    if existing_name == db_name and existing_user == db_user and existing_password:
-        print(existing_password)
+    if existing_name == db_name and existing_user and existing_password:
+        print(f"{existing_user}\t{existing_password}")
         break
 PY
 }
@@ -498,7 +504,17 @@ sync_project_db_env() {
 
   [[ -n "${db_name}" ]] || db_name="${default_db_name}"
   [[ -n "${db_user}" ]] || db_user="${default_db_user}"
-  [[ -n "${db_password}" ]] || db_password="$(project_db_password_from_existing_project "${db_name}" "${db_user}")"
+  if [[ -z "${db_password}" ]]; then
+    local existing_credentials=""
+    local existing_user=""
+    local existing_password=""
+    existing_credentials="$(project_db_credentials_from_existing_project "${db_name}")"
+    if [[ -n "${existing_credentials}" ]]; then
+      IFS=$'\t' read -r existing_user existing_password <<< "${existing_credentials}"
+      [[ -n "${existing_user}" ]] && db_user="${existing_user}"
+      [[ -n "${existing_password}" ]] && db_password="${existing_password}"
+    fi
+  fi
   [[ -n "${db_password}" ]] || db_password="$(generate_secret)"
   [[ -n "${db_type}" ]] || db_type="mysql"
 
