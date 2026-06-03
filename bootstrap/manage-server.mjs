@@ -4010,23 +4010,29 @@ function renderPage() {
 
     function shellQuoteEnvValue(value) {
       const raw = String(value ?? '');
-      const backtick = String.fromCharCode(96);
       const backslash = String.fromCharCode(92);
-      return '"' + raw
-        .replace(/\\/g, '\\\\')
-        .replace(/"/g, '\\"')
-        .replace(/\$/g, '\\$')
-        .replace(new RegExp(backtick, 'g'), backslash + backtick)
-        .replace(/\n/g, '\\n')
-        .replace(/\r/g, '\\r')
-        .replace(/\t/g, '\\t') + '"';
+      const quote = String.fromCharCode(34);
+      const backtick = String.fromCharCode(96);
+      const newline = String.fromCharCode(10);
+      const carriageReturn = String.fromCharCode(13);
+      const tab = String.fromCharCode(9);
+      return quote
+        + raw.split(backslash).join(backslash + backslash)
+          .split(quote).join(backslash + quote)
+          .split('$').join(backslash + '$')
+          .split(backtick).join(backslash + backtick)
+          .split(newline).join(backslash + 'n')
+          .split(carriageReturn).join(backslash + 'r')
+          .split(tab).join(backslash + 't')
+        + quote;
     }
 
     function serializeEnvTextFromObject(env) {
       const entries = Object.entries(env || {})
         .filter(([key]) => String(key || '').trim())
         .sort(([a], [b]) => a.localeCompare(b));
-      return entries.map(([key, value]) => key + '=' + shellQuoteEnvValue(value)).join('\n') + (entries.length ? '\n' : '');
+      const newline = String.fromCharCode(10);
+      return entries.map(([key, value]) => key + '=' + shellQuoteEnvValue(value)).join(newline) + (entries.length ? newline : '');
     }
 
     function renderDbMachineSelectOptions(machines, selectedId, includeCustom = false) {
