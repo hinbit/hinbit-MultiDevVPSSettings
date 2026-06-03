@@ -1653,11 +1653,18 @@ start_kind_target() {
 
 ecosystem_pm2_name() {
   local ecosystem_file="${1:-}"
+  local resolved_file=""
 
   [[ -n "${ecosystem_file}" ]] || return 1
   [[ -f "${APP_DIR}/${ecosystem_file}" ]] || [[ -f "${ecosystem_file}" ]] || return 1
 
-  node - "${ecosystem_file}" <<'NODE'
+  if [[ "${ecosystem_file}" == /* ]]; then
+    resolved_file="${ecosystem_file}"
+  else
+    resolved_file="${APP_DIR}/${ecosystem_file}"
+  fi
+
+  node - "${resolved_file}" <<'NODE'
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
