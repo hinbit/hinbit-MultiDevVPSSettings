@@ -2208,17 +2208,6 @@ do_install() {
     custom_db_machine=1
   fi
 
-  if [[ "${custom_db_machine}" -eq 0 ]]; then
-    resolve_db_machine "${DB_MACHINE_ID}"
-    write_meta "${meta}"
-    chmod 0644 "${meta}"
-    sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
-  else
-    write_meta "${meta}"
-    chmod 0644 "${meta}"
-    sync_project_db_machine_env "custom" "" "" "" "" "Custom / manual DB machine" "Configure DB host and credentials in MySQL Access after install"
-  fi
-
   PACKAGE_MANAGER="$(cd "${APP_DIR}" && detect_package_manager)"
 
   if [[ -n "${entrypoint}" ]]; then
@@ -2232,6 +2221,17 @@ do_install() {
   fi
   START_TARGET="$(start_kind_target "${START_KIND}")"
   APP_TYPE="$(start_kind_family "${START_KIND}")"
+
+  if [[ "${custom_db_machine}" -eq 0 ]]; then
+    resolve_db_machine "${DB_MACHINE_ID}"
+    write_meta "${meta}"
+    chmod 0644 "${meta}"
+    sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
+  else
+    write_meta "${meta}"
+    chmod 0644 "${meta}"
+    sync_project_db_machine_env "custom" "" "" "" "" "Custom / manual DB machine" "Configure DB host and credentials in MySQL Access after install"
+  fi
 
   (
     cd "${APP_DIR}"
