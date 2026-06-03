@@ -125,6 +125,7 @@ If the repo lives under a GitHub account that is not the server's default GitHub
 If HTTPS is not ready yet, the install still completes and the app is left on HTTP until DNS and certificate provisioning finish. Re-run `sudo app-sync.sh` after the domain resolves to the VPS to activate the SSL vhost.
 The `/manage/` install flow also scans root, `server/`, and `client/` package manifests for DB-related scripts and shows the runnable ones after install.
 Use `/manage/tls/` to store a shared base-domain certificate like `seach.co.il` if you want new subdomains to inherit it automatically until a project-specific certificate is added.
+`projectctl install` and `projectctl update` also normalize deployment-oriented env keys from local/dev values to server/web values when the repo ships them in `.env` or `.env.example`-style templates. In practice, this means values like `SERVER_LOCATION=local` are rewritten for the VPS/web runtime, and URL-style settings are pointed at the installed domain when the template provides a production/web target.
 
 ```bash
 projectctl install --domain example.com --branch main --pm2-name example-app --db-machine local-current owner/repo
