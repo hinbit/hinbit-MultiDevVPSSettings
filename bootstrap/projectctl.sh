@@ -53,7 +53,7 @@ Usage:
   projectctl status owner/repo
   projectctl script [--pm2] [--dir path] owner/repo package-script
   projectctl password [--password secret|--clear] owner/repo
-  projectctl mysql [--machine id] [--ips ip1,ip2] owner/repo
+  projectctl mysql [--machine id] [--machine-name name] [--machine-host host] [--machine-port port] [--machine-root-user user] [--machine-root-password password] [--machine-notes notes] [--ips ip1,ip2] owner/repo
   projectctl ssh [--password secret|--generate] owner/repo
   projectctl uninstall owner/repo
   projectctl list
@@ -139,6 +139,12 @@ project_env_value() {
     fi
   done
 
+  if [[ "${#value}" -ge 2 && "${value:0:1}" == "'"'"'" && "${value: -1}" == "'"'"'" ]]; then
+    value="${value:1:${#value}-2}"
+  elif [[ "${#value}" -ge 2 && "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
+    value="${value:1:${#value}-2}"
+  fi
+
   printf '%s' "${value}"
 }
 
@@ -153,6 +159,35 @@ project_db_value() {
     fi
   done
   printf '%s' ""
+}
+
+project_custom_db_machine_details() {
+  local machine_name=""
+  local machine_host=""
+  local machine_root_user=""
+  local machine_root_password=""
+  local machine_port=""
+  local machine_notes=""
+
+  machine_name="$(project_db_value DB_MACHINE_NAME)"
+  machine_host="$(project_db_value DB_MACHINE_HOST DB_HOST MYSQL_HOST POSTGRES_HOST)"
+  machine_root_user="$(project_db_value DB_MACHINE_ROOT_USER)"
+  machine_root_password="$(project_db_value DB_MACHINE_ROOT_PASSWORD)"
+  machine_port="$(project_db_value DB_MACHINE_PORT DB_PORT MYSQL_PORT POSTGRES_PORT)"
+  machine_notes="$(project_db_value DB_MACHINE_NOTES)"
+
+  [[ -n "${machine_host}" ]] || return 1
+  [[ -n "${machine_name}" ]] || machine_name="custom"
+  [[ -n "${machine_root_user}" ]] || machine_root_user="root"
+  [[ -n "${machine_port}" ]] || machine_port="3306"
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "${machine_name}" \
+    "${machine_host}" \
+    "${machine_root_user}" \
+    "${machine_root_password}" \
+    "${machine_port}" \
+    "${machine_notes}"
 }
 
 repo_name_from_ref() {
@@ -714,20 +749,36 @@ ensure_local_db_machine_password() {
 
 resolve_db_machine() {
   local machine_id="${1:-${LOCAL_DB_MACHINE_ID}}"
-  local machine
+  local machine_output=""
 
-  mapfile -t machine_fields < <(db_machine_record "${machine_id}") || die "Unknown DB machine: ${machine_id}"
-  DB_MACHINE_ID="${machine_fields[0]:-${LOCAL_DB_MACHINE_ID}}"
-  DB_MACHINE_NAME="${machine_fields[1]:-}"
-  DB_MACHINE_HOST="${machine_fields[2]:-127.0.0.1}"
-  DB_MACHINE_ROOT_USER="${machine_fields[3]:-root}"
-  DB_MACHINE_ROOT_PASSWORD="${machine_fields[4]:-}"
-  DB_MACHINE_PORT="${machine_fields[5]:-3306}"
-  DB_MACHINE_NOTES="${machine_fields[6]:-}"
+  if machine_output="$(db_machine_record "${machine_id}" 2>/dev/null)"; then
+    mapfile -t machine_fields <<< "${machine_output}"
+    DB_MACHINE_ID="${machine_fields[0]:-${LOCAL_DB_MACHINE_ID}}"
+    DB_MACHINE_NAME="${machine_fields[1]:-}"
+    DB_MACHINE_HOST="${machine_fields[2]:-127.0.0.1}"
+    DB_MACHINE_ROOT_USER="${machine_fields[3]:-root}"
+    DB_MACHINE_ROOT_PASSWORD="${machine_fields[4]:-}"
+    DB_MACHINE_PORT="${machine_fields[5]:-3306}"
+    DB_MACHINE_NOTES="${machine_fields[6]:-}"
+  else
+    if machine_output="$(project_custom_db_machine_details 2>/dev/null)"; then
+      mapfile -t machine_fields <<< "${machine_output}"
+      DB_MACHINE_ID="${machine_id:-custom}"
+      DB_MACHINE_NAME="${machine_fields[0]:-custom}"
+      DB_MACHINE_HOST="${machine_fields[1]:-}"
+      DB_MACHINE_ROOT_USER="${machine_fields[2]:-root}"
+      DB_MACHINE_ROOT_PASSWORD="${machine_fields[3]:-}"
+      DB_MACHINE_PORT="${machine_fields[4]:-3306}"
+      DB_MACHINE_NOTES="${machine_fields[5]:-}"
+    else
+      die "Unknown DB machine: ${machine_id}"
+    fi
+  fi
 
   if [[ "${DB_MACHINE_ID}" == "${LOCAL_DB_MACHINE_ID}" ]]; then
     ensure_local_db_machine_password
-    mapfile -t machine_fields < <(db_machine_record "${LOCAL_DB_MACHINE_ID}") || die "Unknown DB machine: ${LOCAL_DB_MACHINE_ID}"
+    machine_output="$(db_machine_record "${LOCAL_DB_MACHINE_ID}" 2>/dev/null)" || die "Unknown DB machine: ${LOCAL_DB_MACHINE_ID}"
+    mapfile -t machine_fields <<< "${machine_output}"
     DB_MACHINE_ID="${machine_fields[0]:-${LOCAL_DB_MACHINE_ID}}"
     DB_MACHINE_NAME="${machine_fields[1]:-}"
     DB_MACHINE_HOST="${machine_fields[2]:-127.0.0.1}"
@@ -761,6 +812,10 @@ ensure_db_root_hosts() {
   local sql_file=""
   local ssh_key=""
   local ssh_target=""
+
+  if [[ "${machine_id}" == "custom" ]]; then
+    return 0
+  fi
 
   resolve_db_machine "${machine_id}"
   root_password="${DB_MACHINE_ROOT_PASSWORD:-}"
@@ -878,6 +933,8 @@ sync_project_db_machine_env() {
   local machine_port="${3:-3306}"
   local machine_root_user="${4:-root}"
   local machine_root_password="${5:-}"
+  local machine_name="${6:-}"
+  local machine_notes="${7:-}"
   local env_file="${APP_DIR}/.env.machine"
   local db_type=""
   local project_env=""
@@ -885,6 +942,12 @@ sync_project_db_machine_env() {
   touch "${env_file}"
   chmod 0600 "${env_file}"
   update_meta_value "${env_file}" "DB_MACHINE_ID" "${machine_id}"
+  update_meta_value "${env_file}" "DB_MACHINE_NAME" "${machine_name}"
+  update_meta_value "${env_file}" "DB_MACHINE_HOST" "${machine_host}"
+  update_meta_value "${env_file}" "DB_MACHINE_PORT" "${machine_port}"
+  update_meta_value "${env_file}" "DB_MACHINE_ROOT_USER" "${machine_root_user}"
+  update_meta_value "${env_file}" "DB_MACHINE_ROOT_PASSWORD" "${machine_root_password}"
+  update_meta_value "${env_file}" "DB_MACHINE_NOTES" "${machine_notes}"
   update_meta_value "${env_file}" "DB_HOST" "${machine_host}"
   update_meta_value "${env_file}" "DB_PORT" "${machine_port}"
   update_meta_value "${env_file}" "MYSQL_HOST" "${machine_host}"
@@ -1013,6 +1076,42 @@ with open(out_path, 'w', encoding='utf-8', errors='surrogateescape') as handle:
 PY
   cp -p "${tmp}" "${dest_file}"
   rm -f "${tmp}" >/dev/null 2>&1 || true
+}
+
+seed_project_env_from_templates() {
+  local project_dir="${1:-${APP_DIR}}"
+  local candidate=""
+  local template=""
+  local suffix=""
+  local -a template_suffixes=(".example" ".sample" ".template" ".default")
+
+  [[ -d "${project_dir}" ]] || return 0
+
+  for candidate in ".env" ".env.local" ".env.production" ".env.credentials" ".env.production.local" ".env.development"; do
+    template=""
+    for suffix in "${template_suffixes[@]}"; do
+      if [[ -f "${project_dir}/${candidate}${suffix}" ]]; then
+        template="${project_dir}/${candidate}${suffix}"
+        break
+      fi
+    done
+    if [[ -z "${template}" && "${candidate}" == ".env" ]]; then
+      for suffix in "${template_suffixes[@]}"; do
+        if [[ -f "${project_dir}/.env${suffix}" ]]; then
+          template="${project_dir}/.env${suffix}"
+          break
+        fi
+      done
+    fi
+    [[ -n "${template}" ]] || continue
+
+    if [[ -f "${project_dir}/${candidate}" ]]; then
+      merge_env_file_preserving_current_values "${project_dir}/${candidate}" "${template}" "${project_dir}/${candidate}"
+    else
+      cp -p "${template}" "${project_dir}/${candidate}"
+    fi
+    normalize_env_file_shell_safe "${project_dir}/${candidate}"
+  done
 }
 
 ensure_meta_dir() {
@@ -1806,6 +1905,7 @@ do_install() {
     git -C "${APP_DIR}" update-index --skip-worktree .env >/dev/null 2>&1 || true
   fi
 
+  seed_project_env_from_templates "${APP_DIR}"
   sync_project_runtime_ports "${APP_PORT}" "${APP_DIR}"
   local db_name=""
   local db_user=""
@@ -1843,7 +1943,7 @@ do_install() {
   resolve_db_machine "${DB_MACHINE_ID}"
   write_meta "${meta}"
   chmod 0644 "${meta}"
-  sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}"
+  sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
 
   ensure_project_ssh_user "${SSH_UPLOAD_USER}" "${SSH_UPLOAD_PASSWORD}" "${APP_DIR}"
   refresh_project_ssh_config
@@ -1872,13 +1972,14 @@ do_update() {
     DB_MACHINE_ID="$(project_db_machine_id)"
   fi
   resolve_db_machine "${DB_MACHINE_ID:-${LOCAL_DB_MACHINE_ID}}"
-  sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}"
+  sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
 
   [[ -d "${APP_DIR}/.git" ]] || die "Missing git repo at ${APP_DIR}"
 
   (
     cd "${APP_DIR}"
     pull_repo_with_optional_stash "${APP_DIR}" "${BRANCH}" "${REPO_URL}"
+    seed_project_env_from_templates "${APP_DIR}"
     sync_project_runtime_ports "${APP_PORT}" "${APP_DIR}"
     install_deps
     maybe_build
@@ -2182,6 +2283,12 @@ do_mysql() {
   local ref="$1"
   local ips="${2-__unset__}"
   local machine_id="${3:-__unset__}"
+  local machine_name="${4:-__unset__}"
+  local machine_host="${5:-__unset__}"
+  local machine_port="${6:-__unset__}"
+  local machine_root_user="${7:-__unset__}"
+  local machine_root_password="${8:-__unset__}"
+  local machine_notes="${9:-__unset__}"
   local slug
   local meta
   local old_ips
@@ -2195,12 +2302,24 @@ do_mysql() {
   local active_machine_name
   local active_machine_root_user
   local active_machine_root_password
+  local active_machine_notes
   local current_machine_id
   local mutate="no"
+  local custom_requested="no"
+  local custom_machine_name=""
+  local custom_machine_host=""
+  local custom_machine_port=""
+  local custom_machine_root_user=""
+  local custom_machine_root_password=""
+  local custom_machine_notes=""
 
   slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
+
+  if [[ "${machine_name}" != "__unset__" || "${machine_host}" != "__unset__" || "${machine_port}" != "__unset__" || "${machine_root_user}" != "__unset__" || "${machine_root_password}" != "__unset__" || "${machine_notes}" != "__unset__" ]]; then
+    custom_requested="yes"
+  fi
 
   old_ips="${MYSQL_ALLOWED_IPS:-}"
   current_machine_id="$(project_db_machine_id)"
@@ -2215,6 +2334,31 @@ do_mysql() {
     mutate="yes"
   fi
 
+  if [[ "${custom_requested}" == "yes" ]]; then
+    active_machine_id="custom"
+    mutate="yes"
+    custom_machine_name="${machine_name}"
+    custom_machine_host="${machine_host}"
+    custom_machine_port="${machine_port}"
+    custom_machine_root_user="${machine_root_user}"
+    custom_machine_root_password="${machine_root_password}"
+    custom_machine_notes="${machine_notes}"
+    [[ "${custom_machine_name}" != "__unset__" ]] || custom_machine_name="$(project_db_value DB_MACHINE_NAME)"
+    [[ "${custom_machine_host}" != "__unset__" ]] || custom_machine_host="$(project_db_value DB_MACHINE_HOST DB_HOST MYSQL_HOST POSTGRES_HOST)"
+    [[ "${custom_machine_port}" != "__unset__" ]] || custom_machine_port="$(project_db_value DB_MACHINE_PORT DB_PORT MYSQL_PORT POSTGRES_PORT)"
+    [[ "${custom_machine_root_user}" != "__unset__" ]] || custom_machine_root_user="$(project_db_value DB_MACHINE_ROOT_USER)"
+    [[ "${custom_machine_root_password}" != "__unset__" ]] || custom_machine_root_password="$(project_db_value DB_MACHINE_ROOT_PASSWORD)"
+    [[ "${custom_machine_notes}" != "__unset__" ]] || custom_machine_notes="$(project_db_value DB_MACHINE_NOTES)"
+    [[ -n "${custom_machine_name}" ]] || custom_machine_name="custom"
+    [[ -n "${custom_machine_host}" ]] || die "Missing custom DB machine host"
+    [[ -n "${custom_machine_port}" ]] || custom_machine_port="3306"
+    [[ -n "${custom_machine_root_user}" ]] || custom_machine_root_user="root"
+    if [[ ! "${custom_machine_host}" =~ ^(localhost|127\.0\.0\.1|::1)$ && -z "${custom_machine_root_password}" ]]; then
+      die "Missing custom DB machine root password"
+    fi
+    sync_project_db_machine_env "${active_machine_id}" "${custom_machine_host}" "${custom_machine_port}" "${custom_machine_root_user}" "${custom_machine_root_password}" "${custom_machine_name}" "${custom_machine_notes}"
+  fi
+
   if [[ "${mutate}" != "yes" ]]; then
     db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
     db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
@@ -2225,6 +2369,7 @@ do_mysql() {
     active_machine_port="${DB_MACHINE_PORT}"
     active_machine_root_user="${DB_MACHINE_ROOT_USER}"
     active_machine_root_password="${DB_MACHINE_ROOT_PASSWORD}"
+    active_machine_notes="${DB_MACHINE_NOTES}"
     printf 'repo: %s\npath: %s\ndb: %s\nuser: %s\npassword: %s\nallowed_ips: %s\n' \
       "${REPO_REF}" "${APP_DIR}" \
       "${db_name}" \
@@ -2237,6 +2382,7 @@ do_mysql() {
     printf 'db_machine_port: %s\n' "${active_machine_port}"
     printf 'db_machine_root_user: %s\n' "${active_machine_root_user}"
     printf 'db_machine_root_password: %s\n' "${active_machine_root_password}"
+    printf 'db_machine_notes: %s\n' "${active_machine_notes}"
     if [[ -n "${db_user}" ]]; then
       printf 'mysql_accounts:\n%s\n' "$(read_mysql_accounts "${db_user}" "${active_machine_id}")"
     fi
@@ -2253,9 +2399,13 @@ do_mysql() {
   db_password="$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)"
 
   MYSQL_ALLOWED_IPS="${new_ips}"
+  if [[ "${custom_requested}" != "yes" ]]; then
+    resolve_db_machine "${active_machine_id}"
+    sync_project_db_machine_env "${active_machine_id}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
+  else
+    resolve_db_machine "${active_machine_id}"
+  fi
   sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS}" "${old_ips}" "${active_machine_id}"
-  resolve_db_machine "${active_machine_id}"
-  sync_project_db_machine_env "${active_machine_id}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}"
   update_meta_value "${meta}" "MYSQL_ALLOWED_IPS" "${MYSQL_ALLOWED_IPS}"
   update_meta_value "${meta}" "DB_MACHINE_ID" "${active_machine_id}"
   printf '[projectctl] mysql permissions updated for %s (%s)\n' "${REPO_REF}" "${MYSQL_ALLOWED_IPS:-local only}"
@@ -2474,6 +2624,12 @@ main() {
     mysql)
       local ips="__unset__"
       local machine_id="__unset__"
+      local machine_name="__unset__"
+      local machine_host="__unset__"
+      local machine_port="__unset__"
+      local machine_root_user="__unset__"
+      local machine_root_password="__unset__"
+      local machine_notes="__unset__"
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --ips)
@@ -2482,6 +2638,30 @@ main() {
             ;;
           --machine)
             machine_id="${2:-}"
+            shift 2
+            ;;
+          --machine-name)
+            machine_name="${2:-}"
+            shift 2
+            ;;
+          --machine-host)
+            machine_host="${2:-}"
+            shift 2
+            ;;
+          --machine-port)
+            machine_port="${2:-}"
+            shift 2
+            ;;
+          --machine-root-user)
+            machine_root_user="${2:-}"
+            shift 2
+            ;;
+          --machine-root-password)
+            machine_root_password="${2:-}"
+            shift 2
+            ;;
+          --machine-notes)
+            machine_notes="${2:-}"
             shift 2
             ;;
           --help|-h)
@@ -2494,7 +2674,7 @@ main() {
         esac
       done
       [[ $# -eq 1 ]] || { usage; exit 1; }
-      do_mysql "$1" "${ips}" "${machine_id}"
+      do_mysql "$1" "${ips}" "${machine_id}" "${machine_name}" "${machine_host}" "${machine_port}" "${machine_root_user}" "${machine_root_password}" "${machine_notes}"
       ;;
     ssh)
       local password=""

@@ -24,6 +24,7 @@ const PORT = Number(process.env.MANAGE_PORT || 8090);
 const BIND_HOST = process.env.MANAGE_BIND_HOST || '0.0.0.0';
 const PASSWORD = process.env.MANAGE_PASSWORD || '';
 const LOCAL_DB_MACHINE_ID = 'local-current';
+const CUSTOM_DB_MACHINE_ID = 'custom';
 const LOCAL_DB_MACHINE = {
   id: LOCAL_DB_MACHINE_ID,
   name: 'localhost (current)',
@@ -104,7 +105,10 @@ function parseEnvFile(filePath) {
     const idx = line.indexOf('=');
     if (idx === -1) continue;
     const key = line.slice(0, idx).trim();
-    const value = line.slice(idx + 1).trim();
+    let value = line.slice(idx + 1).trim();
+    if (value.length >= 2 && ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith('"') && value.endsWith('"')))) {
+      value = value.slice(1, -1);
+    }
     data[key] = value;
   }
   return data;
@@ -391,6 +395,13 @@ function pickDbDetails(projectPath) {
     'DB_DATABASE',
     'DB_USER',
     'DB_PASSWORD',
+    'DB_MACHINE_ID',
+    'DB_MACHINE_NAME',
+    'DB_MACHINE_HOST',
+    'DB_MACHINE_PORT',
+    'DB_MACHINE_ROOT_USER',
+    'DB_MACHINE_ROOT_PASSWORD',
+    'DB_MACHINE_NOTES',
     'DB_HOST',
     'DB_PORT',
     'MYSQL_DATABASE',
@@ -431,9 +442,69 @@ function readProjectGitStatus(projectPath) {
   }
 }
 
-function mysqlExecForMachine(machineId, query) {
+function normalizeMysqlMachine(machineOrId) {
+  if (machineOrId && typeof machineOrId === 'object' && !Array.isArray(machineOrId)) {
+    return {
+      id: String(machineOrId.id || CUSTOM_DB_MACHINE_ID).trim() || CUSTOM_DB_MACHINE_ID,
+      name: String(machineOrId.name || 'custom').trim() || 'custom',
+      host: String(machineOrId.host || '').trim(),
+      rootUser: String(machineOrId.rootUser || machineOrId.user || 'root').trim() || 'root',
+      rootPassword: String(machineOrId.rootPassword || machineOrId.password || '').trim(),
+      port: String(machineOrId.port || '3306').trim() || '3306',
+      notes: String(machineOrId.notes || '').trim(),
+      originHost: String(machineOrId.originHost || '').trim(),
+    };
+  }
+
   const machines = readDbMachines();
-  const machine = machines.find((item) => String(item.id) === String(machineId)) || machines.find((item) => String(item.id) === LOCAL_DB_MACHINE_ID) || LOCAL_DB_MACHINE;
+  return machines.find((item) => String(item.id) === String(machineOrId))
+    || machines.find((item) => String(item.id) === LOCAL_DB_MACHINE_ID)
+    || LOCAL_DB_MACHINE;
+}
+
+function resolveProjectMysqlMachine(meta, projectPath) {
+  const { db } = pickDbDetails(projectPath);
+  const machines = readDbMachines();
+  const machineId = String(meta.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID).trim() || LOCAL_DB_MACHINE_ID;
+  const machine = machines.find((item) => String(item.id) === machineId) || null;
+  if (machine) {
+    return {
+      machine,
+      isCustom: false,
+    };
+  }
+
+  const host = String(db.DB_MACHINE_HOST || db.DB_HOST || db.MYSQL_HOST || db.POSTGRES_HOST || '').trim();
+  if (!host) {
+    return {
+      machine: null,
+      isCustom: false,
+    };
+  }
+
+  const machineName = String(db.DB_MACHINE_NAME || 'Custom DB machine').trim() || 'Custom DB machine';
+  const port = String(db.DB_MACHINE_PORT || db.DB_PORT || db.MYSQL_PORT || db.POSTGRES_PORT || '3306').trim() || '3306';
+  const rootUser = String(db.DB_MACHINE_ROOT_USER || 'root').trim() || 'root';
+  const rootPassword = String(db.DB_MACHINE_ROOT_PASSWORD || '').trim();
+  const notes = String(db.DB_MACHINE_NOTES || '').trim();
+
+  return {
+    machine: {
+      id: CUSTOM_DB_MACHINE_ID,
+      name: machineName,
+      host,
+      rootUser,
+      rootPassword,
+      port,
+      notes,
+      originHost: '',
+    },
+    isCustom: true,
+  };
+}
+
+function mysqlExecForMachine(machineOrId, query) {
+  const machine = normalizeMysqlMachine(machineOrId);
   const host = String(machine.host || '127.0.0.1').trim();
   const port = String(machine.port || '3306').trim() || '3306';
   const user = String(machine.rootUser || 'root').trim() || 'root';
@@ -1110,6 +1181,8 @@ function projectView() {
     const proc = byName.get(project.PM2_NAME || project.PROJECT_SLUG);
     const env = proc?.pm2_env || {};
     const { db } = pickDbDetails(project.APP_DIR || '');
+    const projectMachineContext = resolveProjectMysqlMachine(project, project.APP_DIR || '');
+    const projectMachine = projectMachineContext.machine || null;
     const disk = readProjectDiskUsage(project.APP_DIR || '');
     const ssl = readProjectSslStatus(project);
     return {
@@ -1126,6 +1199,12 @@ function projectView() {
       packageManager: project.PACKAGE_MANAGER || '',
       mysqlAllowedIps: project.MYSQL_ALLOWED_IPS || '',
       dbMachineId: project.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID,
+      dbMachineLabel: projectMachine ? describeDbMachine(projectMachine) : (project.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID),
+      dbMachineHost: projectMachine?.originHost || projectMachine?.host || '',
+      dbMachineRootUser: projectMachine?.rootUser || '',
+      dbMachineRootPassword: projectMachine?.rootPassword || '',
+      dbMachineNotes: projectMachine?.notes || '',
+      dbMachineMode: projectMachineContext.isCustom ? 'custom' : 'global',
       sshUser: project.SSH_UPLOAD_USER || '',
       sshPassword: project.SSH_UPLOAD_PASSWORD || '',
       disk,
@@ -3369,6 +3448,27 @@ function renderPage() {
           <label>DB machine
             <select id="mysqlMachineSelect"></select>
           </label>
+          <div id="mysqlCustomFields" class="stack" hidden>
+            <div class="small">Custom / manual DB machine values are saved only for this project in <code>.env.machine</code>.</div>
+            <label>Custom DB machine name
+              <input id="mysqlCustomName" type="text" placeholder="Custom DB machine">
+            </label>
+            <label>Custom DB host
+              <input id="mysqlCustomHost" type="text" placeholder="10.0.0.5">
+            </label>
+            <label>Custom DB port
+              <input id="mysqlCustomPort" type="number" min="1" max="65535" placeholder="3306">
+            </label>
+            <label>Custom DB root user
+              <input id="mysqlCustomRootUser" type="text" placeholder="root">
+            </label>
+            <label>Custom DB root password
+              <input id="mysqlCustomRootPassword" type="password" placeholder="••••••••">
+            </label>
+            <label>Custom DB notes
+              <textarea id="mysqlCustomNotes" placeholder="Optional notes for this project only"></textarea>
+            </label>
+          </div>
           <label>Allowed IPs / CIDRs
             <textarea id="mysqlIpsInput" placeholder="198.51.100.10,203.0.113.0/24"></textarea>
           </label>
@@ -3494,6 +3594,7 @@ function renderPage() {
   <script>
     const API = '/manage/api';
     const initialProjects = ${initialProjects};
+    const CUSTOM_DB_MACHINE_ID = '${CUSTOM_DB_MACHINE_ID}';
     const projectsBody = document.getElementById('projectsBody');
     const listResult = document.getElementById('listResult');
     const installResult = document.getElementById('installResult');
@@ -3521,6 +3622,13 @@ function renderPage() {
     const mysqlDetails = document.getElementById('mysqlDetails');
     const mysqlFlash = document.getElementById('mysqlFlash');
     const mysqlMachineSelect = document.getElementById('mysqlMachineSelect');
+    const mysqlCustomFields = document.getElementById('mysqlCustomFields');
+    const mysqlCustomName = document.getElementById('mysqlCustomName');
+    const mysqlCustomHost = document.getElementById('mysqlCustomHost');
+    const mysqlCustomPort = document.getElementById('mysqlCustomPort');
+    const mysqlCustomRootUser = document.getElementById('mysqlCustomRootUser');
+    const mysqlCustomRootPassword = document.getElementById('mysqlCustomRootPassword');
+    const mysqlCustomNotes = document.getElementById('mysqlCustomNotes');
     const mysqlIpsInput = document.getElementById('mysqlIpsInput');
     const mysqlAccounts = document.getElementById('mysqlAccounts');
     const mysqlPhpMyAdminBtn = document.getElementById('mysqlPhpMyAdminBtn');
@@ -3625,9 +3733,12 @@ function renderPage() {
       return (size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)) + ' ' + units[unit];
     }
 
-    function renderDbMachineSelectOptions(machines, selectedId) {
+    function renderDbMachineSelectOptions(machines, selectedId, includeCustom = false) {
       const list = Array.isArray(machines) && machines.length ? machines : [{ id: '${LOCAL_DB_MACHINE_ID}', name: 'localhost (current)', host: '127.0.0.1' }];
-      return list.map((machine) => {
+      const items = includeCustom
+        ? [{ id: CUSTOM_DB_MACHINE_ID, name: 'Custom / manual DB machine', host: '', notes: 'Saved per project only' }, ...list]
+        : list;
+      return items.map((machine) => {
         const id = String(machine.id || '');
         const name = (machine.name || id).trim() || id;
         const host = String(machine.host || '').trim();
@@ -3644,6 +3755,30 @@ function renderPage() {
         const label = labelParts.filter(Boolean).join(' · ');
         return '<option value="' + escapeHtml(id) + '"' + (id === String(selectedId || '') ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
       }).join('');
+    }
+
+    function isCustomMysqlMachine(details) {
+      if (!details) return false;
+      if (String(details.dbMachineId || '') === CUSTOM_DB_MACHINE_ID) return true;
+      if (details.dbMachineCustom) return true;
+      const selectedId = String(details.dbMachineId || '');
+      if (!selectedId) return false;
+      return !Array.isArray(currentDbMachines) || !currentDbMachines.some((machine) => String(machine.id || '') === selectedId);
+    }
+
+    function setMysqlCustomFieldsVisible(visible) {
+      if (!mysqlCustomFields) return;
+      mysqlCustomFields.hidden = !visible;
+    }
+
+    function fillMysqlCustomFields(details) {
+      const custom = details?.dbMachineCustom || {};
+      if (mysqlCustomName) mysqlCustomName.value = custom.name || details?.dbMachineLabel || '';
+      if (mysqlCustomHost) mysqlCustomHost.value = custom.host || details?.dbMachineHost || '';
+      if (mysqlCustomPort) mysqlCustomPort.value = custom.port || '';
+      if (mysqlCustomRootUser) mysqlCustomRootUser.value = custom.rootUser || '';
+      if (mysqlCustomRootPassword) mysqlCustomRootPassword.value = custom.rootPassword || '';
+      if (mysqlCustomNotes) mysqlCustomNotes.value = custom.notes || details?.dbMachineNotes || '';
     }
 
     function syncDbMachineSelects(selectedId) {
@@ -3927,10 +4062,14 @@ function renderPage() {
       mysqlPhpMyAdminBtn.href = '/phpmyadmin/';
       mysqlIpsInput.value = details.allowedIps || '';
       currentDbMachines = Array.isArray(details.machines) && details.machines.length ? details.machines : currentDbMachines;
+      const customMode = isCustomMysqlMachine(details);
+      const selectedMachineId = customMode ? CUSTOM_DB_MACHINE_ID : (details.dbMachineId || '${LOCAL_DB_MACHINE_ID}');
       if (mysqlMachineSelect) {
-        mysqlMachineSelect.innerHTML = renderDbMachineSelectOptions(currentDbMachines, details.dbMachineId || '${LOCAL_DB_MACHINE_ID}');
-        mysqlMachineSelect.value = details.dbMachineId || '${LOCAL_DB_MACHINE_ID}';
+        mysqlMachineSelect.innerHTML = renderDbMachineSelectOptions(currentDbMachines, selectedMachineId, true);
+        mysqlMachineSelect.value = selectedMachineId;
       }
+      setMysqlCustomFieldsVisible(customMode);
+      fillMysqlCustomFields(details);
       const rows = [
         ['DB supplier', details.db?.DB_SUPPLIER || 'n/a'],
         ['Database name', details.db?.DB_NAME || details.db?.DB_DATABASE || details.db?.MYSQL_DATABASE || details.db?.POSTGRES_DB || 'n/a'],
@@ -3938,6 +4077,8 @@ function renderPage() {
         ['Database password', details.db?.DB_PASSWORD || details.db?.MYSQL_PASSWORD || details.db?.POSTGRES_PASSWORD || 'n/a'],
         ['DB machine', details.dbMachineLabel || details.dbMachineId || 'local-current'],
         ['DB machine host', details.dbMachineHost || 'n/a'],
+        ['DB machine root user', details.dbMachineRootUser || 'n/a'],
+        ['DB machine root password', details.dbMachineRootPassword || 'n/a'],
         ['Database host', details.db?.DB_HOST || details.db?.MYSQL_HOST || details.db?.POSTGRES_HOST || 'n/a'],
         ['Database port', details.db?.DB_PORT || details.db?.MYSQL_PORT || details.db?.POSTGRES_PORT || 'n/a'],
         ['Allowed IPs', details.allowedIps || 'local only'],
@@ -4335,9 +4476,19 @@ function renderPage() {
 
     async function saveMysql(ref, ips) {
       const machineId = mysqlMachineSelect ? mysqlMachineSelect.value : '';
+      const useCustom = String(machineId || '') === CUSTOM_DB_MACHINE_ID;
+      const customMachine = useCustom ? {
+        id: CUSTOM_DB_MACHINE_ID,
+        name: mysqlCustomName ? mysqlCustomName.value.trim() : '',
+        host: mysqlCustomHost ? mysqlCustomHost.value.trim() : '',
+        port: mysqlCustomPort ? mysqlCustomPort.value.trim() : '',
+        rootUser: mysqlCustomRootUser ? mysqlCustomRootUser.value.trim() : '',
+        rootPassword: mysqlCustomRootPassword ? mysqlCustomRootPassword.value : '',
+        notes: mysqlCustomNotes ? mysqlCustomNotes.value.trim() : '',
+      } : null;
       const res = await api(\`/projects/\${ref}/mysql\`, {
         method: 'POST',
-        body: JSON.stringify({ ips, machineId }),
+        body: JSON.stringify(useCustom ? { ips, machineId: CUSTOM_DB_MACHINE_ID, customMachine } : { ips, machineId }),
       });
       await loadMysql(ref);
       showMessage(mysqlFlash, res.message || 'MySQL permissions updated');
@@ -4774,6 +4925,12 @@ function renderPage() {
         envRestoreSelectedBtn.disabled = false;
       }
     });
+
+    if (mysqlMachineSelect) {
+      mysqlMachineSelect.addEventListener('change', () => {
+        setMysqlCustomFieldsVisible(String(mysqlMachineSelect.value || '') === CUSTOM_DB_MACHINE_ID);
+      });
+    }
 
     mysqlSaveBtn.addEventListener('click', async () => {
       if (!currentMysqlRef) return;
@@ -5355,9 +5512,15 @@ async function handleRequest(req, res) {
       const dbPassword = db.DB_PASSWORD || db.MYSQL_PASSWORD || db.POSTGRES_PASSWORD || '';
       const allowedIps = meta.MYSQL_ALLOWED_IPS || '';
       const projectMachineId = meta.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID;
-      const accounts = readMysqlAccounts(dbUser, projectMachineId);
       const machines = readDbMachines();
-      const projectMachine = machines.find((item) => String(item.id) === String(projectMachineId)) || null;
+      const projectMachineContext = resolveProjectMysqlMachine(meta, projectPath);
+      const projectMachine = projectMachineContext.machine || machines.find((item) => String(item.id) === String(projectMachineId)) || null;
+      const projectMachineLabel = projectMachine ? describeDbMachine(projectMachine) : projectMachineId;
+      const projectMachineHost = projectMachine?.originHost || projectMachine?.host || 'n/a';
+      const projectMachineRootUser = projectMachine?.rootUser || 'root';
+      const projectMachineRootPassword = projectMachine?.rootPassword || '';
+      const projectMachineNotes = projectMachine?.notes || '';
+      const accounts = readMysqlAccounts(dbUser, projectMachine || projectMachineId);
 
       if (req.method === 'GET') {
         sendJson(res, 200, {
@@ -5368,10 +5531,14 @@ async function handleRequest(req, res) {
           dbUser,
           dbPassword,
           allowedIps,
-          dbMachineId: projectMachineId,
-          dbMachineLabel: projectMachine ? describeDbMachine(projectMachine) : projectMachineId,
-          dbMachineHost: projectMachine?.originHost || projectMachine?.host || 'n/a',
-          dbMachineNotes: projectMachine?.notes || '',
+          dbMachineId: projectMachineContext.isCustom && projectMachine ? CUSTOM_DB_MACHINE_ID : projectMachineId,
+          dbMachineLabel: projectMachineLabel,
+          dbMachineHost: projectMachineHost,
+          dbMachineRootUser: projectMachineRootUser,
+          dbMachineRootPassword: projectMachineRootPassword,
+          dbMachineNotes: projectMachineNotes,
+          dbMachineCustom: projectMachineContext.isCustom && projectMachine ? projectMachine : null,
+          dbMachineMode: projectMachineContext.isCustom ? 'custom' : 'global',
           machines,
           accounts,
         });
@@ -5382,12 +5549,37 @@ async function handleRequest(req, res) {
         const body = await readBody(req);
         const ips = String(body.ips || '').trim();
         const machineId = String(body.machineId || projectMachineId || LOCAL_DB_MACHINE_ID).trim();
+        const customMachineInput = body.customMachine && typeof body.customMachine === 'object' ? body.customMachine : null;
+        const useCustomMachine = machineId === CUSTOM_DB_MACHINE_ID || Boolean(customMachineInput);
         const args = ['mysql'];
-        if (machineId) args.push('--machine', machineId);
+        if (useCustomMachine) {
+          const normalizedCustomMachine = normalizeDbMachine(customMachineInput || {
+            id: CUSTOM_DB_MACHINE_ID,
+            name: body.customMachineName || '',
+            host: body.customMachineHost || '',
+            port: body.customMachinePort || '',
+            rootUser: body.customMachineRootUser || '',
+            rootPassword: body.customMachineRootPassword || '',
+            notes: body.customMachineNotes || '',
+          }, { id: CUSTOM_DB_MACHINE_ID, name: 'Custom DB machine', host: '', rootUser: 'root', rootPassword: '', port: '3306', notes: '' });
+          args.push(
+            '--machine', CUSTOM_DB_MACHINE_ID,
+            '--machine-name', normalizedCustomMachine.name,
+            '--machine-host', normalizedCustomMachine.host,
+            '--machine-port', normalizedCustomMachine.port,
+            '--machine-root-user', normalizedCustomMachine.rootUser,
+            '--machine-root-password', normalizedCustomMachine.rootPassword,
+            '--machine-notes', normalizedCustomMachine.notes,
+          );
+        } else if (machineId) {
+          args.push('--machine', machineId);
+        }
         args.push('--ips', ips, ref);
         const output = runProjectCtl(args);
         const refreshedMeta = parseEnvFile(metaPathForRef(ref));
         const refreshedDb = pickDbDetails(projectPath).db;
+        const refreshedMachineContext = resolveProjectMysqlMachine(refreshedMeta, projectPath);
+        const refreshedMachine = refreshedMachineContext.machine || readDbMachines().find((item) => String(item.id) === String(refreshedMeta.DB_MACHINE_ID || projectMachineId)) || null;
         sendJson(res, 200, {
           ok: true,
           message: output || 'MySQL permissions updated',
@@ -5398,24 +5590,16 @@ async function handleRequest(req, res) {
           dbUser: refreshedDb.DB_USER || refreshedDb.MYSQL_USER || refreshedDb.POSTGRES_USER || '',
           dbPassword: refreshedDb.DB_PASSWORD || refreshedDb.MYSQL_PASSWORD || refreshedDb.POSTGRES_PASSWORD || '',
           allowedIps: refreshedMeta.MYSQL_ALLOWED_IPS || ips,
-          dbMachineId: refreshedMeta.DB_MACHINE_ID || projectMachineId || LOCAL_DB_MACHINE_ID,
-          dbMachineLabel: (() => {
-            const currentMachineId = refreshedMeta.DB_MACHINE_ID || projectMachineId || LOCAL_DB_MACHINE_ID;
-            const currentMachine = readDbMachines().find((item) => String(item.id) === String(currentMachineId)) || null;
-            return currentMachine ? describeDbMachine(currentMachine) : currentMachineId;
-          })(),
-          dbMachineHost: (() => {
-            const currentMachineId = refreshedMeta.DB_MACHINE_ID || projectMachineId || LOCAL_DB_MACHINE_ID;
-            const currentMachine = readDbMachines().find((item) => String(item.id) === String(currentMachineId)) || null;
-            return currentMachine?.originHost || currentMachine?.host || 'n/a';
-          })(),
-          dbMachineNotes: (() => {
-            const currentMachineId = refreshedMeta.DB_MACHINE_ID || projectMachineId || LOCAL_DB_MACHINE_ID;
-            const currentMachine = readDbMachines().find((item) => String(item.id) === String(currentMachineId)) || null;
-            return currentMachine?.notes || '';
-          })(),
+          dbMachineId: refreshedMachineContext.isCustom && refreshedMachine ? CUSTOM_DB_MACHINE_ID : (refreshedMeta.DB_MACHINE_ID || projectMachineId || LOCAL_DB_MACHINE_ID),
+          dbMachineLabel: refreshedMachine ? describeDbMachine(refreshedMachine) : (refreshedMeta.DB_MACHINE_ID || projectMachineId || LOCAL_DB_MACHINE_ID),
+          dbMachineHost: refreshedMachine?.originHost || refreshedMachine?.host || 'n/a',
+          dbMachineRootUser: refreshedMachine?.rootUser || 'root',
+          dbMachineRootPassword: refreshedMachine?.rootPassword || '',
+          dbMachineNotes: refreshedMachine?.notes || '',
+          dbMachineCustom: refreshedMachineContext.isCustom && refreshedMachine ? refreshedMachine : null,
+          dbMachineMode: refreshedMachineContext.isCustom ? 'custom' : 'global',
           machines: readDbMachines(),
-          accounts: readMysqlAccounts(refreshedDb.DB_USER || refreshedDb.MYSQL_USER || refreshedDb.POSTGRES_USER || '', refreshedMeta.DB_MACHINE_ID || machineId || projectMachineId),
+          accounts: readMysqlAccounts(refreshedDb.DB_USER || refreshedDb.MYSQL_USER || refreshedDb.POSTGRES_USER || '', refreshedMachine || refreshedMeta.DB_MACHINE_ID || machineId || projectMachineId),
         });
         return;
       }
