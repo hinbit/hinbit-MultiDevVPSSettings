@@ -3600,7 +3600,10 @@ function renderPage() {
         </div>
       </div>
       <div class="space"></div>
-      <button id="installBtn" type="button">Install project</button>
+      <div class="copy-actions">
+        <button id="installBtn" type="button">Install project</button>
+        <button id="installMerge2Btn" class="secondary" type="button">Install + Merge*2</button>
+      </div>
       <div id="installResult" class="flash" hidden></div>
       <div id="installDbScriptsPanel" class="kv-item" hidden style="margin-top: 12px;">
         <div class="small">DB scripts found during install</div>
@@ -3783,7 +3786,7 @@ function renderPage() {
         <button id="closeEnvBtn" class="ghost" type="button">Close</button>
       </div>
     </header>
-    <div class="body">
+      <div class="body">
       <div id="envFlash" class="flash" hidden></div>
       <div class="kv-item">
         <div class="row spread" style="gap: 12px; align-items: flex-start;">
@@ -3797,6 +3800,14 @@ function renderPage() {
           </div>
         </div>
         <textarea id="envEditor" class="env-editor" spellcheck="false" placeholder="KEY=&quot;value&quot;"></textarea>
+      </div>
+      <div id="envMergeBox" class="kv-item" hidden>
+        <div class="small">Merge overlay</div>
+        <div class="small">Paste extra .env keys here to merge them on top of the current env result, then save.</div>
+        <textarea id="envMergeOverlay" class="env-editor" spellcheck="false" placeholder="KEY=&quot;extra-value&quot;"></textarea>
+        <div class="copy-actions" style="margin-top: 8px;">
+          <button id="envMergeSaveBtn" class="secondary" type="button">Merge overlay &amp; save</button>
+        </div>
       </div>
       <div class="kv-item">
         <div class="small">Saved backups</div>
@@ -3930,6 +3941,9 @@ function renderPage() {
     const envSaveBtn = document.getElementById('envSaveBtn');
     const envReloadBtn = document.getElementById('envReloadBtn');
     const envSaveTarget = document.getElementById('envSaveTarget');
+    const envMergeBox = document.getElementById('envMergeBox');
+    const envMergeOverlay = document.getElementById('envMergeOverlay');
+    const envMergeSaveBtn = document.getElementById('envMergeSaveBtn');
     const closeEnvBtn = document.getElementById('closeEnvBtn');
     const envBackupsList = document.getElementById('envBackupsList');
     const progressPanel = document.getElementById('progressPanel');
@@ -3945,6 +3959,7 @@ function renderPage() {
     const pullConfirmSummary = document.getElementById('pullConfirmSummary');
     const pullConfirmBody = document.getElementById('pullConfirmBody');
     const pullConfirmMergeBtn = document.getElementById('pullConfirmMergeBtn');
+    const pullConfirmMerge2Btn = document.getElementById('pullConfirmMerge2Btn');
     const pullConfirmStashBtn = document.getElementById('pullConfirmStashBtn');
     const pullConfirmNoBtn = document.getElementById('pullConfirmNoBtn');
     const logPanel = document.getElementById('logPanel');
@@ -3966,6 +3981,7 @@ function renderPage() {
     let currentSshRef = '';
     let currentEnvRef = '';
     let currentEnvDetails = null;
+    let currentEnvMergeMode = false;
     let currentLogRef = '';
     let currentLogType = 'out';
     let currentPullRef = '';
@@ -4532,7 +4548,7 @@ function renderPage() {
       selectEl.disabled = !list.length;
     }
 
-    function openEnvPanel(ref, details, subtitle) {
+    function openEnvPanel(ref, details, subtitle, options = {}) {
       closeScriptsModal();
       closeDbPanel();
       closeMysqlPanel();
@@ -4540,8 +4556,11 @@ function renderPage() {
       closeLogPanel();
       currentEnvRef = ref;
       currentEnvDetails = details || null;
-      envTitle.textContent = 'Environment Values';
-      envSubtitle.textContent = subtitle || '';
+      currentEnvMergeMode = Boolean(options.mergeMode);
+      envTitle.textContent = currentEnvMergeMode ? 'Merge Environment Values' : 'Environment Values';
+      envSubtitle.textContent = currentEnvMergeMode
+        ? (subtitle || 'Paste extra .env keys in the overlay and save the merged result.')
+        : (subtitle || '');
       envFlash.hidden = true;
       const backups = Array.isArray(details.backups) ? details.backups : [];
       const entries = Object.entries(details.env || {})
@@ -4550,6 +4569,16 @@ function renderPage() {
       renderKeyValueList(envList, entries);
       if (envEditor) {
         envEditor.value = serializeEnvTextFromObject(details.env || {});
+      }
+      if (envMergeBox) {
+        envMergeBox.hidden = !currentEnvMergeMode;
+      }
+      if (envMergeOverlay) {
+        envMergeOverlay.value = '';
+        envMergeOverlay.placeholder = currentEnvMergeMode ? 'KEY="extra-value"' : 'KEY="value"';
+      }
+      if (envMergeSaveBtn) {
+        envMergeSaveBtn.hidden = !currentEnvMergeMode;
       }
       renderBackupList(envBackupsList, backups);
       renderBackupSelect(envRestoreSelect, backups, details.latestBackup?.name || 'latest.zip');
@@ -4568,12 +4597,16 @@ function renderPage() {
       envPanel.hidden = true;
       currentEnvRef = '';
       currentEnvDetails = null;
+      currentEnvMergeMode = false;
       envList.innerHTML = '';
       envBackupsList.innerHTML = '';
       if (envRestoreSelect) envRestoreSelect.innerHTML = '';
       envFlash.hidden = true;
       envUploadInput.value = '';
       if (envEditor) envEditor.value = '';
+      if (envMergeOverlay) envMergeOverlay.value = '';
+      if (envMergeBox) envMergeBox.hidden = true;
+      if (envMergeSaveBtn) envMergeSaveBtn.hidden = true;
       if (envSaveTarget) envSaveTarget.textContent = '(n/a)';
       setModalLocked(false);
     }
@@ -4620,10 +4653,11 @@ function renderPage() {
       currentPullRef = ref;
       pullConfirmTitle.textContent = 'Local changes detected';
       const changes = Array.isArray(preflight?.changes) ? preflight.changes.length : 0;
-      pullConfirmSubtitle.textContent = decodeURIComponent(ref) + ' · ' + changes + ' local change' + (changes === 1 ? '' : 's') + ' · merge .env values or stash all before pull';
+      pullConfirmSubtitle.textContent = decodeURIComponent(ref) + ' · ' + changes + ' local change' + (changes === 1 ? '' : 's') + ' · merge .env values, merge*2, or stash all before pull';
       pullConfirmFlash.hidden = true;
       pullConfirmSummary.innerHTML = '<div class="small">' + escapeHtml(preflight?.message || 'Git reported local changes in this project. Merge .env values first, or stash everything, then pull the remote branch.') + '</div>' +
-        '<div class="small">Default action: Merge .env and keep current VPS values, then append any new upstream env keys.</div>';
+        '<div class="small">Default action: Merge .env and keep current VPS values, then append any new upstream env keys.</div>' +
+        '<div class="small">Merge*2 will open the env editor so you can paste extra keys and merge them on top of the pulled result.</div>';
       pullConfirmBody.textContent = Array.isArray(preflight?.changes) && preflight.changes.length
         ? preflight.changes.map((line) => '  ' + line).join('\\n')
         : '(no change list available)';
@@ -4703,6 +4737,8 @@ function renderPage() {
         decodeURIComponent(ref),
         mode === 'stash-all'
           ? 'Pulling ' + decodeURIComponent(ref) + ' with stash-all'
+          : mode === 'merge-env2'
+            ? 'Pulling ' + decodeURIComponent(ref) + ' with merge*2'
           : 'Pulling ' + decodeURIComponent(ref),
       );
       try {
@@ -4761,20 +4797,24 @@ function renderPage() {
       openSshPanel(ref, data, data.project || ref);
     }
 
-    async function loadEnv(ref) {
+    async function loadEnv(ref, options = {}) {
       const data = await api(\`/projects/\${ref}/env\`);
-      openEnvPanel(ref, data, data.project || ref);
+      openEnvPanel(ref, data, data.project || ref, options);
     }
 
-    async function saveEnv(ref) {
+    async function saveEnv(ref, options = {}) {
       const envText = envEditor ? envEditor.value : '';
+      const overlayText = envMergeOverlay ? envMergeOverlay.value : '';
       const data = await api(\`/projects/\${ref}/env/save\`, {
         method: 'POST',
-        body: JSON.stringify({ envText }),
+        body: JSON.stringify({
+          envText,
+          overlayText: currentEnvMergeMode ? overlayText : '',
+        }),
       });
       showMessage(envFlash, data.message || 'Environment values saved');
       await refresh();
-      await loadEnv(ref);
+      await loadEnv(ref, options);
     }
 
     async function backupEnv(ref) {
@@ -4951,7 +4991,11 @@ function renderPage() {
               return;
             }
           }
-          await runPullWithProgress(ref, mode);
+          await runPullWithProgress(ref, mode === 'merge-env2' ? 'merge-env' : mode);
+          if (mode === 'merge-env2') {
+            await loadEnv(ref, { mergeMode: true });
+            showMessage(envFlash, 'Paste extra .env keys in the overlay and click Merge overlay & save.');
+          }
         } catch (error) {
           showMessage(progressFlash, error.message, false);
           progressPanel.hidden = false;
@@ -4993,6 +5037,9 @@ function renderPage() {
     closeProgressBtn.addEventListener('click', closeProgressPanel);
     pullConfirmNoBtn.addEventListener('click', () => closePullConfirmPanel(''));
     pullConfirmMergeBtn.addEventListener('click', () => closePullConfirmPanel('merge-env'));
+    if (pullConfirmMerge2Btn) {
+      pullConfirmMerge2Btn.addEventListener('click', () => closePullConfirmPanel('merge-env2'));
+    }
     pullConfirmStashBtn.addEventListener('click', () => closePullConfirmPanel('stash-all'));
     closeLogBtn.addEventListener('click', closeLogPanel);
     sshCopyUserBtn.addEventListener('click', async () => {
@@ -5225,7 +5272,7 @@ function renderPage() {
         if (!currentEnvRef) return;
         envSaveBtn.disabled = true;
         try {
-          await saveEnv(currentEnvRef);
+          await saveEnv(currentEnvRef, { mergeMode: currentEnvMergeMode });
         } catch (error) {
           showMessage(envFlash, error.message, false);
           envPanel.hidden = false;
@@ -5240,12 +5287,27 @@ function renderPage() {
         if (!currentEnvRef) return;
         envReloadBtn.disabled = true;
         try {
-          await loadEnv(currentEnvRef);
+          await loadEnv(currentEnvRef, { mergeMode: currentEnvMergeMode });
         } catch (error) {
           showMessage(envFlash, error.message, false);
           envPanel.hidden = false;
         } finally {
           envReloadBtn.disabled = false;
+        }
+      });
+    }
+
+    if (envMergeSaveBtn) {
+      envMergeSaveBtn.addEventListener('click', async () => {
+        if (!currentEnvRef) return;
+        envMergeSaveBtn.disabled = true;
+        try {
+          await saveEnv(currentEnvRef, { mergeMode: true });
+        } catch (error) {
+          showMessage(envFlash, error.message, false);
+          envPanel.hidden = false;
+        } finally {
+          envMergeSaveBtn.disabled = false;
         }
       });
     }
@@ -5370,7 +5432,7 @@ function renderPage() {
       });
     }
 
-    document.getElementById('installBtn').addEventListener('click', async () => {
+    async function submitInstall(openMergeMode = false) {
       currentInstallScriptsRef = '';
       renderInstallDbScripts('', []);
       const repo = document.getElementById('repo').value.trim();
@@ -5425,11 +5487,39 @@ function renderPage() {
         const accessPassword = document.getElementById('accessPassword');
         if (accessPassword) accessPassword.value = '';
         await refresh();
+        if (openMergeMode) {
+          await loadEnv(result.repo || payload.repo, { mergeMode: true });
+          showMessage(envFlash, 'Paste extra .env keys in the overlay and click Merge overlay & save.');
+        }
       } catch (error) {
         renderInstallDbScripts('', []);
         showMessage(installResult, error.message, false);
       }
-    });
+    }
+
+    const installBtn = document.getElementById('installBtn');
+    if (installBtn) {
+      installBtn.addEventListener('click', async () => {
+        installBtn.disabled = true;
+        try {
+          await submitInstall(false);
+        } finally {
+          installBtn.disabled = false;
+        }
+      });
+    }
+
+    const installMerge2Btn = document.getElementById('installMerge2Btn');
+    if (installMerge2Btn) {
+      installMerge2Btn.addEventListener('click', async () => {
+        installMerge2Btn.disabled = true;
+        try {
+          await submitInstall(true);
+        } finally {
+          installMerge2Btn.disabled = false;
+        }
+      });
+    }
 
     function escapeHtml(value) {
       return String(value ?? '')
@@ -6130,19 +6220,25 @@ async function handleRequest(req, res) {
         }
         const body = await readBody(req);
         const parsedEnv = parseEnvText(body.envText || '');
+        const overlayEnv = parseEnvText(body.overlayText || '');
+        const finalEnv = (body.overlayText && String(body.overlayText).trim())
+          ? { ...parsedEnv, ...overlayEnv }
+          : parsedEnv;
         const targetPath = chooseProjectEnvSaveTarget(projectPath, files);
         if (!targetPath) {
           throw new Error(`Unable to choose env save target for ${ref}`);
         }
         const autoBackup = createProjectEnvBackup(ref, projectPath);
-        fs.writeFileSync(targetPath, serializeEnvText(parsedEnv), 'utf8');
+        fs.writeFileSync(targetPath, serializeEnvText(finalEnv), 'utf8');
         fs.chmodSync(targetPath, 0o600);
         runProjectCtl(['restart', ref]);
         const refreshed = pickEnvDetails(projectPath);
         const refreshedBackups = listProjectEnvBackups(ref);
         sendJson(res, 200, {
           ok: true,
-          message: `Environment values saved for ${ref} in ${path.basename(targetPath)}`,
+          message: body.overlayText && String(body.overlayText).trim()
+            ? `Merged overlay env values for ${ref} into ${path.basename(targetPath)}`
+            : `Environment values saved for ${ref} in ${path.basename(targetPath)}`,
           autoBackup,
           project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
           files: refreshed.files,

@@ -161,6 +161,54 @@ project_db_value() {
   printf '%s' ""
 }
 
+project_db_password_from_existing_project() {
+  local db_name="$1"
+  local db_user="$2"
+
+  [[ -n "${db_name}" ]] || return 0
+  [[ -n "${db_user}" ]] || return 0
+
+  python3 - "${META_DIR}" "${db_name}" "${db_user}" <<'PY'
+import glob
+import os
+import sys
+
+meta_dir, db_name, db_user = sys.argv[1:4]
+keys_name = ("DB_NAME", "DB_DATABASE", "MYSQL_DATABASE", "POSTGRES_DB")
+keys_user = ("DB_USER", "MYSQL_USER", "POSTGRES_USER")
+keys_password = ("DB_PASSWORD", "MYSQL_PASSWORD", "POSTGRES_PASSWORD")
+
+def parse_env(path):
+    data = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="surrogateescape") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                    value = value[1:-1]
+                data[key] = value
+    except OSError:
+        return {}
+    return data
+
+for path in sorted(glob.glob(os.path.join(meta_dir, "*.env"))):
+    data = parse_env(path)
+    if not data:
+        continue
+    existing_name = next((str(data.get(key, "")).strip() for key in keys_name if str(data.get(key, "")).strip()), "")
+    existing_user = next((str(data.get(key, "")).strip() for key in keys_user if str(data.get(key, "")).strip()), "")
+    existing_password = next((str(data.get(key, "")).strip() for key in keys_password if str(data.get(key, "")).strip()), "")
+    if existing_name == db_name and existing_user == db_user and existing_password:
+        print(existing_password)
+        break
+PY
+}
+
 project_env_has_key() {
   local key="$1"
   local file=""
@@ -450,6 +498,7 @@ sync_project_db_env() {
 
   [[ -n "${db_name}" ]] || db_name="${default_db_name}"
   [[ -n "${db_user}" ]] || db_user="${default_db_user}"
+  [[ -n "${db_password}" ]] || db_password="$(project_db_password_from_existing_project "${db_name}" "${db_user}")"
   [[ -n "${db_password}" ]] || db_password="$(generate_secret)"
   [[ -n "${db_type}" ]] || db_type="mysql"
 
