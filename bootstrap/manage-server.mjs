@@ -613,11 +613,12 @@ function mysqlExecForMachine(machineOrId, query) {
   const port = String(machine.port || '3306').trim() || '3306';
   const user = String(machine.rootUser || 'root').trim() || 'root';
   const password = String(machine.rootPassword || '').trim();
+  const timeout = host === 'localhost' || host === '127.0.0.1' || host === '::1' ? 1500 : 2500;
   if (!password && (host === 'localhost' || host === '127.0.0.1' || host === '::1')) {
     return execFileSync(
       'mysql',
       ['--protocol=socket', '-uroot', '--batch', '--skip-column-names', '-e', query],
-      { encoding: 'utf8' },
+      { encoding: 'utf8', timeout },
     );
   }
   return execFileSync(
@@ -626,14 +627,19 @@ function mysqlExecForMachine(machineOrId, query) {
     {
       encoding: 'utf8',
       env: { ...process.env, MYSQL_PWD: password },
+      timeout,
     },
   );
 }
 
 function readMysqlAccounts(dbUser, machineId = LOCAL_DB_MACHINE_ID) {
   if (!dbUser) return [];
+  const machine = normalizeMysqlMachine(machineId);
+  if (String(machine.id || '') === CUSTOM_DB_MACHINE_ID && !String(machine.rootPassword || '').trim()) {
+    return [];
+  }
   try {
-    const out = mysqlExecForMachine(machineId, `SELECT CONCAT(User, '@', Host) FROM mysql.user WHERE User='${String(dbUser).replace(/'/g, "''")}' ORDER BY Host;`);
+    const out = mysqlExecForMachine(machine, `SELECT CONCAT(User, '@', Host) FROM mysql.user WHERE User='${String(dbUser).replace(/'/g, "''")}' ORDER BY Host;`);
     return out.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   } catch {
     return [];
