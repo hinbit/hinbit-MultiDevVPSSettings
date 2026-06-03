@@ -1125,7 +1125,8 @@ print(extract_dir)
   return imported.length;
 }
 
-function normalizeDbMachine(input, existing = {}) {
+function normalizeDbMachine(input, existing = {}, options = {}) {
+  const allowMissingRootCredentials = Boolean(options.allowMissingRootCredentials);
   const name = String(input?.name || input?.label || existing.name || '').trim();
   const host = String(input?.host || existing.host || '').trim();
   const rootUser = String(input?.rootUser || input?.user || existing.rootUser || '').trim();
@@ -1135,7 +1136,7 @@ function normalizeDbMachine(input, existing = {}) {
 
   if (!name) throw new Error('DB machine name is required');
   if (!host) throw new Error('DB machine host is required');
-  if (!rootUser) throw new Error('DB root user is required');
+  if (!allowMissingRootCredentials && !rootUser) throw new Error('DB root user is required');
   if (!/^[A-Za-z0-9._:-]+$/.test(host)) throw new Error(`Invalid DB machine host: ${host}`);
   if (!/^[0-9]+$/.test(port)) {
     port = '3306';
@@ -1144,7 +1145,7 @@ function normalizeDbMachine(input, existing = {}) {
   if (!Number.isFinite(portNum) || portNum < 1 || portNum > 65535) {
     throw new Error(`Invalid DB port: ${port}`);
   }
-  if (!rootPassword && !['localhost', '127.0.0.1', '::1'].includes(host)) {
+  if (!allowMissingRootCredentials && !rootPassword && !['localhost', '127.0.0.1', '::1'].includes(host)) {
     throw new Error('DB root password is required');
   }
 
@@ -3830,6 +3831,7 @@ function renderPage() {
     const sshCopyUserBtn = document.getElementById('sshCopyUserBtn');
     const sshCopyPassBtn = document.getElementById('sshCopyPassBtn');
     const sshCopyAllBtn = document.getElementById('sshCopyAllBtn');
+    let currentMysqlDetails = null;
     const envPanel = document.getElementById('envPanel');
     const envTitle = document.getElementById('envTitle');
     const envSubtitle = document.getElementById('envSubtitle');
@@ -3970,6 +3972,25 @@ function renderPage() {
       if (mysqlCustomRootUser) mysqlCustomRootUser.value = custom.rootUser || '';
       if (mysqlCustomRootPassword) mysqlCustomRootPassword.value = custom.rootPassword || '';
       if (mysqlCustomNotes) mysqlCustomNotes.value = custom.notes || details?.dbMachineNotes || '';
+      syncMysqlCustomPreview();
+    }
+
+    function syncMysqlCustomPreview() {
+      if (!mysqlDetails) return;
+      const current = currentMysqlDetails || {};
+      const customMode = mysqlMachineSelect ? String(mysqlMachineSelect.value || '') === CUSTOM_DB_MACHINE_ID : false;
+      const customHost = mysqlCustomHost ? mysqlCustomHost.value.trim() : '';
+      const customPort = mysqlCustomPort ? mysqlCustomPort.value.trim() : '';
+      const hostValue = customMode ? (customHost || current.dbMachineHost || 'n/a') : (current.dbMachineHost || 'n/a');
+      const portValue = customMode ? (customPort || current.db?.DB_PORT || current.db?.MYSQL_PORT || current.db?.POSTGRES_PORT || '3306') : (current.db?.DB_PORT || current.db?.MYSQL_PORT || current.db?.POSTGRES_PORT || 'n/a');
+      const dbHostValue = customMode ? hostValue : (current.db?.DB_HOST || current.db?.MYSQL_HOST || current.db?.POSTGRES_HOST || 'n/a');
+      const dbPortValue = customMode ? portValue : (current.db?.DB_PORT || current.db?.MYSQL_PORT || current.db?.POSTGRES_PORT || 'n/a');
+      const hostEl = document.getElementById('mysqlDbMachineHostValue');
+      const dbHostEl = document.getElementById('mysqlDatabaseHostValue');
+      const dbPortEl = document.getElementById('mysqlDatabasePortValue');
+      if (hostEl) hostEl.textContent = hostValue;
+      if (dbHostEl) dbHostEl.textContent = dbHostValue;
+      if (dbPortEl) dbPortEl.textContent = dbPortValue;
     }
 
     function syncDbMachineSelects(selectedId) {
@@ -4248,6 +4269,7 @@ function renderPage() {
       closeProgressPanel();
       closeLogPanel();
       currentMysqlRef = ref;
+      currentMysqlDetails = details || {};
       mysqlTitle.textContent = 'MySQL Access';
       mysqlSubtitle.textContent = subtitle || '';
       mysqlFlash.hidden = true;
@@ -4263,24 +4285,24 @@ function renderPage() {
       setMysqlCustomFieldsVisible(customMode);
       fillMysqlCustomFields(details);
       const rows = [
-        ['DB supplier', details.db?.DB_SUPPLIER || 'n/a'],
-        ['Database name', details.db?.DB_NAME || details.db?.DB_DATABASE || details.db?.MYSQL_DATABASE || details.db?.POSTGRES_DB || 'n/a'],
-        ['Database user', details.db?.DB_USER || details.db?.MYSQL_USER || details.db?.POSTGRES_USER || 'n/a'],
-        ['Database password', details.db?.DB_PASSWORD || details.db?.MYSQL_PASSWORD || details.db?.POSTGRES_PASSWORD || 'n/a'],
-        ['DB machine', details.dbMachineLabel || details.dbMachineId || 'local-current'],
-        ['DB machine host', details.dbMachineHost || 'n/a'],
-        ['DB machine root user', details.dbMachineRootUser || 'n/a'],
-        ['DB machine root password', details.dbMachineRootPassword || 'n/a'],
-        ['Database host', details.db?.DB_HOST || details.db?.MYSQL_HOST || details.db?.POSTGRES_HOST || 'n/a'],
-        ['Database port', details.db?.DB_PORT || details.db?.MYSQL_PORT || details.db?.POSTGRES_PORT || 'n/a'],
-        ['Allowed IPs', details.allowedIps || 'local only'],
+        { label: 'DB supplier', value: details.db?.DB_SUPPLIER || 'n/a' },
+        { label: 'Database name', value: details.db?.DB_NAME || details.db?.DB_DATABASE || details.db?.MYSQL_DATABASE || details.db?.POSTGRES_DB || 'n/a' },
+        { label: 'Database user', value: details.db?.DB_USER || details.db?.MYSQL_USER || details.db?.POSTGRES_USER || 'n/a' },
+        { label: 'Database password', value: details.db?.DB_PASSWORD || details.db?.MYSQL_PASSWORD || details.db?.POSTGRES_PASSWORD || 'n/a' },
+        { label: 'DB machine', value: details.dbMachineLabel || details.dbMachineId || 'local-current' },
+        { label: 'DB machine host', value: '<code id="mysqlDbMachineHostValue">' + escapeHtml(details.dbMachineHost || 'n/a') + '</code>', html: true },
+        { label: 'DB machine root user', value: details.dbMachineRootUser || 'n/a' },
+        { label: 'DB machine root password', value: details.dbMachineRootPassword || 'n/a' },
+        { label: 'Database host', value: '<code id="mysqlDatabaseHostValue">' + escapeHtml(details.db?.DB_HOST || details.db?.MYSQL_HOST || details.db?.POSTGRES_HOST || 'n/a') + '</code>', html: true },
+        { label: 'Database port', value: '<code id="mysqlDatabasePortValue">' + escapeHtml(details.db?.DB_PORT || details.db?.MYSQL_PORT || details.db?.POSTGRES_PORT || 'n/a') + '</code>', html: true },
+        { label: 'Allowed IPs', value: details.allowedIps || 'local only' },
       ];
       const sources = (details.files || []).map((file) => escapeHtml(file)).join('<br>');
       mysqlDetails.innerHTML = \`
-        \${rows.map(([label, value]) => \`
+        \${rows.map(({ label, value, html }) => \`
           <div class="kv-item">
             <div class="small">\${escapeHtml(label)}</div>
-            <code>\${escapeHtml(value)}</code>
+            \${html ? value : '<code>' + escapeHtml(value) + '</code>'}
           </div>
         \`).join('')}
         <div class="kv-item">
@@ -4298,11 +4320,13 @@ function renderPage() {
         : '<div class="muted">No MySQL account rows found.</div>';
       mysqlPanel.hidden = false;
       setModalLocked(true);
+      syncMysqlCustomPreview();
     }
 
     function closeMysqlPanel() {
       mysqlPanel.hidden = true;
       currentMysqlRef = '';
+      currentMysqlDetails = null;
       mysqlDetails.innerHTML = '';
       mysqlAccounts.innerHTML = '';
       mysqlIpsInput.value = '';
@@ -5138,7 +5162,14 @@ function renderPage() {
     if (mysqlMachineSelect) {
       mysqlMachineSelect.addEventListener('change', () => {
         setMysqlCustomFieldsVisible(String(mysqlMachineSelect.value || '') === CUSTOM_DB_MACHINE_ID);
+        syncMysqlCustomPreview();
       });
+    }
+    if (mysqlCustomHost) {
+      mysqlCustomHost.addEventListener('input', syncMysqlCustomPreview);
+    }
+    if (mysqlCustomPort) {
+      mysqlCustomPort.addEventListener('input', syncMysqlCustomPreview);
     }
 
     mysqlSaveBtn.addEventListener('click', async () => {
@@ -5790,7 +5821,7 @@ async function handleRequest(req, res) {
             rootUser: body.customMachineRootUser || '',
             rootPassword: body.customMachineRootPassword || '',
             notes: body.customMachineNotes || '',
-          }, { id: CUSTOM_DB_MACHINE_ID, name: 'Custom DB machine', host: '', rootUser: 'root', rootPassword: '', port: '3306', notes: '' });
+          }, { id: CUSTOM_DB_MACHINE_ID, name: 'Custom DB machine', host: '', rootUser: 'root', rootPassword: '', port: '3306', notes: '' }, { allowMissingRootCredentials: !body.moveData });
           if (dbName) args.push('--db-name', dbName);
           if (dbUser) args.push('--db-user', dbUser);
           if (dbPassword) args.push('--db-password', dbPassword);
