@@ -4011,11 +4011,12 @@ function renderPage() {
     function shellQuoteEnvValue(value) {
       const raw = String(value ?? '');
       const backtick = String.fromCharCode(96);
+      const backslash = String.fromCharCode(92);
       return '"' + raw
         .replace(/\\/g, '\\\\')
         .replace(/"/g, '\\"')
         .replace(/\$/g, '\\$')
-        .replace(new RegExp(backtick, 'g'), '\\' + backtick)
+        .replace(new RegExp(backtick, 'g'), backslash + backtick)
         .replace(/\n/g, '\\n')
         .replace(/\r/g, '\\r')
         .replace(/\t/g, '\\t') + '"';
