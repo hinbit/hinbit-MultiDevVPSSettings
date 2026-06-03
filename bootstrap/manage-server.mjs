@@ -246,6 +246,72 @@ function readProjectDiskUsage(projectPath) {
   }
 }
 
+function readProjectFilesystemUsage(projectPath) {
+  if (!projectPath || !fs.existsSync(projectPath)) {
+    return {
+      total: 0,
+      used: 0,
+      free: 0,
+      percent: 0,
+      mount: '',
+    };
+  }
+  try {
+    const out = execFileSync('df', ['-B1', '--output=size,used,avail,pcent,target', projectPath], { encoding: 'utf8' }).trim().split(/\r?\n/);
+    if (out.length < 2) {
+      return {
+        total: 0,
+        used: 0,
+        free: 0,
+        percent: 0,
+        mount: '',
+      };
+    }
+    const parts = out[1].trim().split(/\s+/);
+    return {
+      total: Number.parseInt(parts[0] || '0', 10) || 0,
+      used: Number.parseInt(parts[1] || '0', 10) || 0,
+      free: Number.parseInt(parts[2] || '0', 10) || 0,
+      percent: Number.parseFloat(String(parts[3] || '0').replace('%', '')) || 0,
+      mount: parts[4] || '',
+    };
+  } catch {
+    return {
+      total: 0,
+      used: 0,
+      free: 0,
+      percent: 0,
+      mount: '',
+    };
+  }
+}
+
+function readProjectGitInfo(projectPath) {
+  if (!projectPath || !fs.existsSync(path.join(projectPath, '.git'))) {
+    return {
+      commit: '',
+      commitShort: '',
+      commitDate: '',
+    };
+  }
+  try {
+    const commit = execFileSync('git', ['-C', projectPath, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const commitShort = commit ? commit.slice(0, 12) : '';
+    const commitDate = execFileSync('git', ['-C', projectPath, 'log', '-1', '--format=%cI'], { encoding: 'utf8' }).trim();
+    return {
+      commit,
+      commitShort,
+      commitDate,
+    };
+  } catch {
+    return {
+      commit: '',
+      commitShort: '',
+      commitDate: '',
+    };
+  }
+}
+
 function projectFallbackDomain(domain) {
   const parts = String(domain || '').trim().split('.').filter(Boolean);
   if (parts.length < 3) return '';
@@ -1200,6 +1266,8 @@ function projectView() {
       ? describeDbMachine(projectMachine)
       : (project.DB_MACHINE_ID === CUSTOM_DB_MACHINE_ID ? (project.DB_MACHINE_NAME || 'Custom / manual DB machine') : (project.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID));
     const disk = readProjectDiskUsage(project.APP_DIR || '');
+    const fsUsage = readProjectFilesystemUsage(project.APP_DIR || '');
+    const gitInfo = readProjectGitInfo(project.APP_DIR || '');
     const ssl = readProjectSslStatus(project);
     return {
       repo: project.REPO_REF || '',
@@ -1225,6 +1293,11 @@ function projectView() {
       sshPassword: project.SSH_UPLOAD_PASSWORD || '',
       disk,
       diskHuman: formatBytes(disk),
+      filesystemTotal: fsUsage.total,
+      filesystemUsed: fsUsage.used,
+      filesystemFree: fsUsage.free,
+      filesystemPercent: fsUsage.percent,
+      filesystemMount: fsUsage.mount,
       dbName: db.DB_NAME || db.DB_DATABASE || db.MYSQL_DATABASE || db.POSTGRES_DB || '',
       dbUser: db.DB_USER || db.MYSQL_USER || db.POSTGRES_USER || '',
       dbPassword: db.DB_PASSWORD || db.MYSQL_PASSWORD || db.POSTGRES_PASSWORD || '',
@@ -1242,6 +1315,9 @@ function projectView() {
       nodeEnv: env.node_env || '',
       memory: proc?.monit?.memory ?? proc?.pm2_env?.monit?.memory ?? 0,
       cpu: proc?.monit?.cpu ?? proc?.pm2_env?.monit?.cpu ?? 0,
+      gitCommit: gitInfo.commit || '',
+      gitCommitShort: gitInfo.commitShort || '',
+      gitCommitDate: gitInfo.commitDate || '',
     };
   });
 }
@@ -2367,7 +2443,10 @@ function renderProjectRows(projects) {
           </td>
           <td>${escapeHtml(project.port || '')}</td>
           <td>${escapeHtml(formatBytes(project.memory || 0))}</td>
-          <td>${escapeHtml(project.diskHuman || formatBytes(project.disk || 0))}</td>
+          <td>
+            <div>${escapeHtml(project.diskHuman || formatBytes(project.disk || 0))}</div>
+            <div class="small">${escapeHtml(project.filesystemUsed ? `${formatBytes(project.filesystemUsed)} / ${formatBytes(project.filesystemTotal || 0)}` : 'n/a')}</div>
+          </td>
           <td><span class="${projectStatusClass(project.status)}">${escapeHtml(project.status || '')}</span></td>
           <td>${project.protected ? 'yes' : 'no'}</td>
           <td><span class="pill ${escapeHtml(project.sslStatusClass || 'neutral')}">${escapeHtml(project.sslStatus || 'n/a')}</span></td>
@@ -2379,8 +2458,12 @@ function renderProjectRows(projects) {
             restarts: ${escapeHtml(String(project.restarts ?? 0))}<br>
             uptime: ${escapeHtml(fmtTime(project.uptime))}<br>
             env: ${escapeHtml(project.nodeEnv || '')}<br>
+            cpu load: ${escapeHtml(Number(project.cpu || 0).toFixed(1))}%<br>
             ram: ${escapeHtml(project.memory ? formatBytes(project.memory) : '0 B')}<br>
-            disk: ${escapeHtml(project.diskHuman || formatBytes(project.disk || 0))}<br>
+            disk: ${escapeHtml(project.filesystemUsed ? `${formatBytes(project.filesystemUsed)} / ${formatBytes(project.filesystemTotal || 0)}` : (project.diskHuman || formatBytes(project.disk || 0)))}<br>
+            mount: ${escapeHtml(project.filesystemMount || 'n/a')}<br>
+            last commit: ${escapeHtml(project.gitCommitShort || 'n/a')}<br>
+            committed at: ${escapeHtml(project.gitCommitDate ? new Date(project.gitCommitDate).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }) : 'n/a')}<br>
             ssh: ${escapeHtml(project.sshUser || 'n/a')}<br>
             mysql ips: ${escapeHtml(project.mysqlAllowedIps || 'local only')}
           </td>
