@@ -161,6 +161,50 @@ project_db_value() {
   printf '%s' ""
 }
 
+project_env_has_key() {
+  local key="$1"
+  local file=""
+
+  for file in "${ENV_CANDIDATES[@]}"; do
+    [[ -f "${APP_DIR}/${file}" ]] || continue
+    if grep -qE "^[[:space:]]*${key}=" "${APP_DIR}/${file}" 2>/dev/null; then
+      printf '%s' "yes"
+      return 0
+    fi
+  done
+
+  printf '%s' "no"
+}
+
+project_db_value_exact() {
+  local key=""
+  for key in "$@"; do
+    local value=""
+    local file=""
+    local line=""
+    for file in "${ENV_CANDIDATES[@]}"; do
+      [[ -f "${APP_DIR}/${file}" ]] || continue
+      line="$(grep -hE "^[[:space:]]*${key}=" "${APP_DIR}/${file}" 2>/dev/null | tail -n1 || true)"
+      if [[ -n "${line}" ]] || grep -qE "^[[:space:]]*${key}=" "${APP_DIR}/${file}" 2>/dev/null; then
+        value="${line#*=}"
+      fi
+    done
+
+    if [[ "${#value}" -ge 2 && "${value:0:1}" == "'"'"'" && "${value: -1}" == "'"'"'" ]]; then
+      value="${value:1:${#value}-2}"
+    elif [[ "${#value}" -ge 2 && "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+
+    if [[ -n "${value}" || "$(project_env_has_key "${key}")" == "yes" ]]; then
+      printf '%s' "${value}"
+      return
+    fi
+  done
+
+  printf '%s' ""
+}
+
 project_custom_db_machine_details() {
   local machine_name=""
   local machine_host=""
@@ -169,12 +213,12 @@ project_custom_db_machine_details() {
   local machine_port=""
   local machine_notes=""
 
-  machine_name="$(project_db_value DB_MACHINE_NAME)"
-  machine_host="$(project_db_value DB_MACHINE_HOST DB_HOST MYSQL_HOST POSTGRES_HOST)"
-  machine_root_user="$(project_db_value DB_MACHINE_ROOT_USER)"
-  machine_root_password="$(project_db_value DB_MACHINE_ROOT_PASSWORD)"
-  machine_port="$(project_db_value DB_MACHINE_PORT DB_PORT MYSQL_PORT POSTGRES_PORT)"
-  machine_notes="$(project_db_value DB_MACHINE_NOTES)"
+  machine_name="$(project_db_value_exact DB_MACHINE_NAME)"
+  machine_host="$(project_db_value_exact DB_MACHINE_HOST DB_HOST MYSQL_HOST POSTGRES_HOST)"
+  machine_root_user="$(project_db_value_exact DB_MACHINE_ROOT_USER)"
+  machine_root_password="$(project_db_value_exact DB_MACHINE_ROOT_PASSWORD)"
+  machine_port="$(project_db_value_exact DB_MACHINE_PORT DB_PORT MYSQL_PORT POSTGRES_PORT)"
+  machine_notes="$(project_db_value_exact DB_MACHINE_NOTES)"
 
   [[ -n "${machine_host}" ]] || return 1
   [[ -n "${machine_name}" ]] || machine_name="custom"
