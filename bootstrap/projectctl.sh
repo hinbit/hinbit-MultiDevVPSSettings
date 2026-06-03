@@ -53,7 +53,7 @@ Usage:
   projectctl status owner/repo
   projectctl script [--pm2] [--dir path] owner/repo package-script
   projectctl password [--password secret|--clear] owner/repo
-  projectctl mysql [--machine id] [--machine-name name] [--machine-host host] [--machine-port port] [--machine-root-user user] [--machine-root-password password] [--machine-notes notes] [--ips ip1,ip2] owner/repo
+  projectctl mysql [--move-data] [--db-name name] [--db-user user] [--db-password password] [--machine id] [--machine-name name] [--machine-host host] [--machine-port port] [--machine-root-user user] [--machine-root-password password] [--machine-notes notes] [--ips ip1,ip2] owner/repo
   projectctl ssh [--password secret|--generate] owner/repo
   projectctl uninstall owner/repo
   projectctl list
@@ -68,7 +68,7 @@ Defaults:
   - when a domain is provided, VITE_ALLOWED_HOSTS and CORS_ORIGIN are exported for the PM2 runtime
   - `projectctl script` runs a package.json script, with optional `--pm2` for runtime scripts and `--dir` for scripts living in `server/` or `client/`
   - `projectctl password` enables or clears nginx basic auth for a project's domain
-  - `projectctl mysql` manages MySQL access IPs and DB machine placement for a project's DB user
+  - `projectctl mysql` manages MySQL access IPs and DB machine placement for a project's DB user, and `--move-data` copies the DB to the selected machine before switching over
   - `projectctl ssh` shows or rotates the project's SSH/SFTP upload credentials
   - `projectctl update` prompts before pulling local changes; set PROJECTCTL_PULL_MODE=merge-env|stash-all to force the choice
 EOF
@@ -859,6 +859,97 @@ mysql_exec_machine() {
   MYSQL_PWD="${DB_MACHINE_ROOT_PASSWORD:-}" mysql --protocol=tcp -h "${DB_MACHINE_HOST}" -P "${DB_MACHINE_PORT:-3306}" -u "${DB_MACHINE_ROOT_USER}" --batch --skip-column-names -e "${query}"
 }
 
+mysql_exec_with_details() {
+  local host="$1"
+  local port="$2"
+  local user="$3"
+  local password="$4"
+  local query="$5"
+
+  [[ -n "${host}" ]] || die "Missing MySQL host"
+  [[ -n "${user}" ]] || die "Missing MySQL user"
+  MYSQL_PWD="${password}" mysql --protocol=tcp -h "${host}" -P "${port:-3306}" -u "${user}" --batch --skip-column-names -e "${query}"
+}
+
+mysql_dump_with_details() {
+  local host="$1"
+  local port="$2"
+  local user="$3"
+  local password="$4"
+  local db_name="$5"
+  local dump_file="$6"
+
+  [[ -n "${host}" ]] || die "Missing MySQL host for dump"
+  [[ -n "${db_name}" ]] || die "Missing database name for dump"
+  MYSQL_PWD="${password}" mysqldump \
+    --protocol=tcp \
+    -h "${host}" \
+    -P "${port:-3306}" \
+    -u "${user}" \
+    --single-transaction \
+    --skip-lock-tables \
+    --routines \
+    --triggers \
+    --events \
+    --hex-blob \
+    --default-character-set=utf8mb4 \
+    --add-drop-table \
+    "${db_name}" > "${dump_file}"
+}
+
+mysql_import_with_details() {
+  local host="$1"
+  local port="$2"
+  local user="$3"
+  local password="$4"
+  local db_name="$5"
+  local dump_file="$6"
+
+  [[ -n "${host}" ]] || die "Missing MySQL host for import"
+  [[ -n "${db_name}" ]] || die "Missing database name for import"
+  MYSQL_PWD="${password}" mysql \
+    --protocol=tcp \
+    -h "${host}" \
+    -P "${port:-3306}" \
+    -u "${user}" \
+    --default-character-set=utf8mb4 \
+    "${db_name}" < "${dump_file}"
+}
+
+migrate_mysql_database() {
+  local source_host="$1"
+  local source_port="$2"
+  local source_user="$3"
+  local source_password="$4"
+  local target_host="$5"
+  local target_port="$6"
+  local target_user="$7"
+  local target_password="$8"
+  local db_name="$9"
+  local source_label="${10:-source}"
+  local target_label="${11:-target}"
+  local dump_file=""
+  local source_marker=""
+  local target_marker=""
+
+  [[ -n "${db_name}" ]] || die "Missing database name for migration"
+  [[ -n "${source_host}" ]] || die "Missing source MySQL host for migration"
+  [[ -n "${target_host}" ]] || die "Missing target MySQL host for migration"
+
+  source_marker="${source_host}:${source_port:-3306}/${source_label}"
+  target_marker="${target_host}:${target_port:-3306}/${target_label}"
+  printf '[projectctl] migrating database %s from %s to %s\n' "${db_name}" "${source_marker}" "${target_marker}"
+
+  dump_file="$(mktemp)"
+  trap 'rm -f "'"${dump_file}"'"' RETURN
+
+  mysql_dump_with_details "${source_host}" "${source_port:-3306}" "${source_user}" "${source_password}" "${db_name}" "${dump_file}"
+  mysql_exec_with_details "${target_host}" "${target_port:-3306}" "${target_user}" "${target_password}" "CREATE DATABASE IF NOT EXISTS $(sql_ident "${db_name}") CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+  mysql_import_with_details "${target_host}" "${target_port:-3306}" "${target_user}" "${target_password}" "${db_name}" "${dump_file}"
+  rm -f "${dump_file}"
+  trap - RETURN
+}
+
 project_db_machine_id() {
   local machine_id=""
   machine_id="$(project_db_value DB_MACHINE_ID)"
@@ -968,6 +1059,25 @@ sync_project_db_machine_env() {
     [[ -n "${machine_port}" ]] && update_meta_value "${project_env}" "MYSQL_PORT" "${machine_port}"
     [[ -n "${machine_root_user}" ]] && update_meta_value "${project_env}" "DB_MACHINE_ROOT_USER" "${machine_root_user}"
     [[ -n "${machine_root_password}" ]] && update_meta_value "${project_env}" "DB_MACHINE_ROOT_PASSWORD" "${machine_root_password}"
+  done
+}
+
+sync_project_db_identity_env() {
+  local db_name="${1:-}"
+  local db_user="${2:-}"
+  local db_password="${3:-}"
+  local project_env=""
+
+  for project_env in "${APP_DIR}/.env" "${APP_DIR}/server/.env"; do
+    [[ -f "${project_env}" ]] || continue
+    update_meta_value "${project_env}" "DB_NAME" "${db_name}"
+    update_meta_value "${project_env}" "DB_DATABASE" "${db_name}"
+    update_meta_value "${project_env}" "MYSQL_DATABASE" "${db_name}"
+    update_meta_value "${project_env}" "DB_USER" "${db_user}"
+    update_meta_value "${project_env}" "MYSQL_USER" "${db_user}"
+    update_meta_value "${project_env}" "DB_PASSWORD" "${db_password}"
+    update_meta_value "${project_env}" "MYSQL_PASSWORD" "${db_password}"
+    normalize_env_file_shell_safe "${project_env}"
   done
 }
 
@@ -2314,6 +2424,10 @@ do_mysql() {
   local machine_root_user="${7:-__unset__}"
   local machine_root_password="${8:-__unset__}"
   local machine_notes="${9:-__unset__}"
+  local db_name_override="${10:-__unset__}"
+  local db_user_override="${11:-__unset__}"
+  local db_password_override="${12:-__unset__}"
+  local move_data="${13:-no}"
   local slug
   local meta
   local old_ips
@@ -2321,6 +2435,16 @@ do_mysql() {
   local db_name
   local db_user
   local db_password
+  local custom_db_name
+  local custom_db_user
+  local custom_db_password
+  local source_machine_id
+  local source_machine_name
+  local source_machine_host
+  local source_machine_port
+  local source_machine_root_user
+  local source_machine_root_password
+  local source_machine_notes
   local active_machine_id
   local active_machine_host
   local active_machine_port
@@ -2341,13 +2465,33 @@ do_mysql() {
   slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
+  source_machine_id="$(project_db_machine_id)"
+  resolve_db_machine "${source_machine_id}"
+  source_machine_name="${DB_MACHINE_NAME}"
+  source_machine_host="${DB_MACHINE_HOST}"
+  source_machine_port="${DB_MACHINE_PORT}"
+  source_machine_root_user="${DB_MACHINE_ROOT_USER}"
+  source_machine_root_password="${DB_MACHINE_ROOT_PASSWORD}"
+  source_machine_notes="${DB_MACHINE_NOTES}"
+  custom_db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
+  custom_db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
+  custom_db_password="$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)"
+  if [[ "${db_name_override}" != "__unset__" ]]; then
+    custom_db_name="${db_name_override}"
+  fi
+  if [[ "${db_user_override}" != "__unset__" ]]; then
+    custom_db_user="${db_user_override}"
+  fi
+  if [[ "${db_password_override}" != "__unset__" ]]; then
+    custom_db_password="${db_password_override}"
+  fi
 
   if [[ "${machine_name}" != "__unset__" || "${machine_host}" != "__unset__" || "${machine_port}" != "__unset__" || "${machine_root_user}" != "__unset__" || "${machine_root_password}" != "__unset__" || "${machine_notes}" != "__unset__" ]]; then
     custom_requested="yes"
   fi
 
   old_ips="${MYSQL_ALLOWED_IPS:-}"
-  current_machine_id="$(project_db_machine_id)"
+  current_machine_id="${source_machine_id}"
   active_machine_id="${current_machine_id}"
   if [[ "${machine_id}" != "__unset__" && -n "${machine_id}" ]]; then
     active_machine_id="${machine_id}"
@@ -2356,6 +2500,9 @@ do_mysql() {
     fi
   fi
   if [[ "${ips}" != "__unset__" ]]; then
+    mutate="yes"
+  fi
+  if [[ "${move_data}" == "yes" ]]; then
     mutate="yes"
   fi
 
@@ -2378,10 +2525,18 @@ do_mysql() {
     [[ -n "${custom_machine_host}" ]] || die "Missing custom DB machine host"
     [[ -n "${custom_machine_port}" ]] || custom_machine_port="3306"
     [[ -n "${custom_machine_root_user}" ]] || custom_machine_root_user="root"
-    if [[ ! "${custom_machine_host}" =~ ^(localhost|127\.0\.0\.1|::1)$ && -z "${custom_machine_root_password}" ]]; then
-      die "Missing custom DB machine root password"
-    fi
     sync_project_db_machine_env "${active_machine_id}" "${custom_machine_host}" "${custom_machine_port}" "${custom_machine_root_user}" "${custom_machine_root_password}" "${custom_machine_name}" "${custom_machine_notes}"
+    sync_project_db_identity_env "${custom_db_name}" "${custom_db_user}" "${custom_db_password}"
+  fi
+
+  if [[ "${move_data}" == "yes" && "${source_machine_id}" != "${active_machine_id}" ]]; then
+    resolve_db_machine "${active_machine_id}"
+    active_machine_name="${DB_MACHINE_NAME}"
+    active_machine_host="${DB_MACHINE_HOST}"
+    active_machine_port="${DB_MACHINE_PORT}"
+    active_machine_root_user="${DB_MACHINE_ROOT_USER}"
+    active_machine_root_password="${DB_MACHINE_ROOT_PASSWORD}"
+    active_machine_notes="${DB_MACHINE_NOTES}"
   fi
 
   if [[ "${mutate}" != "yes" ]]; then
@@ -2424,16 +2579,60 @@ do_mysql() {
   db_password="$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)"
 
   MYSQL_ALLOWED_IPS="${new_ips}"
+  if [[ "${move_data}" == "yes" && "${source_machine_id}" != "${active_machine_id}" ]]; then
+    if [[ "${source_machine_host}" =~ ^(localhost|127\.0\.0\.1|::1)$ && -z "${source_machine_root_password}" ]]; then
+      source_machine_root_password="$(db_machine_record "${LOCAL_DB_MACHINE_ID}" "rootPassword" 2>/dev/null || true)"
+    fi
+    if [[ "${active_machine_host}" =~ ^(localhost|127\.0\.0\.1|::1)$ && -z "${active_machine_root_password}" ]]; then
+      active_machine_root_password="$(db_machine_record "${LOCAL_DB_MACHINE_ID}" "rootPassword" 2>/dev/null || true)"
+    fi
+    if [[ -z "${db_name}" ]]; then
+      die "Missing database name in project env"
+    fi
+    if [[ -z "${source_machine_host}" ]]; then
+      die "Missing source DB machine host"
+    fi
+    if [[ -z "${source_machine_root_user}" ]]; then
+      die "Missing source DB machine root user"
+    fi
+    if [[ -z "${source_machine_root_password}" ]]; then
+      die "Missing source DB machine root password"
+    fi
+    if [[ -z "${active_machine_host}" ]]; then
+      die "Missing target DB machine host"
+    fi
+    if [[ -z "${active_machine_root_user}" ]]; then
+      die "Missing target DB machine root user"
+    fi
+    if [[ -z "${active_machine_root_password}" && ! "${active_machine_host}" =~ ^(localhost|127\.0\.0\.1|::1)$ ]]; then
+      die "Missing target DB machine root password"
+    fi
+    migrate_mysql_database "${source_machine_host}" "${source_machine_port}" "${source_machine_root_user}" "${source_machine_root_password}" "${active_machine_host}" "${active_machine_port}" "${active_machine_root_user}" "${active_machine_root_password}" "${db_name}" "${source_machine_name:-${source_machine_id}}" "${active_machine_name:-${active_machine_id}}"
+  fi
+
+  local should_sync_permissions="yes"
+  if [[ "${custom_requested}" == "yes" && "${move_data}" != "yes" && -z "${custom_machine_root_password}" ]]; then
+    should_sync_permissions="no"
+  fi
+
   if [[ "${custom_requested}" != "yes" ]]; then
     resolve_db_machine "${active_machine_id}"
     sync_project_db_machine_env "${active_machine_id}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
   else
     resolve_db_machine "${active_machine_id}"
   fi
-  sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS}" "${old_ips}" "${active_machine_id}"
+  if [[ "${should_sync_permissions}" == "yes" ]]; then
+    sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS}" "${old_ips}" "${active_machine_id}"
+  fi
   update_meta_value "${meta}" "MYSQL_ALLOWED_IPS" "${MYSQL_ALLOWED_IPS}"
   update_meta_value "${meta}" "DB_MACHINE_ID" "${active_machine_id}"
-  printf '[projectctl] mysql permissions updated for %s (%s)\n' "${REPO_REF}" "${MYSQL_ALLOWED_IPS:-local only}"
+  if [[ "${move_data}" == "yes" && "${source_machine_id}" != "${active_machine_id}" ]]; then
+    printf '[projectctl] mysql data moved and permissions updated for %s (%s)\n' "${REPO_REF}" "${MYSQL_ALLOWED_IPS:-local only}"
+  elif [[ "${should_sync_permissions}" != "yes" ]]; then
+    printf '[projectctl] saved custom DB connection for %s without permission sync (root password not provided)\n' "${REPO_REF}"
+  else
+    printf '[projectctl] mysql permissions updated for %s (%s)\n' "${REPO_REF}" "${MYSQL_ALLOWED_IPS:-local only}"
+  fi
 }
 
 remove_mysql_permissions() {
@@ -2648,6 +2847,9 @@ main() {
       ;;
     mysql)
       local ips="__unset__"
+      local db_name="__unset__"
+      local db_user="__unset__"
+      local db_password="__unset__"
       local machine_id="__unset__"
       local machine_name="__unset__"
       local machine_host="__unset__"
@@ -2655,8 +2857,25 @@ main() {
       local machine_root_user="__unset__"
       local machine_root_password="__unset__"
       local machine_notes="__unset__"
+      local move_data="no"
       while [[ $# -gt 0 ]]; do
         case "$1" in
+          --move-data)
+            move_data="yes"
+            shift
+            ;;
+          --db-name)
+            db_name="${2:-}"
+            shift 2
+            ;;
+          --db-user)
+            db_user="${2:-}"
+            shift 2
+            ;;
+          --db-password)
+            db_password="${2:-}"
+            shift 2
+            ;;
           --ips)
             ips="${2:-}"
             shift 2
@@ -2699,7 +2918,7 @@ main() {
         esac
       done
       [[ $# -eq 1 ]] || { usage; exit 1; }
-      do_mysql "$1" "${ips}" "${machine_id}" "${machine_name}" "${machine_host}" "${machine_port}" "${machine_root_user}" "${machine_root_password}" "${machine_notes}"
+      do_mysql "$1" "${ips}" "${machine_id}" "${machine_name}" "${machine_host}" "${machine_port}" "${machine_root_user}" "${machine_root_password}" "${machine_notes}" "${db_name}" "${db_user}" "${db_password}" "${move_data}"
       ;;
     ssh)
       local password=""

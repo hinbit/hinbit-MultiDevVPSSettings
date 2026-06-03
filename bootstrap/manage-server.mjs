@@ -3469,6 +3469,16 @@ function renderPage() {
           </label>
           <div id="mysqlCustomFields" class="stack" hidden>
             <div class="small">Custom / manual DB machine values are saved only for this project in <code>.env.machine</code>.</div>
+            <div class="small">Project DB name, user, and password update the project&apos;s <code>.env</code> values for this connection.</div>
+            <label>Project DB name
+              <input id="mysqlCustomDbName" type="text" placeholder="project_db">
+            </label>
+            <label>Project DB user
+              <input id="mysqlCustomDbUser" type="text" placeholder="project_user">
+            </label>
+            <label>Project DB password
+              <input id="mysqlCustomDbPassword" type="password" placeholder="••••••••">
+            </label>
             <label>Custom DB machine name
               <input id="mysqlCustomName" type="text" placeholder="Custom DB machine">
             </label>
@@ -3643,6 +3653,9 @@ function renderPage() {
     const mysqlFlash = document.getElementById('mysqlFlash');
     const mysqlMachineSelect = document.getElementById('mysqlMachineSelect');
     const mysqlCustomFields = document.getElementById('mysqlCustomFields');
+    const mysqlCustomDbName = document.getElementById('mysqlCustomDbName');
+    const mysqlCustomDbUser = document.getElementById('mysqlCustomDbUser');
+    const mysqlCustomDbPassword = document.getElementById('mysqlCustomDbPassword');
     const mysqlCustomName = document.getElementById('mysqlCustomName');
     const mysqlCustomHost = document.getElementById('mysqlCustomHost');
     const mysqlCustomPort = document.getElementById('mysqlCustomPort');
@@ -3653,6 +3666,7 @@ function renderPage() {
     const mysqlAccounts = document.getElementById('mysqlAccounts');
     const mysqlPhpMyAdminBtn = document.getElementById('mysqlPhpMyAdminBtn');
     const mysqlSaveBtn = document.getElementById('mysqlSaveBtn');
+    const mysqlMoveBtn = document.getElementById('mysqlMoveBtn');
     const closeMysqlBtn = document.getElementById('closeMysqlBtn');
     const sshPanel = document.getElementById('sshPanel');
     const sshTitle = document.getElementById('sshTitle');
@@ -3793,6 +3807,10 @@ function renderPage() {
 
     function fillMysqlCustomFields(details) {
       const custom = details?.dbMachineCustom || {};
+      const db = details?.db || {};
+      if (mysqlCustomDbName) mysqlCustomDbName.value = db.DB_NAME || db.DB_DATABASE || db.MYSQL_DATABASE || db.POSTGRES_DB || '';
+      if (mysqlCustomDbUser) mysqlCustomDbUser.value = db.DB_USER || db.MYSQL_USER || db.POSTGRES_USER || '';
+      if (mysqlCustomDbPassword) mysqlCustomDbPassword.value = db.DB_PASSWORD || db.MYSQL_PASSWORD || db.POSTGRES_PASSWORD || '';
       if (mysqlCustomName) mysqlCustomName.value = custom.name || details?.dbMachineLabel || '';
       if (mysqlCustomHost) mysqlCustomHost.value = custom.host || details?.dbMachineHost || '';
       if (mysqlCustomPort) mysqlCustomPort.value = custom.port || '';
@@ -3806,7 +3824,7 @@ function renderPage() {
         dbMachineSelect.innerHTML = renderDbMachineSelectOptions(currentDbMachines, selectedId || dbMachineSelect.value || '${LOCAL_DB_MACHINE_ID}', true);
       }
       if (mysqlMachineSelect) {
-        mysqlMachineSelect.innerHTML = renderDbMachineSelectOptions(currentDbMachines, selectedId || mysqlMachineSelect.value || '${LOCAL_DB_MACHINE_ID}');
+        mysqlMachineSelect.innerHTML = renderDbMachineSelectOptions(currentDbMachines, selectedId || mysqlMachineSelect.value || '${LOCAL_DB_MACHINE_ID}', true);
       }
     }
 
@@ -4494,9 +4512,12 @@ function renderPage() {
       await refresh();
     }
 
-    async function saveMysql(ref, ips) {
+    async function saveMysql(ref, ips, moveData = false) {
       const machineId = mysqlMachineSelect ? mysqlMachineSelect.value : '';
       const useCustom = String(machineId || '') === CUSTOM_DB_MACHINE_ID;
+      const projectDbName = mysqlCustomDbName ? mysqlCustomDbName.value.trim() : '';
+      const projectDbUser = mysqlCustomDbUser ? mysqlCustomDbUser.value.trim() : '';
+      const projectDbPassword = mysqlCustomDbPassword ? mysqlCustomDbPassword.value : '';
       const customMachine = useCustom ? {
         id: CUSTOM_DB_MACHINE_ID,
         name: mysqlCustomName ? mysqlCustomName.value.trim() : '',
@@ -4506,12 +4527,26 @@ function renderPage() {
         rootPassword: mysqlCustomRootPassword ? mysqlCustomRootPassword.value : '',
         notes: mysqlCustomNotes ? mysqlCustomNotes.value.trim() : '',
       } : null;
+      if (moveData) {
+        const ok = window.confirm(
+          'Move the current database to the selected DB machine and switch this project over? This copies the current database contents and may overwrite the target database.'
+        );
+        if (!ok) return;
+      }
       const res = await api(\`/projects/\${ref}/mysql\`, {
         method: 'POST',
-        body: JSON.stringify(useCustom ? { ips, machineId: CUSTOM_DB_MACHINE_ID, customMachine } : { ips, machineId }),
+        body: JSON.stringify(useCustom ? {
+          ips,
+          machineId: CUSTOM_DB_MACHINE_ID,
+          customMachine,
+          dbName: projectDbName,
+          dbUser: projectDbUser,
+          dbPassword: projectDbPassword,
+          moveData,
+        } : { ips, machineId, moveData }),
       });
       await loadMysql(ref);
-      showMessage(mysqlFlash, res.message || 'MySQL permissions updated');
+      showMessage(mysqlFlash, res.message || (moveData ? 'MySQL data moved' : 'MySQL permissions updated'));
       await refresh();
     }
 
@@ -4956,7 +4991,7 @@ function renderPage() {
       if (!currentMysqlRef) return;
       mysqlSaveBtn.disabled = true;
       try {
-        await saveMysql(currentMysqlRef, mysqlIpsInput.value.trim());
+        await saveMysql(currentMysqlRef, mysqlIpsInput.value.trim(), false);
       } catch (error) {
         showMessage(mysqlFlash, error.message, false);
         mysqlPanel.hidden = false;
@@ -4964,6 +4999,21 @@ function renderPage() {
         mysqlSaveBtn.disabled = false;
       }
     });
+
+    if (mysqlMoveBtn) {
+      mysqlMoveBtn.addEventListener('click', async () => {
+        if (!currentMysqlRef) return;
+        mysqlMoveBtn.disabled = true;
+        try {
+          await saveMysql(currentMysqlRef, mysqlIpsInput.value.trim(), true);
+        } catch (error) {
+          showMessage(mysqlFlash, error.message, false);
+          mysqlPanel.hidden = false;
+        } finally {
+          mysqlMoveBtn.disabled = false;
+        }
+      });
+    }
 
     document.getElementById('installBtn').addEventListener('click', async () => {
       currentInstallScriptsRef = '';
@@ -5572,6 +5622,9 @@ async function handleRequest(req, res) {
         const ips = String(body.ips || '').trim();
         const machineId = String(body.machineId || projectMachineId || LOCAL_DB_MACHINE_ID).trim();
         const customMachineInput = body.customMachine && typeof body.customMachine === 'object' ? body.customMachine : null;
+        const dbName = String(body.dbName || '').trim();
+        const dbUser = String(body.dbUser || '').trim();
+        const dbPassword = String(body.dbPassword || '');
         const useCustomMachine = machineId === CUSTOM_DB_MACHINE_ID || Boolean(customMachineInput);
         const args = ['mysql'];
         if (useCustomMachine) {
@@ -5584,6 +5637,7 @@ async function handleRequest(req, res) {
             rootPassword: body.customMachineRootPassword || '',
             notes: body.customMachineNotes || '',
           }, { id: CUSTOM_DB_MACHINE_ID, name: 'Custom DB machine', host: '', rootUser: 'root', rootPassword: '', port: '3306', notes: '' });
+          args.push('--db-name', dbName, '--db-user', dbUser, '--db-password', dbPassword);
           args.push(
             '--machine', CUSTOM_DB_MACHINE_ID,
             '--machine-name', normalizedCustomMachine.name,
@@ -5596,6 +5650,7 @@ async function handleRequest(req, res) {
         } else if (machineId) {
           args.push('--machine', machineId);
         }
+        if (body.moveData) args.push('--move-data');
         args.push('--ips', ips, ref);
         const output = runProjectCtl(args);
         const refreshedMeta = parseEnvFile(metaPathForRef(ref));
