@@ -456,6 +456,19 @@ function normalizeMysqlMachine(machineOrId) {
     };
   }
 
+  if (String(machineOrId || '') === CUSTOM_DB_MACHINE_ID) {
+    return {
+      id: CUSTOM_DB_MACHINE_ID,
+      name: 'custom',
+      host: '',
+      rootUser: 'root',
+      rootPassword: '',
+      port: '3306',
+      notes: '',
+      originHost: '',
+    };
+  }
+
   const machines = readDbMachines();
   return machines.find((item) => String(item.id) === String(machineOrId))
     || machines.find((item) => String(item.id) === LOCAL_DB_MACHINE_ID)
@@ -478,7 +491,7 @@ function resolveProjectMysqlMachine(meta, projectPath) {
   if (!host) {
     return {
       machine: null,
-      isCustom: false,
+      isCustom: machineId === CUSTOM_DB_MACHINE_ID,
     };
   }
 
@@ -1183,6 +1196,9 @@ function projectView() {
     const { db } = pickDbDetails(project.APP_DIR || '');
     const projectMachineContext = resolveProjectMysqlMachine(project, project.APP_DIR || '');
     const projectMachine = projectMachineContext.machine || null;
+    const projectMachineLabel = projectMachine
+      ? describeDbMachine(projectMachine)
+      : (project.DB_MACHINE_ID === CUSTOM_DB_MACHINE_ID ? (project.DB_MACHINE_NAME || 'Custom / manual DB machine') : (project.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID));
     const disk = readProjectDiskUsage(project.APP_DIR || '');
     const ssl = readProjectSslStatus(project);
     return {
@@ -1199,7 +1215,7 @@ function projectView() {
       packageManager: project.PACKAGE_MANAGER || '',
       mysqlAllowedIps: project.MYSQL_ALLOWED_IPS || '',
       dbMachineId: project.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID,
-      dbMachineLabel: projectMachine ? describeDbMachine(projectMachine) : (project.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID),
+      dbMachineLabel: projectMachineLabel,
       dbMachineHost: projectMachine?.originHost || projectMachine?.host || '',
       dbMachineRootUser: projectMachine?.rootUser || '',
       dbMachineRootPassword: projectMachine?.rootPassword || '',
@@ -1513,9 +1529,12 @@ function renderDbMachineRows(machines) {
   }).join('');
 }
 
-function renderDbMachineOptions(machines, selectedId = LOCAL_DB_MACHINE_ID) {
+function renderDbMachineOptions(machines, selectedId = LOCAL_DB_MACHINE_ID, includeCustom = false) {
   const list = Array.isArray(machines) && machines.length ? machines : [{ ...LOCAL_DB_MACHINE }];
-  return list.map((machine) => {
+  const items = includeCustom
+    ? [{ id: CUSTOM_DB_MACHINE_ID, name: 'Custom / manual DB machine', host: '', notes: 'Saved per project only' }, ...list]
+    : list;
+  return items.map((machine) => {
     const id = String(machine.id || '');
     const label = describeDbMachine(machine);
     return `<option value="${escapeHtml(id)}"${id === String(selectedId || '') ? ' selected' : ''}>${escapeHtml(label)}</option>`;
@@ -3168,7 +3187,7 @@ function renderPage() {
   const initialProjects = JSON.stringify(projects).replace(/</g, '\\u003c');
   const initialProjectsRows = renderProjectRows(projects);
   const dbMachines = readDbMachines();
-  const dbMachineOptions = renderDbMachineOptions(dbMachines, LOCAL_DB_MACHINE_ID);
+  const dbMachineOptions = renderDbMachineOptions(dbMachines, LOCAL_DB_MACHINE_ID, true);
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -3474,8 +3493,9 @@ function renderPage() {
           </label>
           <div class="actions">
             <a id="mysqlPhpMyAdminBtn" class="btn ghost" href="/phpmyadmin/" target="_blank" rel="noreferrer">phpMyAdmin</a>
-            <button id="mysqlSaveBtn" class="secondary" type="button">Save & move</button>
+            <button id="mysqlSaveBtn" class="secondary" type="button">Save connection</button>
           </div>
+          <div class="small muted">Saving updates the selected DB machine access for this project. It does not move existing data.</div>
           <div id="mysqlAccounts" class="kv-list"></div>
         </div>
       </div>
@@ -3783,7 +3803,7 @@ function renderPage() {
 
     function syncDbMachineSelects(selectedId) {
       if (dbMachineSelect) {
-        dbMachineSelect.innerHTML = renderDbMachineSelectOptions(currentDbMachines, selectedId || dbMachineSelect.value || '${LOCAL_DB_MACHINE_ID}');
+        dbMachineSelect.innerHTML = renderDbMachineSelectOptions(currentDbMachines, selectedId || dbMachineSelect.value || '${LOCAL_DB_MACHINE_ID}', true);
       }
       if (mysqlMachineSelect) {
         mysqlMachineSelect.innerHTML = renderDbMachineSelectOptions(currentDbMachines, selectedId || mysqlMachineSelect.value || '${LOCAL_DB_MACHINE_ID}');
@@ -5515,7 +5535,9 @@ async function handleRequest(req, res) {
       const machines = readDbMachines();
       const projectMachineContext = resolveProjectMysqlMachine(meta, projectPath);
       const projectMachine = projectMachineContext.machine || machines.find((item) => String(item.id) === String(projectMachineId)) || null;
-      const projectMachineLabel = projectMachine ? describeDbMachine(projectMachine) : projectMachineId;
+      const projectMachineLabel = projectMachine
+        ? describeDbMachine(projectMachine)
+        : (projectMachineId === CUSTOM_DB_MACHINE_ID ? (meta.DB_MACHINE_NAME || 'Custom / manual DB machine') : projectMachineId);
       const projectMachineHost = projectMachine?.originHost || projectMachine?.host || 'n/a';
       const projectMachineRootUser = projectMachine?.rootUser || 'root';
       const projectMachineRootPassword = projectMachine?.rootPassword || '';

@@ -942,29 +942,32 @@ sync_project_db_machine_env() {
   touch "${env_file}"
   chmod 0600 "${env_file}"
   update_meta_value "${env_file}" "DB_MACHINE_ID" "${machine_id}"
-  update_meta_value "${env_file}" "DB_MACHINE_NAME" "${machine_name}"
-  update_meta_value "${env_file}" "DB_MACHINE_HOST" "${machine_host}"
-  update_meta_value "${env_file}" "DB_MACHINE_PORT" "${machine_port}"
-  update_meta_value "${env_file}" "DB_MACHINE_ROOT_USER" "${machine_root_user}"
-  update_meta_value "${env_file}" "DB_MACHINE_ROOT_PASSWORD" "${machine_root_password}"
-  update_meta_value "${env_file}" "DB_MACHINE_NOTES" "${machine_notes}"
-  update_meta_value "${env_file}" "DB_HOST" "${machine_host}"
-  update_meta_value "${env_file}" "DB_PORT" "${machine_port}"
-  update_meta_value "${env_file}" "MYSQL_HOST" "${machine_host}"
-  update_meta_value "${env_file}" "MYSQL_PORT" "${machine_port}"
+  [[ -n "${machine_name}" ]] && update_meta_value "${env_file}" "DB_MACHINE_NAME" "${machine_name}"
+  [[ -n "${machine_host}" ]] && update_meta_value "${env_file}" "DB_MACHINE_HOST" "${machine_host}"
+  [[ -n "${machine_port}" ]] && update_meta_value "${env_file}" "DB_MACHINE_PORT" "${machine_port}"
+  [[ -n "${machine_root_user}" ]] && update_meta_value "${env_file}" "DB_MACHINE_ROOT_USER" "${machine_root_user}"
+  [[ -n "${machine_root_password}" ]] && update_meta_value "${env_file}" "DB_MACHINE_ROOT_PASSWORD" "${machine_root_password}"
+  [[ -n "${machine_notes}" ]] && update_meta_value "${env_file}" "DB_MACHINE_NOTES" "${machine_notes}"
+  [[ -n "${machine_host}" ]] && update_meta_value "${env_file}" "DB_HOST" "${machine_host}"
+  [[ -n "${machine_port}" ]] && update_meta_value "${env_file}" "DB_PORT" "${machine_port}"
+  [[ -n "${machine_host}" ]] && update_meta_value "${env_file}" "MYSQL_HOST" "${machine_host}"
+  [[ -n "${machine_port}" ]] && update_meta_value "${env_file}" "MYSQL_PORT" "${machine_port}"
   db_type="$(project_db_value DB_TYPE VITE_DB_TYPE)"
   if [[ "${db_type,,}" == "mysql" ]]; then
-    update_meta_value "${env_file}" "MYSQL_USER" "${machine_root_user}"
-    update_meta_value "${env_file}" "MYSQL_PASSWORD" "${machine_root_password}"
+    [[ -n "${machine_root_user}" ]] && update_meta_value "${env_file}" "MYSQL_USER" "${machine_root_user}"
+    [[ -n "${machine_root_password}" ]] && update_meta_value "${env_file}" "MYSQL_PASSWORD" "${machine_root_password}"
   fi
 
   for project_env in "${APP_DIR}/.env" "${APP_DIR}/server/.env"; do
     [[ -f "${project_env}" ]] || continue
     update_meta_value "${project_env}" "DB_MACHINE_ID" "${machine_id}"
-    update_meta_value "${project_env}" "DB_HOST" "${machine_host}"
-    update_meta_value "${project_env}" "DB_PORT" "${machine_port}"
-    update_meta_value "${project_env}" "MYSQL_HOST" "${machine_host}"
-    update_meta_value "${project_env}" "MYSQL_PORT" "${machine_port}"
+    [[ -n "${machine_name}" ]] && update_meta_value "${project_env}" "DB_MACHINE_NAME" "${machine_name}"
+    [[ -n "${machine_host}" ]] && update_meta_value "${project_env}" "DB_HOST" "${machine_host}"
+    [[ -n "${machine_port}" ]] && update_meta_value "${project_env}" "DB_PORT" "${machine_port}"
+    [[ -n "${machine_host}" ]] && update_meta_value "${project_env}" "MYSQL_HOST" "${machine_host}"
+    [[ -n "${machine_port}" ]] && update_meta_value "${project_env}" "MYSQL_PORT" "${machine_port}"
+    [[ -n "${machine_root_user}" ]] && update_meta_value "${project_env}" "DB_MACHINE_ROOT_USER" "${machine_root_user}"
+    [[ -n "${machine_root_password}" ]] && update_meta_value "${project_env}" "DB_MACHINE_ROOT_PASSWORD" "${machine_root_password}"
   done
 }
 
@@ -1911,7 +1914,11 @@ do_install() {
   local db_user=""
   local db_password=""
   local db_type=""
+  local custom_db_machine=0
   IFS=$'\t' read -r db_name db_user db_password db_type < <(sync_project_db_env "${APP_DIR}")
+  if [[ "${DB_MACHINE_ID}" == "custom" ]]; then
+    custom_db_machine=1
+  fi
 
   PACKAGE_MANAGER="$(cd "${APP_DIR}" && detect_package_manager)"
 
@@ -1933,17 +1940,26 @@ do_install() {
     maybe_build
   )
 
-  run_install_db_scripts "${APP_DIR}"
-
-  if [[ -n "${db_name}" && -n "${db_user}" && -n "${db_password}" ]]; then
-    sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "" "${DB_MACHINE_ID}"
+  if [[ "${custom_db_machine}" -eq 0 ]]; then
+    run_install_db_scripts "${APP_DIR}"
+    if [[ -n "${db_name}" && -n "${db_user}" && -n "${db_password}" ]]; then
+      sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "" "${DB_MACHINE_ID}"
+    fi
+  else
+    printf '[projectctl] custom DB machine selected for %s; skipping automatic DB bootstrap until MySQL Access is filled in.\n' "${REPO_REF}"
   fi
 
   meta="$(meta_path_for_slug "${PROJECT_SLUG}")"
-  resolve_db_machine "${DB_MACHINE_ID}"
+  if [[ "${custom_db_machine}" -eq 0 ]]; then
+    resolve_db_machine "${DB_MACHINE_ID}"
+  fi
   write_meta "${meta}"
   chmod 0644 "${meta}"
-  sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
+  if [[ "${custom_db_machine}" -eq 0 ]]; then
+    sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
+  else
+    sync_project_db_machine_env "custom" "" "" "" "" "Custom / manual DB machine" "Configure DB host and credentials in MySQL Access after install"
+  fi
 
   ensure_project_ssh_user "${SSH_UPLOAD_USER}" "${SSH_UPLOAD_PASSWORD}" "${APP_DIR}"
   refresh_project_ssh_config
@@ -1971,8 +1987,17 @@ do_update() {
   if [[ -z "${DB_MACHINE_ID:-}" ]]; then
     DB_MACHINE_ID="$(project_db_machine_id)"
   fi
-  resolve_db_machine "${DB_MACHINE_ID:-${LOCAL_DB_MACHINE_ID}}"
-  sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
+  if [[ "${DB_MACHINE_ID}" == "custom" ]]; then
+    if project_custom_db_machine_details >/dev/null 2>&1; then
+      resolve_db_machine "${DB_MACHINE_ID}"
+      sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
+    else
+      sync_project_db_machine_env "custom" "" "" "" "" "Custom / manual DB machine" "Configure DB host and credentials in MySQL Access"
+    fi
+  else
+    resolve_db_machine "${DB_MACHINE_ID:-${LOCAL_DB_MACHINE_ID}}"
+    sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
+  fi
 
   [[ -d "${APP_DIR}/.git" ]] || die "Missing git repo at ${APP_DIR}"
 
