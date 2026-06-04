@@ -2127,29 +2127,59 @@ project_http_status_ok() {
   return 1
 }
 
+project_http_response_token() {
+  local body_file="$1"
+
+  [[ -s "${body_file}" ]] || return 1
+  python3 - "${body_file}" <<'PY'
+import hashlib
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, "rb") as fh:
+    data = fh.read()
+
+text = data.decode("utf-8", "ignore")
+m = re.search(r"<title>(.*?)</title>", text, re.I | re.S)
+if m:
+    token = "title:" + re.sub(r"\s+", " ", m.group(1)).strip().lower()
+else:
+    token = "sha256:" + hashlib.sha256(data[:16384]).hexdigest()
+print(token)
+PY
+}
+
 verify_project_http_smoke() {
   local label="${1:-${REPO_REF}}"
   local domain="${2:-${APP_DOMAIN:-}}"
   local port="${3:-${APP_PORT:-}}"
   local https="${4:-${APP_HTTPS:-yes}}"
-  local conf=""
-  local cert=""
   local code=""
-  local use_https=0
+  local local_code=""
   local scheme=""
   local -a schemes=()
+  local local_body=""
+  local domain_body=""
+  local local_token=""
+  local domain_token=""
 
   [[ -n "${domain}" ]] || return 0
   [[ -n "${port}" ]] || return 0
   command -v curl >/dev/null 2>&1 || die "curl is required for project HTTP smoke tests"
 
-  conf="/etc/nginx/sites-available/${domain}.conf"
-  cert="/etc/letsencrypt/live/${domain}/fullchain.pem"
-  if [[ "${https,,}" == "yes" ]] && [[ -s "${conf}" ]] && [[ -s "${cert}" ]] && grep -q 'listen 443 ssl' "${conf}" 2>/dev/null; then
-    use_https=1
-  fi
+  local_body="$(mktemp)"
+  domain_body="$(mktemp)"
+  trap 'rm -f "${local_body}" "${domain_body}"' RETURN
 
-  if [[ "${use_https}" -eq 1 ]]; then
+  local_code="$(curl -sS --max-time 15 --connect-timeout 5 -o "${local_body}" -w '%{http_code}' "http://127.0.0.1:${port}/" 2>/dev/null || printf '000')"
+  if ! project_http_status_ok "${local_code}"; then
+    die "Project ${label} local health check failed on http://127.0.0.1:${port}/ (HTTP ${local_code})"
+  fi
+  local_token="$(project_http_response_token "${local_body}" || true)"
+  [[ -n "${local_token}" ]] || die "Project ${label} local health check returned an empty response token"
+
+  if [[ "${https,,}" == "yes" ]]; then
     schemes=(https http)
   else
     schemes=(http)
@@ -2157,16 +2187,19 @@ verify_project_http_smoke() {
 
   for scheme in "${schemes[@]}"; do
     if [[ "${scheme}" == "https" ]]; then
-      code="$(curl -k -sS --max-time 15 --connect-timeout 5 --resolve "${domain}:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://${domain}/" 2>/dev/null || printf '000')"
+      code="$(curl -k -sS --max-time 15 --connect-timeout 5 --resolve "${domain}:443:127.0.0.1" -o "${domain_body}" -w '%{http_code}' "https://${domain}/" 2>/dev/null || printf '000')"
     else
-      code="$(curl -sS --max-time 15 --connect-timeout 5 --resolve "${domain}:80:127.0.0.1" -o /dev/null -w '%{http_code}' "http://${domain}/" 2>/dev/null || printf '000')"
+      code="$(curl -sS --max-time 15 --connect-timeout 5 --resolve "${domain}:80:127.0.0.1" -o "${domain_body}" -w '%{http_code}' "http://${domain}/" 2>/dev/null || printf '000')"
     fi
     if project_http_status_ok "${code}"; then
-      return 0
+      domain_token="$(project_http_response_token "${domain_body}" || true)"
+      if [[ -n "${domain_token}" ]] && [[ "${domain_token}" == "${local_token}" ]]; then
+        return 0
+      fi
     fi
   done
 
-  die "Project ${label} domain ${domain} did not pass the HTTP smoke test after install/update"
+  die "Project ${label} domain ${domain} did not serve the same app content as the local port ${port} during the HTTP smoke test"
 }
 
 auth_file_for_domain() {
