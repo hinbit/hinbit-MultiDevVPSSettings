@@ -1563,6 +1563,15 @@ package_script_value() {
   ' "${script}"
 }
 
+package_has_script_in_dir() {
+  local dir="$1"
+  local script="$2"
+  (
+    cd "${dir}"
+    package_has_script "${script}"
+  )
+}
+
 detect_package_manager() {
   if [[ -f pnpm-lock.yaml ]]; then
     if command -v pnpm >/dev/null 2>&1; then
@@ -2644,6 +2653,11 @@ do_script() {
     [[ -d "${script_path}" ]] || die "Missing script directory: ${script_dir}"
     PACKAGE_MANAGER="$(cd "${script_path}" && detect_package_manager)"
     pm2_script_suffix="${script_dir//\//-}-${script}"
+    if ! package_has_script_in_dir "${script_path}" "${script}"; then
+      script_path="${APP_DIR}"
+      PACKAGE_MANAGER="${PACKAGE_MANAGER:-$(cd "${APP_DIR}" && detect_package_manager)}"
+      pm2_script_suffix="${script}"
+    fi
   else
     PACKAGE_MANAGER="${PACKAGE_MANAGER:-$(cd "${APP_DIR}" && detect_package_manager)}"
   fi
