@@ -13,6 +13,9 @@ const SYSTEM_DOMAIN_FILE = '/etc/vps-system-domain';
 const DB_MACHINES_FILE = '/etc/vps-db-machines.json';
 const SSH_KEYS_FILE = '/etc/vps-ssh-keys.json';
 const SSH_KEYS_DIR = '/root/.ssh/vps-managed-keys';
+const SSH_CONFIG_FILE = '/root/.ssh/config';
+const SSH_CONFIG_BEGIN = '# BEGIN Multidev managed GitHub SSH config';
+const SSH_CONFIG_END = '# END Multidev managed GitHub SSH config';
 const PROJECT_ENV_BACKUP_DIR = '/etc/vps-project-env-backups';
 const MANAGE_VERSION_FILE = '/etc/vps-manage-version.json';
 const TLS_CUSTOM_DIR = '/etc/vps-custom-certs';
@@ -891,16 +894,37 @@ function describeDbMachine(machine) {
   return parts.filter(Boolean).join(' · ');
 }
 
+function normalizeGithubUser(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function githubSshHostForUser(githubUser) {
+  const user = normalizeGithubUser(githubUser);
+  if (!user) return '';
+  if (user === 'shaykid') return 'github.com';
+  return `github-${user}`;
+}
+
 function readSshKeyRegistry() {
   try {
     if (!fs.existsSync(SSH_KEYS_FILE)) return [];
     const data = JSON.parse(fs.readFileSync(SSH_KEYS_FILE, 'utf8'));
     if (!Array.isArray(data)) return [];
     return data.map((item) => ({
-      id: String(item.id || item.path || '').trim(),
+      id: path.isAbsolute(String(item.id || item.path || '').trim())
+        ? String(item.id || item.path || '').trim()
+        : path.join('/', String(item.id || item.path || '').trim()),
       name: String(item.name || path.basename(String(item.path || '')) || '').trim(),
       memo: String(item.memo || '').trim(),
-      path: String(item.path || item.id || '').trim(),
+      githubUser: normalizeGithubUser(item.githubUser || ''),
+      path: path.isAbsolute(String(item.path || item.id || '').trim())
+        ? String(item.path || item.id || '').trim()
+        : path.join('/', String(item.path || item.id || '').trim()),
       createdAt: Number(item.createdAt || 0) || 0,
       updatedAt: Number(item.updatedAt || item.createdAt || 0) || 0,
     })).filter((item) => item.path);
@@ -913,6 +937,70 @@ function writeSshKeyRegistry(records) {
   const list = Array.isArray(records) ? records.slice() : [];
   fs.writeFileSync(SSH_KEYS_FILE, `${JSON.stringify(list, null, 2)}\n`);
   fs.chmodSync(SSH_KEYS_FILE, 0o600);
+}
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function syncGithubSshConfig() {
+  const keys = readSshKeys()
+    .filter((key) => normalizeGithubUser(key.githubUser) && key.path && key.publicPath)
+    .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+  const selected = new Map();
+
+  for (const key of keys) {
+    const user = normalizeGithubUser(key.githubUser);
+    if (!user || selected.has(user)) continue;
+    selected.set(user, key);
+  }
+
+  const entries = Array.from(selected.entries())
+    .map(([user, key]) => ({
+      githubUser: user,
+      host: githubSshHostForUser(user),
+      path: key.path,
+    }))
+    .filter((entry) => entry.host && entry.path)
+    .sort((a, b) => a.host.localeCompare(b.host));
+
+  const block = entries.length
+    ? [
+        SSH_CONFIG_BEGIN,
+        ...entries.flatMap((entry) => [
+          `Host ${entry.host}`,
+          '  HostName github.com',
+          '  User git',
+          '  IdentitiesOnly yes',
+          `  IdentityFile ${entry.path}`,
+        ]),
+        SSH_CONFIG_END,
+        '',
+      ].join('\n')
+    : '';
+
+  const existing = fs.existsSync(SSH_CONFIG_FILE) ? fs.readFileSync(SSH_CONFIG_FILE, 'utf8') : '';
+  const blockPattern = new RegExp(
+    `${escapeRegExp(SSH_CONFIG_BEGIN)}[\\s\\S]*?${escapeRegExp(SSH_CONFIG_END)}\\n?`,
+    'm',
+  );
+  const preserved = String(existing || '').replace(blockPattern, '').replace(/\n{3,}$/g, '\n\n').trimEnd();
+
+  if (!block.trim()) {
+    if (preserved) {
+      fs.mkdirSync(path.dirname(SSH_CONFIG_FILE), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(SSH_CONFIG_FILE, `${preserved}\n`);
+      fs.chmodSync(SSH_CONFIG_FILE, 0o600);
+    } else if (fs.existsSync(SSH_CONFIG_FILE)) {
+      fs.unlinkSync(SSH_CONFIG_FILE);
+    }
+    return;
+  }
+
+  const next = `${preserved ? `${preserved}\n\n` : ''}${block}`;
+  fs.mkdirSync(path.dirname(SSH_CONFIG_FILE), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(SSH_CONFIG_FILE, next);
+  fs.chmodSync(SSH_CONFIG_FILE, 0o600);
 }
 
 function normalizeSshKeyName(name) {
@@ -986,6 +1074,8 @@ function readSshKeys() {
       id: item.path,
       name: reg.name || item.name,
       memo: reg.memo || '',
+      githubUser: normalizeGithubUser(reg.githubUser || ''),
+      githubHost: githubSshHostForUser(reg.githubUser || ''),
       path: item.path,
       publicPath: item.publicPath,
       publicKey,
@@ -1001,6 +1091,8 @@ function saveSshKeyMemo(payload) {
   if (!pathId) throw new Error('Missing SSH key id');
   const memo = String(payload?.memo || '').trim();
   const name = String(payload?.name || '').trim();
+  const hasGithubUser = Object.prototype.hasOwnProperty.call(payload || {}, 'githubUser');
+  const githubUser = hasGithubUser ? normalizeGithubUser(payload?.githubUser || '') : undefined;
   const records = readSshKeyRegistry();
   const existingIndex = records.findIndex((item) => item.path === pathId);
   const existing = existingIndex >= 0 ? records[existingIndex] : {};
@@ -1009,12 +1101,14 @@ function saveSshKeyMemo(payload) {
     path: pathId,
     name: name || existing.name || path.basename(pathId),
     memo,
+    githubUser: hasGithubUser ? githubUser : normalizeGithubUser(existing.githubUser || ''),
     createdAt: existing.createdAt || Date.now(),
     updatedAt: Date.now(),
   };
   if (existingIndex >= 0) records[existingIndex] = next;
   else records.push(next);
   writeSshKeyRegistry(records);
+  syncGithubSshConfig();
   return next;
 }
 
@@ -1022,6 +1116,7 @@ function createSshKey(payload) {
   ensureSshKeysDir();
   const rawName = normalizeSshKeyName(payload?.name || 'github-key') || 'github-key';
   const memo = String(payload?.memo || '').trim();
+  const githubUser = normalizeGithubUser(payload?.githubUser || '');
   const comment = memo || rawName;
   let base = path.join(SSH_KEYS_DIR, rawName);
   let keyPath = base;
@@ -1038,12 +1133,14 @@ function createSshKey(payload) {
     path: keyPath,
     name: path.basename(keyPath),
     memo,
+    githubUser,
     createdAt: stat.birthtimeMs || stat.mtimeMs || Date.now(),
     updatedAt: stat.mtimeMs || Date.now(),
   };
   const records = readSshKeyRegistry();
   records.push(record);
   writeSshKeyRegistry(records);
+  syncGithubSshConfig();
   return {
     ...record,
     publicPath: `${keyPath}.pub`,
@@ -1058,6 +1155,7 @@ function deleteSshKey(keyId) {
   const records = readSshKeyRegistry();
   const nextRecords = records.filter((item) => String(item.path) !== id);
   writeSshKeyRegistry(nextRecords);
+  syncGithubSshConfig();
 
   try { fs.rmSync(id, { force: true }); } catch {}
   try { fs.rmSync(`${id}.pub`, { force: true }); } catch {}
@@ -1078,6 +1176,7 @@ function createSshKeysZip() {
     id: key.id,
     name: key.name || path.basename(key.path || `key-${index}`),
     memo: key.memo || '',
+    githubUser: key.githubUser || '',
     path: key.path || '',
     publicPath: key.publicPath || '',
     archiveBase: safeArchiveName(key.name || path.basename(key.path || `key-${index}`), `ssh-key-${index + 1}`),
@@ -1177,6 +1276,7 @@ print(extract_dir)
       path: destBase,
       name: String(item.name || path.basename(destBase)),
       memo: String(item.memo || ''),
+      githubUser: normalizeGithubUser(item.githubUser || ''),
       createdAt: Number(item.createdAt || stat.birthtimeMs || stat.mtimeMs || Date.now()) || Date.now(),
       updatedAt: Number(item.updatedAt || stat.mtimeMs || Date.now()) || Date.now(),
     });
@@ -1186,6 +1286,7 @@ print(extract_dir)
     const merged = readSshKeyRegistry().filter((item) => !String(item.path || '').startsWith(SSH_KEYS_DIR));
     merged.push(...imported);
     writeSshKeyRegistry(merged);
+    syncGithubSshConfig();
   }
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -2042,7 +2143,7 @@ function renderDbMachinesPage() {
 
 function renderSshKeyRows(keys) {
   if (!keys.length) {
-    return '<tr><td colspan="6" class="muted">No SSH keys found on this machine.</td></tr>';
+    return '<tr><td colspan="7" class="muted">No SSH keys found on this machine.</td></tr>';
   }
   return keys.map((key) => {
     const ref = escapeHtml(key.id || '');
@@ -2054,13 +2155,17 @@ function renderSshKeyRows(keys) {
         <td>
           <textarea data-key-memo="${ref}" rows="3" placeholder="Memo for this key">${escapeHtml(key.memo || '')}</textarea>
         </td>
+        <td>
+          <input data-key-github-user="${ref}" value="${escapeHtml(key.githubUser || '')}" placeholder="shaykid">
+          <div class="small muted" style="margin-top:6px">SSH host: <code>${escapeHtml(key.githubHost || 'github.com')}</code></div>
+        </td>
         <td><code>${escapeHtml(key.path || '')}</code></td>
         <td><code>${escapeHtml(key.fingerprint || 'n/a')}</code></td>
         <td><code class="public-key">${escapeHtml(key.publicKey || '')}</code></td>
         <td>
           <div class="actions">
             <button class="secondary" type="button" data-key-copy="${ref}">Copy public</button>
-            <button class="secondary" type="button" data-key-save="${ref}">Save memo</button>
+            <button class="secondary" type="button" data-key-save="${ref}">Save key</button>
             <button class="danger" type="button" data-key-delete="${ref}">Delete</button>
           </div>
         </td>
@@ -2164,6 +2269,9 @@ function renderSshKeysPage() {
         <label>Memo
           <input id="keyMemo" placeholder="GitHub account or project note">
         </label>
+        <label>GitHub user
+          <input id="keyGithubUser" placeholder="shaykid">
+        </label>
       </div>
       <div class="top-actions">
         <button id="createBtn" type="button">Create key</button>
@@ -2185,6 +2293,7 @@ function renderSshKeysPage() {
             <tr>
               <th>Name</th>
               <th>Memo</th>
+              <th>GitHub user</th>
               <th>Path</th>
               <th>Fingerprint</th>
               <th>Public key</th>
@@ -2204,6 +2313,7 @@ function renderSshKeysPage() {
     const createResult = document.getElementById('createResult');
     const keyName = document.getElementById('keyName');
     const keyMemo = document.getElementById('keyMemo');
+    const keyGithubUser = document.getElementById('keyGithubUser');
     const createBtn = document.getElementById('createBtn');
     const importBtn = document.getElementById('importBtn');
     const importFile = document.getElementById('importFile');
@@ -2249,18 +2359,22 @@ function renderSshKeysPage() {
             <td>
               <textarea data-key-memo="\${escapeHtml(key.id || '')}" rows="3">\${escapeHtml(key.memo || '')}</textarea>
             </td>
+            <td>
+              <input data-key-github-user="\${escapeHtml(key.id || '')}" value="\${escapeHtml(key.githubUser || '')}" placeholder="shaykid">
+              <div class="small muted" style="margin-top:6px">SSH host: <code>\${escapeHtml(key.githubHost || 'github.com')}</code></div>
+            </td>
             <td><code>\${escapeHtml(key.path || '')}</code></td>
             <td><code>\${escapeHtml(key.fingerprint || 'n/a')}</code></td>
             <td><code class="public-key">\${escapeHtml(key.publicKey || '')}</code></td>
             <td>
               <div class="actions">
                 <button class="secondary" data-key-copy="\${escapeHtml(key.id || '')}" type="button">Copy public</button>
-                <button class="secondary" data-key-save="\${escapeHtml(key.id || '')}" type="button">Save memo</button>
+                <button class="secondary" data-key-save="\${escapeHtml(key.id || '')}" type="button">Save key</button>
               </div>
             </td>
           </tr>
         \`).join('')
-        : '<tr><td colspan="6" class="muted">No SSH keys found on this machine.</td></tr>';
+        : '<tr><td colspan="7" class="muted">No SSH keys found on this machine.</td></tr>';
     }
 
     async function refresh() {
@@ -2273,6 +2387,7 @@ function renderSshKeysPage() {
       const payload = {
         name: keyName.value.trim(),
         memo: keyMemo.value.trim(),
+        githubUser: keyGithubUser.value.trim(),
       };
       const res = await api('/ssh-keys', {
         method: 'POST',
@@ -2282,6 +2397,7 @@ function renderSshKeysPage() {
       await refresh();
       keyName.value = '';
       keyMemo.value = '';
+      keyGithubUser.value = '';
     }
 
     async function importKeys() {
@@ -2322,13 +2438,15 @@ function renderSshKeysPage() {
         if (!key) return;
         const memoField = keysBody.querySelector(\`[data-key-memo="\${CSS.escape(String(key.id || ''))}"]\`);
         const nameField = keysBody.querySelector(\`[data-key-name="\${CSS.escape(String(key.id || ''))}"]\`);
+        const githubUserField = keysBody.querySelector(\`[data-key-github-user="\${CSS.escape(String(key.id || ''))}"]\`);
         const memo = memoField ? memoField.value : '';
         const name = nameField ? nameField.value : '';
+        const githubUser = githubUserField ? githubUserField.value : '';
         const res = await api(\`/ssh-keys/\${encodeURIComponent(key.id)}\`, {
           method: 'POST',
-          body: JSON.stringify({ memo, name }),
+          body: JSON.stringify({ memo, name, githubUser }),
         });
-        showMessage(listResult, res.message || 'Memo saved');
+        showMessage(listResult, res.message || 'SSH key saved');
         await refresh();
         return;
       }
@@ -5944,10 +6062,11 @@ async function handleRequest(req, res) {
       const body = await readBody(req);
       const memo = String(body.memo || '').trim();
       const name = String(body.name || '').trim();
-      const updated = saveSshKeyMemo({ id: keyId, memo, name });
+      const githubUser = Object.prototype.hasOwnProperty.call(body || {}, 'githubUser') ? body.githubUser : undefined;
+      const updated = saveSshKeyMemo({ id: keyId, memo, name, githubUser });
       sendJson(res, 200, {
         ok: true,
-        message: `Saved memo for ${updated.name}`,
+        message: `Saved SSH key ${updated.name}`,
         key: updated,
         keys: readSshKeys(),
       });
@@ -6463,6 +6582,12 @@ const server = http.createServer((req, res) => {
     sendJson(res, 500, { error: error.message || String(error) });
   });
 });
+
+try {
+  syncGithubSshConfig();
+} catch (error) {
+  console.warn('[manage] failed to sync GitHub SSH config on startup:', error.message || error);
+}
 
 server.listen(PORT, BIND_HOST, () => {
   console.log(`manage server listening on ${BIND_HOST}:${PORT}`);

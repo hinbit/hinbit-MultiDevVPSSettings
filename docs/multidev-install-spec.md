@@ -219,3 +219,15 @@ The intended result is a one-run install that ends with:
 - correct runtime state
 - no manual rescue steps
 
+## 13. GitHub SSH mapping
+
+Multidev can keep multiple GitHub SSH identities on the VPS.
+
+Rules:
+- each saved SSH key should record the GitHub user it belongs to
+- `shaykid` should use the default `git@github.com` host alias
+- `hinbit` should use `git@github-hinbit`
+- `projectctl` should pull using the host alias that matches the repo owner
+- the manage panel should write the SSH config for those aliases automatically
+
+This is required so a future Codex session can install or update repos from different GitHub accounts without manual SSH config edits on the server.

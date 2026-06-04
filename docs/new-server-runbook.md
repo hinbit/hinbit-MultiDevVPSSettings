@@ -120,7 +120,7 @@ You can later edit the machine details, including the root credentials and appro
 
 Use `projectctl install` from the app VPS:
 
-If the repo lives under a GitHub account that is not the server's default GitHub identity, make sure root has a `Host github.com` entry in `~/.ssh/config` that points at the matching private key. `projectctl` runs `git clone` directly as root, so the key must be selected there or the clone will fail with `Permission denied (publickey)`.
+If the repo lives under a GitHub account that is not the server's default GitHub identity, set the key's `GitHub user` field in `/manage/ssh-keys/`. The manage panel will write root's SSH config for the matching host alias automatically (`github.com` for `shaykid`, `github-hinbit` for `hinbit`). `projectctl` runs `git clone` directly as root, so the key must be selected there or the clone will fail with `Permission denied (publickey)`.
 
 If HTTPS is not ready yet, the install still completes and the app is left on HTTP until DNS and certificate provisioning finish. Re-run `sudo app-sync.sh` after the domain resolves to the VPS to activate the SSL vhost.
 The `/manage/` install flow also scans root, `server/`, and `client/` package manifests for DB-related scripts and shows the runnable ones after install.

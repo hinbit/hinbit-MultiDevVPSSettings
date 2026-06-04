@@ -77,8 +77,11 @@ EOF
 repo_ref_from_arg() {
   local ref="$1"
   ref="${ref#git@github.com:}"
+  ref="${ref#git@github-hinbit:}"
   ref="${ref#https://github.com/}"
+  ref="${ref#https://github-hinbit/}"
   ref="${ref#github.com:}"
+  ref="${ref#github-hinbit:}"
   ref="${ref%.git}"
   [[ "${ref}" == */* ]] || die "Expected owner/repo, got: ${1}"
   printf '%s' "${ref}"
@@ -89,8 +92,31 @@ slug_from_ref() {
   printf '%s' "${ref//\//-}" | sed 's/[^A-Za-z0-9._-]/-/g'
 }
 
+github_ssh_host_from_owner() {
+  local owner="$1"
+
+  case "${owner}" in
+    shaykid)
+      printf '%s' 'github.com'
+      return
+      ;;
+    hinbit)
+      printf '%s' 'github-hinbit'
+      return
+      ;;
+  esac
+
+  owner="$(printf '%s' "${owner}" | sed 's/[^A-Za-z0-9.-]/-/g')"
+  printf 'github-%s' "${owner}"
+}
+
 repo_url_from_ref() {
-  printf 'git@github.com:%s.git' "$1"
+  local ref="$1"
+  local owner="${ref%%/*}"
+  local host=""
+
+  host="$(github_ssh_host_from_owner "${owner}")"
+  printf 'git@%s:%s.git' "${host}" "$1"
 }
 
 branch_from_repo() {

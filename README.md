@@ -45,7 +45,7 @@ projectctl install --domain example.com --branch main --pm2-name example-app own
 projectctl install --domain example.com --branch main --pm2-name example-app --env-file /root/app.env --entrypoint server/index.js owner/repo
 ```
 
-If the repo is private under a separate GitHub account, configure root's `~/.ssh/config` on the app VPS so `Host github.com` uses the matching key. `projectctl` clones as root, so uploading a key into the VPS is not enough by itself.
+If the repo is private under a separate GitHub account, configure the SSH key in `/manage/ssh-keys/` with its GitHub user. The manage panel writes root's SSH config for you and `projectctl` will clone through the matching host alias (`github.com` for `shaykid`, `github-hinbit` for `hinbit`). `projectctl` clones as root, so uploading a key into the VPS is not enough by itself.
 
 If you install a project before DNS/TLS is ready, `projectctl` will now finish the install and leave the site on HTTP for the moment. Re-run `sudo app-sync.sh` after the domain resolves to the VPS to activate the SSL vhost.
 
