@@ -2349,6 +2349,46 @@ restart_pm2() {
   start_pm2
 }
 
+pm2_process_is_online() {
+  local name="$1"
+
+  pm2 jlist 2>/dev/null | node -e '
+    const name = process.argv[1];
+    let input = "";
+    process.stdin.on("data", (chunk) => (input += chunk));
+    process.stdin.on("end", () => {
+      try {
+        const list = JSON.parse(input || "[]");
+        const proc = Array.isArray(list) ? list.find((item) => item && item.name === name) : null;
+        if (proc && String(proc.pm2_env && proc.pm2_env.status || "").toLowerCase() === "online") {
+          process.exit(0);
+        }
+      } catch {
+        // Ignore parse errors and report not online.
+      }
+      process.exit(1);
+    });
+  ' "${name}"
+}
+
+verify_project_install() {
+  local label="${1:-${REPO_REF}}"
+
+  if pm2_process_is_online "${PM2_NAME}"; then
+    return 0
+  fi
+
+  printf '[projectctl] %s is not online after install/update; retrying once\n' "${label}" >&2
+  restart_pm2
+  sleep 2
+
+  if pm2_process_is_online "${PM2_NAME}"; then
+    return 0
+  fi
+
+  die "Project ${label} is not online after install/update"
+}
+
 do_install() {
   local ref="$1"
   local domain="${2:-}"
@@ -2468,6 +2508,7 @@ do_install() {
   sync_app_map
   verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
   restart_pm2
+  verify_project_install "${REPO_REF}"
   if [[ -n "${APP_DOMAIN}" ]]; then
     printf '[projectctl] installed %s in %s on port %s for %s\n' "${REPO_REF}" "${APP_DIR}" "${APP_PORT}" "${APP_DOMAIN}"
   else
@@ -2538,6 +2579,7 @@ do_update() {
   sync_app_map
   verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
   restart_pm2
+  verify_project_install "${REPO_REF}"
   printf '[projectctl] updated %s\n' "${REPO_REF}"
 }
 

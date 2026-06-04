@@ -169,6 +169,7 @@ After install or pull, verify these in order:
 8. QR / webhook / connector features work if the app provides them
 9. project DB wiring matches the saved env
 10. the manage UI shows the correct repo, port, domain, and DB state
+11. if PM2 is not online after install/update, Multidev retries the restart once and fails loudly if the project still does not come up
 
 If anything is wrong, fix it before handoff.
 

@@ -77,6 +77,7 @@ When you install a project from `/manage/`, the UI now scans the repo for DB-rel
 If the project repo does not already define DB name, user, and password values, the installer now generates them automatically and writes them into the project env files so the DB and MySQL panels are populated on first install.
 `projectctl install` also stamps the requested port into the project env files so the runtime uses the selected app port consistently.
 `projectctl install` and `projectctl update` also normalize common deployment env keys from local/dev values to server/web values when the repo ships them in `.env` or `.env.example`-style templates, so installed projects boot in production mode instead of local browser/dev mode.
+After install or update, `projectctl` now verifies that PM2 is actually online, retries the restart once if it is not, and fails loudly if the project still does not come up.
 If the repo defines root-level `db:init` and `db:seed` scripts, a fresh install runs them automatically so the new database starts with schema and seed data.
 
 Optional environment variables:
