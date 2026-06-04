@@ -1537,6 +1537,10 @@ load_meta() {
   [[ -f "${meta}" ]] || die "Missing project metadata: ${meta}"
   # shellcheck disable=SC1090
   source "${meta}"
+  if [[ -n "${REPO_REF:-}" ]]; then
+    REPO_URL="$(repo_url_from_ref "${REPO_REF}")"
+    PROJECT_SLUG="$(slug_from_ref "${REPO_REF}")"
+  fi
 }
 
 package_has_script() {
@@ -1897,6 +1901,10 @@ project_has_split_runtime() {
 
 write_meta() {
   local meta="$1"
+  if [[ -n "${REPO_REF:-}" ]]; then
+    REPO_URL="$(repo_url_from_ref "${REPO_REF}")"
+    PROJECT_SLUG="$(slug_from_ref "${REPO_REF}")"
+  fi
   cat > "${meta}" <<EOF
 REPO_REF=${REPO_REF}
 REPO_URL=${REPO_URL}
