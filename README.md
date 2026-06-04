@@ -78,6 +78,7 @@ If the project repo does not already define DB name, user, and password values, 
 `projectctl install` also stamps the requested port into the project env files so the runtime uses the selected app port consistently.
 `projectctl install` and `projectctl update` also normalize common deployment env keys from local/dev values to server/web values when the repo ships them in `.env` or `.env.example`-style templates, so installed projects boot in production mode instead of local browser/dev mode.
 After install or update, `projectctl` now verifies that PM2 is actually online, retries the restart once if it is not, and fails loudly if the project still does not come up.
+After install or update, `projectctl` also verifies that the domain maps to the installed port in `/etc/app-map.csv` and in the generated nginx vhost, then resyncs once if the mapping is stale.
 If the repo defines root-level `db:init` and `db:seed` scripts, a fresh install runs them automatically so the new database starts with schema and seed data.
 
 Optional environment variables:

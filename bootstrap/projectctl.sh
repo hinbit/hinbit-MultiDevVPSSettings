@@ -2068,6 +2068,53 @@ verify_https_vhost() {
   fi
 }
 
+app_map_port_for_domain() {
+  local domain="$1"
+
+  [[ -f "${APP_MAP}" ]] || return 1
+  awk -F, -v domain="${domain}" '
+    NR > 1 && $1 == domain {
+      gsub(/\r/, "", $2);
+      print $2;
+      exit
+    }
+  ' "${APP_MAP}"
+}
+
+verify_project_mapping() {
+  local label="${1:-${REPO_REF}}"
+  local domain="${2:-${APP_DOMAIN:-}}"
+  local port="${3:-${APP_PORT:-}}"
+  local https="${4:-${APP_HTTPS:-yes}}"
+  local conf=""
+  local mapped_port=""
+
+  [[ -n "${domain}" ]] || return 0
+  [[ -n "${port}" ]] || return 0
+
+  conf="/etc/nginx/sites-available/${domain}.conf"
+  mapped_port="$(app_map_port_for_domain "${domain}" 2>/dev/null || true)"
+
+  if [[ "${mapped_port}" != "${port}" ]] || [[ ! -s "${conf}" ]] || ! grep -q "proxy_pass http://127.0.0.1:${port};" "${conf}" 2>/dev/null; then
+    printf '[projectctl] %s mapping looks stale; resyncing app map for %s\n' "${label}" "${domain}" >&2
+    sync_app_map
+    sleep 2
+    mapped_port="$(app_map_port_for_domain "${domain}" 2>/dev/null || true)"
+  fi
+
+  if [[ "${mapped_port}" != "${port}" ]]; then
+    die "Project ${label} domain ${domain} is mapped to port ${mapped_port:-n/a}, expected ${port}"
+  fi
+
+  if [[ ! -s "${conf}" ]] || ! grep -q "proxy_pass http://127.0.0.1:${port};" "${conf}" 2>/dev/null; then
+    die "Project ${label} nginx vhost ${conf} does not point to port ${port}"
+  fi
+
+  if [[ "${https,,}" == "yes" ]] && [[ -e "${conf}" ]] && ! grep -q 'listen 443 ssl' "${conf}"; then
+    printf '[projectctl] Warning: %s mapping is correct, but HTTPS is not active yet for %s\n' "${label}" "${domain}" >&2
+  fi
+}
+
 auth_file_for_domain() {
   local domain="$1"
   printf '%s/%s.htpasswd' "${AUTH_DIR}" "${domain}"
@@ -2506,6 +2553,7 @@ do_install() {
   refresh_project_ssh_config
 
   sync_app_map
+  verify_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
   restart_pm2
   verify_project_install "${REPO_REF}"
@@ -2577,6 +2625,7 @@ do_update() {
   refresh_project_ssh_config
 
   sync_app_map
+  verify_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
   restart_pm2
   verify_project_install "${REPO_REF}"

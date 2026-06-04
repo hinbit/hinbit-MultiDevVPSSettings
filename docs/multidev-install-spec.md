@@ -170,6 +170,8 @@ After install or pull, verify these in order:
 9. project DB wiring matches the saved env
 10. the manage UI shows the correct repo, port, domain, and DB state
 11. if PM2 is not online after install/update, Multidev retries the restart once and fails loudly if the project still does not come up
+12. if a domain is set, Multidev verifies `/etc/app-map.csv` and the generated nginx vhost point to the installed port
+13. if the mapping is stale, Multidev resyncs once and fails loudly if the domain still points at the wrong port
 
 If anything is wrong, fix it before handoff.
 
