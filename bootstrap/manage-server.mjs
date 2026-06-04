@@ -77,8 +77,14 @@ function die(msg) {
 function slugFromRef(ref) {
   return String(ref || '')
     .replace(/^git@github.com:/, '')
+    .replace(/^git@github-developseach:/, '')
+    .replace(/^git@github-hinbit:/, '')
     .replace(/^https:\/\/github.com\//, '')
+    .replace(/^https:\/\/github-developseach\//, '')
+    .replace(/^https:\/\/github-hinbit\//, '')
     .replace(/^github.com:/, '')
+    .replace(/^github-developseach:/, '')
+    .replace(/^github-hinbit:/, '')
     .replace(/\.git$/, '')
     .replace(/\//g, '-')
     .replace(/[^A-Za-z0-9._-]/g, '-');
@@ -87,8 +93,14 @@ function slugFromRef(ref) {
 function repoRefFromArg(ref) {
   const cleaned = String(ref || '')
     .replace(/^git@github.com:/, '')
+    .replace(/^git@github-developseach:/, '')
+    .replace(/^git@github-hinbit:/, '')
     .replace(/^https:\/\/github.com\//, '')
+    .replace(/^https:\/\/github-developseach\//, '')
+    .replace(/^https:\/\/github-hinbit\//, '')
     .replace(/^github.com:/, '')
+    .replace(/^github-developseach:/, '')
+    .replace(/^github-hinbit:/, '')
     .replace(/\.git$/, '');
   if (!cleaned.includes('/')) {
     throw new Error(`Expected owner/repo, got: ${ref}`);

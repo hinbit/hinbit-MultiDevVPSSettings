@@ -77,10 +77,13 @@ EOF
 repo_ref_from_arg() {
   local ref="$1"
   ref="${ref#git@github.com:}"
+  ref="${ref#git@github-developseach:}"
   ref="${ref#git@github-hinbit:}"
   ref="${ref#https://github.com/}"
+  ref="${ref#https://github-developseach/}"
   ref="${ref#https://github-hinbit/}"
   ref="${ref#github.com:}"
+  ref="${ref#github-developseach:}"
   ref="${ref#github-hinbit:}"
   ref="${ref%.git}"
   [[ "${ref}" == */* ]] || die "Expected owner/repo, got: ${1}"
@@ -94,10 +97,15 @@ slug_from_ref() {
 
 github_ssh_host_from_owner() {
   local owner="$1"
+  owner="$(printf '%s' "${owner}" | tr '[:upper:]' '[:lower:]')"
 
   case "${owner}" in
     shaykid)
       printf '%s' 'github.com'
+      return
+      ;;
+    developseach)
+      printf '%s' 'github-developseach'
       return
       ;;
     hinbit)
