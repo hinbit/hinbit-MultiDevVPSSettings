@@ -172,6 +172,7 @@ After install or pull, verify these in order:
 11. if PM2 is not online after install/update, Multidev retries the restart once and fails loudly if the project still does not come up
 12. if a domain is set, Multidev verifies `/etc/app-map.csv` and the generated nginx vhost point to the installed port
 13. if the mapping is stale, Multidev resyncs once and fails loudly if the domain still points at the wrong port
+14. after PM2 is online, Multidev runs an HTTP host-header smoke test against the installed domain and fails loudly if it does not serve a valid response
 
 If anything is wrong, fix it before handoff.
 

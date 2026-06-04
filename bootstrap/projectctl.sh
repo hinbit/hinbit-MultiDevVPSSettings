@@ -2115,6 +2115,60 @@ verify_project_mapping() {
   fi
 }
 
+project_http_status_ok() {
+  local code="${1:-000}"
+
+  case "${code}" in
+    200|201|202|204|301|302|303|307|308|401|403)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+verify_project_http_smoke() {
+  local label="${1:-${REPO_REF}}"
+  local domain="${2:-${APP_DOMAIN:-}}"
+  local port="${3:-${APP_PORT:-}}"
+  local https="${4:-${APP_HTTPS:-yes}}"
+  local conf=""
+  local cert=""
+  local code=""
+  local use_https=0
+  local scheme=""
+  local -a schemes=()
+
+  [[ -n "${domain}" ]] || return 0
+  [[ -n "${port}" ]] || return 0
+  command -v curl >/dev/null 2>&1 || die "curl is required for project HTTP smoke tests"
+
+  conf="/etc/nginx/sites-available/${domain}.conf"
+  cert="/etc/letsencrypt/live/${domain}/fullchain.pem"
+  if [[ "${https,,}" == "yes" ]] && [[ -s "${conf}" ]] && [[ -s "${cert}" ]] && grep -q 'listen 443 ssl' "${conf}" 2>/dev/null; then
+    use_https=1
+  fi
+
+  if [[ "${use_https}" -eq 1 ]]; then
+    schemes=(https http)
+  else
+    schemes=(http)
+  fi
+
+  for scheme in "${schemes[@]}"; do
+    if [[ "${scheme}" == "https" ]]; then
+      code="$(curl -k -sS --max-time 15 --connect-timeout 5 --resolve "${domain}:443:127.0.0.1" -o /dev/null -w '%{http_code}' "https://${domain}/" 2>/dev/null || printf '000')"
+    else
+      code="$(curl -sS --max-time 15 --connect-timeout 5 --resolve "${domain}:80:127.0.0.1" -o /dev/null -w '%{http_code}' "http://${domain}/" 2>/dev/null || printf '000')"
+    fi
+    if project_http_status_ok "${code}"; then
+      return 0
+    fi
+  done
+
+  die "Project ${label} domain ${domain} did not pass the HTTP smoke test after install/update"
+}
+
 auth_file_for_domain() {
   local domain="$1"
   printf '%s/%s.htpasswd' "${AUTH_DIR}" "${domain}"
@@ -2557,6 +2611,7 @@ do_install() {
   verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
   restart_pm2
   verify_project_install "${REPO_REF}"
+  verify_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   if [[ -n "${APP_DOMAIN}" ]]; then
     printf '[projectctl] installed %s in %s on port %s for %s\n' "${REPO_REF}" "${APP_DIR}" "${APP_PORT}" "${APP_DOMAIN}"
   else
@@ -2629,6 +2684,7 @@ do_update() {
   verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
   restart_pm2
   verify_project_install "${REPO_REF}"
+  verify_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   printf '[projectctl] updated %s\n' "${REPO_REF}"
 }
 
