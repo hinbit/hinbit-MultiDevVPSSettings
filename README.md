@@ -29,6 +29,8 @@ Bootstrap for a clean Ubuntu VPS that hosts multiple Node/React apps behind ngin
 - [bootstrap/projectctl.sh](bootstrap/projectctl.sh)
 - [bootstrap/structure.md](bootstrap/structure.md)
 - [docs/new-server-runbook.md](docs/new-server-runbook.md)
+- [docs/multidev-sample-programs.md](docs/multidev-sample-programs.md)
+- [samples/README.md](samples/README.md)
 
 ## Usage
 
