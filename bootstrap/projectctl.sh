@@ -1668,10 +1668,29 @@ maybe_build() {
   fi
 }
 
+ecosystem_file_is_supported() {
+  local ecosystem_file="$1"
+
+  case "${ecosystem_file}" in
+    *.cjs|*.yml|*.yaml|*.json|process.yml|process.yaml|process.json)
+      return 0
+      ;;
+    *.mjs)
+      return 1
+      ;;
+  esac
+
+  if grep -qE '^[[:space:]]*export[[:space:]]+default\b' "${ecosystem_file}" 2>/dev/null; then
+    return 1
+  fi
+
+  return 0
+}
+
 detect_start_kind() {
   local ecosystem_file=""
   for ecosystem_file in ecosystem.config.js ecosystem.config.cjs ecosystem.config.mjs process.yml processes.config.js; do
-    if [[ -f "${ecosystem_file}" ]]; then
+    if [[ -f "${ecosystem_file}" ]] && ecosystem_file_is_supported "${ecosystem_file}"; then
       printf 'ecosystem:%s' "${ecosystem_file}"
       return
     fi

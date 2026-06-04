@@ -133,6 +133,8 @@ Prefer one of:
 
 If PM2 ecosystem files are used:
 - the ecosystem should live at a known location
+- prefer CommonJS (`ecosystem.config.cjs`, or `module.exports` in `.js`) so PM2 can load it reliably
+- avoid `export default` in `ecosystem.config.js` unless there is also a reliable `package.json start` fallback
 - root scripts should still point to the real runtime
 - the installed env values must reach the process
 
