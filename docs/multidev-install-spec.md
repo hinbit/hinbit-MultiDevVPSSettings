@@ -52,8 +52,9 @@ Rules:
 - if the app has more than one runtime component, each component must have the keys it needs
 - quote values with spaces or special characters
 - seed and merge env templates in the repo root, `server/`, and `client/` when those folders exist
-- the Multidev env editor shows the effective merged env, but it can now switch between individual files such as `.env`, `.env.local`, `.env.production`, `.env.machine`, `server/.env`, and `client/.env`
-- save actions write back to the selected file, not just the merged view
+- the Multidev env editor shows a read-only merged summary, grouped by key source, and it can switch between individual files such as `.env`, `.env.local`, `.env.production`, `.env.machine`, `server/.env`, and `client/.env`
+- duplicate keys inside a file or across files must be marked clearly in red in the merged summary
+- save actions write back to the selected file, not the merged view
 
 Examples:
 

@@ -157,6 +157,47 @@ function parseEnvText(text) {
   return data;
 }
 
+function parseEnvTextDetailed(text) {
+  const entries = [];
+  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  lines.forEach((rawLine, index) => {
+    const line = String(rawLine || '').trim();
+    if (!line || line.startsWith('#')) return;
+    const idx = line.indexOf('=');
+    if (idx === -1) return;
+    const key = line.slice(0, idx).trim();
+    if (!key) return;
+    let value = line.slice(idx + 1).trim();
+    if (value.length >= 2 && ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith('"') && value.endsWith('"')))) {
+      const quote = value[0];
+      value = value.slice(1, -1);
+      if (quote === '"') {
+        value = value
+          .replace(/\\n/g, '\n')
+          .replace(/\\r/g, '\r')
+          .replace(/\\t/g, '\t')
+          .replace(/\\(["\\$`])/g, '$1');
+      }
+    }
+    entries.push({
+      key,
+      value,
+      lineNumber: index + 1,
+      rawLine,
+    });
+  });
+  return entries;
+}
+
+function entriesToEnvObject(entries) {
+  const data = {};
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!entry || !entry.key) continue;
+    data[entry.key] = entry.value;
+  }
+  return data;
+}
+
 function discoverProjectEnvFiles(projectPath) {
   const baseDirs = [projectPath, path.join(projectPath, 'server'), path.join(projectPath, 'client')];
   const seen = new Set();
@@ -168,12 +209,14 @@ function discoverProjectEnvFiles(projectPath) {
       if (seen.has(resolved) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) continue;
       seen.add(resolved);
       const raw = fs.readFileSync(filePath, 'utf8');
+      const entries = parseEnvTextDetailed(raw);
       files.push({
         path: filePath,
         relativePath: path.relative(projectPath, filePath) || path.basename(filePath),
         name: path.basename(filePath),
         content: raw,
-        env: parseEnvFile(filePath),
+        entries,
+        env: entriesToEnvObject(entries),
       });
     }
   }
@@ -202,14 +245,55 @@ function serializeEnvText(env) {
 function readProjectEnv(projectPath) {
   const envFiles = discoverProjectEnvFiles(projectPath);
   const merged = {};
+  const envEntries = [];
+  const entryGroups = new Map();
   for (const file of envFiles) {
-    Object.assign(merged, file.env || {});
+    const seenInFile = new Set();
+    for (const entry of Array.isArray(file.entries) ? file.entries : []) {
+      if (!entry || !entry.key) continue;
+      const key = String(entry.key);
+      const current = entryGroups.get(key) || {
+        key,
+        value: '',
+        source: '',
+        sourcePath: '',
+        sourceLine: 0,
+        sourceValue: '',
+        duplicate: false,
+        duplicateCount: 0,
+        sources: [],
+      };
+      if (seenInFile.has(key)) {
+        current.duplicate = true;
+      }
+      current.value = entry.value;
+      current.source = file.relativePath || file.name || file.path;
+      current.sourcePath = file.path;
+      current.sourceLine = entry.lineNumber || 0;
+      current.sourceValue = entry.value;
+      current.sources.push({
+        path: file.path,
+        relativePath: file.relativePath || file.name || file.path,
+        lineNumber: entry.lineNumber || 0,
+        value: entry.value,
+      });
+      current.duplicateCount = current.sources.length;
+      current.duplicate = current.duplicate || current.duplicateCount > 1;
+      entryGroups.set(key, current);
+      seenInFile.add(key);
+      merged[key] = entry.value;
+    }
   }
+  for (const item of entryGroups.values()) {
+    envEntries.push(item);
+  }
+  envEntries.sort((a, b) => a.key.localeCompare(b.key));
 
   return {
     merged,
     files: envFiles.map((file) => file.path),
     envFiles,
+    envEntries,
   };
 }
 
@@ -629,13 +713,14 @@ function pickDbDetails(projectPath) {
 }
 
 function pickEnvDetails(projectPath) {
-  const { merged, files, envFiles } = readProjectEnv(projectPath);
+  const { merged, files, envFiles, envEntries } = readProjectEnv(projectPath);
   const preferredFile = envFiles.find((file) => path.basename(file.path) === '.env')
     || envFiles[0]
     || null;
   return {
     files,
     envFiles,
+    envEntries,
     env: merged,
     saveTarget: chooseProjectEnvSaveTarget(projectPath, files),
     selectedFile: preferredFile ? preferredFile.path : chooseProjectEnvSaveTarget(projectPath, files),
@@ -3051,6 +3136,10 @@ function renderTlsPage(selectedRef = '') {
     .actions { display: flex; flex-wrap: wrap; gap: 8px; }
     .kv-item { display: grid; gap: 4px; padding: 12px; border: 1px solid #22304a; border-radius: 12px; background: #0b1220; }
     .kv-item code { white-space: pre-wrap; word-break: break-word; }
+    .kv-item.env-duplicate { border-color: rgba(248, 113, 113, 0.55); background: rgba(127, 29, 29, 0.18); }
+    .kv-item.env-duplicate code,
+    .kv-item.env-duplicate .small,
+    .kv-item.env-duplicate .pill { color: #fecaca; }
     .pill { display: inline-flex; padding: 3px 8px; border-radius: 999px; background: #102338; border: 1px solid #23405f; font-size: 12px; }
     .pill.good { background: #0f3a24; border-color: #14532d; color: #86efac; }
     .pill.warn { background: #3f2d0c; border-color: #7c2d12; color: #fde68a; }
@@ -4700,6 +4789,40 @@ function renderPage() {
         : '<div class="muted">No values found.</div>';
     }
 
+    function renderEnvSummaryList(listEl, entries) {
+      const list = Array.isArray(entries) ? entries : [];
+      if (!list.length) {
+        listEl.innerHTML = '<div class="muted">No env values found.</div>';
+        return;
+      }
+      listEl.innerHTML = list.map((entry) => {
+        const sources = Array.isArray(entry.sources) ? entry.sources : [];
+        const sourceLabels = sources.map((source) => {
+          const label = source.relativePath || source.path || 'n/a';
+          const line = source.lineNumber ? ':' + source.lineNumber : '';
+          return label + line;
+        });
+        const firstSource = sourceLabels[0] || entry.source || 'n/a';
+        const duplicateCount = entry.duplicateCount || sourceLabels.length || 0;
+        const duplicateTag = entry.duplicate
+          ? '<span class="pill warn">duplicate ×' + escapeHtml(String(duplicateCount || 2)) + '</span>'
+          : '';
+        const extraSources = sourceLabels.length > 1
+          ? '<div class="small">Also in: ' + escapeHtml(sourceLabels.slice(1).join(', ')) + '</div>'
+          : '';
+        return '<div class="kv-item' + (entry.duplicate ? ' env-duplicate' : '') + '">' +
+          '<div class="row spread" style="gap: 10px; align-items: flex-start;">' +
+            '<div>' +
+              '<div><strong>' + escapeHtml(entry.key || '') + '</strong> ' + duplicateTag + '</div>' +
+              '<div class="small">Source: <code>' + escapeHtml(firstSource) + '</code></div>' +
+              extraSources +
+            '</div>' +
+            '<code>' + escapeHtml(String(entry.value ?? '')) + '</code>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+    }
+
     function renderBackupList(listEl, backups) {
       if (!Array.isArray(backups) || !backups.length) {
         listEl.innerHTML = '<div class="muted">No saved backups yet.</div>';
@@ -4784,10 +4907,19 @@ function renderPage() {
       const backups = Array.isArray(details.backups) ? details.backups : [];
       currentEnvFilePath = String(options.selectedFile || details.selectedFile || details.saveTarget || currentEnvFiles[0]?.path || '').trim();
       const selectedEnvFile = getEnvFileByPath(currentEnvFiles, currentEnvFilePath);
-      const entries = Object.entries(details.env || {})
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([key, value]) => [key, String(value)]);
-      renderKeyValueList(envList, entries);
+      const envSummaryEntries = Array.isArray(details.envEntries) && details.envEntries.length
+        ? details.envEntries
+        : Object.entries(details.env || {})
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([key, value]) => ({
+            key,
+            value: String(value),
+            source: currentEnvFilePath || 'n/a',
+            duplicate: false,
+            duplicateCount: 1,
+            sources: [{ relativePath: currentEnvFilePath || 'n/a', path: currentEnvFilePath || '', lineNumber: 0, value: String(value) }],
+          }));
+      renderEnvSummaryList(envList, envSummaryEntries);
       if (envEditor) {
         envEditor.value = selectedEnvFile ? String(selectedEnvFile.content || '') : '';
       }
@@ -6414,7 +6546,7 @@ async function handleRequest(req, res) {
       const mode = envMatch[2] || '';
       const meta = parseEnvFile(metaPathForRef(ref));
       const projectPath = meta.APP_DIR || '';
-      const { files, envFiles, env, saveTarget, selectedFile } = pickEnvDetails(projectPath);
+      const { files, envFiles, envEntries, env, saveTarget, selectedFile } = pickEnvDetails(projectPath);
       const backups = listProjectEnvBackups(ref);
 
       if (req.method === 'GET' && !mode) {
@@ -6422,6 +6554,7 @@ async function handleRequest(req, res) {
           project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
           files,
           envFiles,
+          envEntries,
           env,
           saveTarget,
           selectedFile,
@@ -6497,6 +6630,7 @@ async function handleRequest(req, res) {
           project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
           files: refreshed.files,
           envFiles: refreshed.envFiles || [],
+          envEntries: refreshed.envEntries || [],
           env: refreshed.env,
           saveTarget: refreshed.saveTarget,
           selectedFile: targetPath,
