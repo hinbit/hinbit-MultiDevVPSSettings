@@ -4082,6 +4082,14 @@ function renderPage() {
         </div>
       </div>
       <div class="kv-item">
+        <div class="small">Merged summary legend</div>
+        <div class="copy-actions" style="flex-wrap: wrap;">
+          <span class="pill neutral">Source label shows the file and line that supplied the value</span>
+          <span class="pill warn">Red means the key appears more than once in the same file or across files</span>
+          <span class="pill">Editing always happens in the selected file only</span>
+        </div>
+      </div>
+      <div class="kv-item">
         <div class="small">Saved backups</div>
         <div id="envBackupsList" class="stack"></div>
       </div>
