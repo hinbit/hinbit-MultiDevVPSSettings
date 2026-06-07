@@ -51,6 +51,7 @@ Rules:
 - use `.env.example` and `.env.production.example` as the source of truth when possible
 - if the app has more than one runtime component, each component must have the keys it needs
 - quote values with spaces or special characters
+- seed and merge env templates in the repo root, `server/`, and `client/` when those folders exist
 - the Multidev env editor shows the effective merged env, but it can now switch between individual files such as `.env`, `.env.local`, `.env.production`, `.env.machine`, `server/.env`, and `client/.env`
 - save actions write back to the selected file, not just the merged view
 

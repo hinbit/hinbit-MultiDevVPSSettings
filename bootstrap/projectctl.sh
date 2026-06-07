@@ -1469,7 +1469,7 @@ PY
   rm -f "${tmp}" >/dev/null 2>&1 || true
 }
 
-seed_project_env_from_templates() {
+seed_project_env_from_templates_for_dir() {
   local project_dir="${1:-${APP_DIR}}"
   local candidate=""
   local template=""
@@ -1503,6 +1503,16 @@ seed_project_env_from_templates() {
     fi
     normalize_env_file_shell_safe "${project_dir}/${candidate}"
   done
+}
+
+seed_project_env_from_templates() {
+  local project_dir="${1:-${APP_DIR}}"
+
+  [[ -d "${project_dir}" ]] || return 0
+
+  seed_project_env_from_templates_for_dir "${project_dir}"
+  seed_project_env_from_templates_for_dir "${project_dir}/server"
+  seed_project_env_from_templates_for_dir "${project_dir}/client"
 }
 
 ensure_meta_dir() {
