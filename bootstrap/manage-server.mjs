@@ -3971,6 +3971,7 @@ function renderPage() {
             <div class="small">Editable env file</div>
             <div class="small">Choose a file to edit. The summary below shows the effective merged env used by the app.</div>
             <div class="small">Saved to <code id="envSaveTarget">(n/a)</code> as shell-safe quoted assignments.</div>
+            <div class="small">Editing: <code id="envCurrentFileLabel">(n/a)</code></div>
           </div>
           <div class="copy-actions">
             <button id="envReloadBtn" class="ghost" type="button">Reload</button>
@@ -4126,6 +4127,7 @@ function renderPage() {
     const envSaveBtn = document.getElementById('envSaveBtn');
     const envReloadBtn = document.getElementById('envReloadBtn');
     const envSaveTarget = document.getElementById('envSaveTarget');
+    const envCurrentFileLabel = document.getElementById('envCurrentFileLabel');
     const envMergeBox = document.getElementById('envMergeBox');
     const envMergeOverlay = document.getElementById('envMergeOverlay');
     const envMergeSaveBtn = document.getElementById('envMergeSaveBtn');
@@ -4809,6 +4811,9 @@ function renderPage() {
       if (envSaveTarget) {
         envSaveTarget.textContent = selectedEnvFile?.relativePath || selectedEnvFile?.path || currentEnvFilePath || '(n/a)';
       }
+      if (envCurrentFileLabel) {
+        envCurrentFileLabel.textContent = selectedEnvFile?.relativePath || selectedEnvFile?.path || currentEnvFilePath || '(n/a)';
+      }
       envPanel.hidden = false;
       setModalLocked(true);
     }
@@ -4831,6 +4836,7 @@ function renderPage() {
       if (envMergeBox) envMergeBox.hidden = true;
       if (envMergeSaveBtn) envMergeSaveBtn.hidden = true;
       if (envSaveTarget) envSaveTarget.textContent = '(n/a)';
+      if (envCurrentFileLabel) envCurrentFileLabel.textContent = '(n/a)';
       setModalLocked(false);
     }
 
@@ -5504,6 +5510,9 @@ function renderPage() {
         }
         if (envSaveTarget) {
           envSaveTarget.textContent = selectedEnvFile?.relativePath || selectedEnvFile?.path || currentEnvFilePath || '(n/a)';
+        }
+        if (envCurrentFileLabel) {
+          envCurrentFileLabel.textContent = selectedEnvFile?.relativePath || selectedEnvFile?.path || currentEnvFilePath || '(n/a)';
         }
       });
     }
