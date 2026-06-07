@@ -112,6 +112,21 @@ function metaPathForRef(ref) {
   return path.join(META_DIR, `${slugFromRef(ref)}.env`);
 }
 
+function touchFileMtime(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return false;
+  try {
+    const now = new Date();
+    fs.utimesSync(filePath, now, now);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function touchProjectMeta(ref) {
+  return touchFileMtime(metaPathForRef(ref));
+}
+
 function parseEnvFile(filePath) {
   const data = {};
   if (!fs.existsSync(filePath)) return data;
@@ -661,19 +676,23 @@ function readProjects() {
     ? fs.readdirSync(META_DIR).filter((name) => name.endsWith('.env'))
     : [];
   return projectFiles.map((name) => {
-    const meta = parseEnvFile(path.join(META_DIR, name));
+    const metaPath = path.join(META_DIR, name);
+    const meta = parseEnvFile(metaPath);
+    const stat = fs.existsSync(metaPath) ? fs.statSync(metaPath) : null;
     const authFile = meta.APP_DOMAIN ? path.join(AUTH_DIR, `${meta.APP_DOMAIN}.htpasswd`) : '';
     const protectedAccess = authFile ? fs.existsSync(authFile) && fs.statSync(authFile).size > 0 : false;
     const pm2Name = meta.PM2_NAME || '';
     return {
       ...meta,
+      metaPath,
+      metaMtimeMs: stat ? Number(stat.mtimeMs || 0) : 0,
       PROJECT_SLUG: meta.PROJECT_SLUG || name.replace(/\.env$/, ''),
       protected: protectedAccess,
       auth_file: authFile,
       repo: meta.REPO_REF || '',
       scripts: readPackageScripts(meta.APP_DIR || ''),
     };
-  }).sort((a, b) => String(a.APP_DOMAIN || a.PROJECT_SLUG).localeCompare(String(b.APP_DOMAIN || b.PROJECT_SLUG)));
+  });
 }
 
 function pickDbDetails(projectPath) {
@@ -1656,7 +1675,12 @@ function projectView() {
       gitCommit: gitInfo.commit || '',
       gitCommitShort: gitInfo.commitShort || '',
       gitCommitDate: gitInfo.commitDate || '',
+      lastUsedAtMs: Number(project.metaMtimeMs || 0) || 0,
     };
+  }).sort((a, b) => {
+    const lastUsedDiff = Number(b.lastUsedAtMs || 0) - Number(a.lastUsedAtMs || 0);
+    if (lastUsedDiff) return lastUsedDiff;
+    return String(a.domain || a.slug || a.repo || '').localeCompare(String(b.domain || b.slug || b.repo || ''));
   });
 }
 
@@ -6192,6 +6216,7 @@ async function handleRequest(req, res) {
       const meta = parseEnvFile(metaPathForRef(ref));
       const domain = String(meta.APP_DOMAIN || '').trim();
       const tls = readProjectTlsStatus(meta);
+      touchProjectMeta(ref);
 
       if (req.method === 'GET') {
         sendJson(res, 200, {
@@ -6399,6 +6424,7 @@ async function handleRequest(req, res) {
       const ref = decodeURIComponent(dbMatch[1]);
       const meta = parseEnvFile(metaPathForRef(ref));
       const { files, db } = pickDbDetails(meta.APP_DIR || '');
+      touchProjectMeta(ref);
       sendJson(res, 200, {
         project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
         files,
@@ -6429,6 +6455,7 @@ async function handleRequest(req, res) {
       const projectMachineRootPassword = projectMachine?.rootPassword || '';
       const projectMachineNotes = projectMachine?.notes || '';
       const accounts = readMysqlAccounts(dbUser, projectMachine || projectMachineId);
+      touchProjectMeta(ref);
 
       if (req.method === 'GET') {
         sendJson(res, 200, {
@@ -6536,6 +6563,7 @@ async function handleRequest(req, res) {
     if (sshMatch) {
       const ref = decodeURIComponent(sshMatch[1]);
       const meta = parseEnvFile(metaPathForRef(ref));
+      touchProjectMeta(ref);
       sendJson(res, 200, {
         project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
         user: meta.SSH_UPLOAD_USER || '',
@@ -6556,6 +6584,7 @@ async function handleRequest(req, res) {
       const projectPath = meta.APP_DIR || '';
       const { files, envFiles, envEntries, env, saveTarget, selectedFile } = pickEnvDetails(projectPath);
       const backups = listProjectEnvBackups(ref);
+      touchProjectMeta(ref);
 
       if (req.method === 'GET' && !mode) {
         sendJson(res, 200, {
@@ -6699,6 +6728,7 @@ async function handleRequest(req, res) {
       const meta = parseEnvFile(metaPathForRef(ref));
       const projectPath = meta.APP_DIR || '';
       const gitStatus = readProjectGitStatus(projectPath);
+      touchProjectMeta(ref);
       sendJson(res, 200, {
         project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
         repo: meta.REPO_REF || ref,
@@ -6733,6 +6763,7 @@ async function handleRequest(req, res) {
           : legacyStash
             ? 'merge-env'
             : 'merge-env';
+      touchProjectMeta(ref);
       streamProjectCtl(res, ['update', ref], { PROJECTCTL_PULL_MODE: pullMode });
       return;
     }
@@ -6763,6 +6794,7 @@ async function handleRequest(req, res) {
         clearLogFile(outLog);
       }
 
+      touchProjectMeta(ref);
       sendJson(res, 200, { ok: true, message: `${ref} log(s) cleared` });
       return;
     }
@@ -6775,6 +6807,7 @@ async function handleRequest(req, res) {
       const scripts = readPackageScripts(meta.APP_DIR || '');
 
       if (req.method === 'GET' && !scriptAction) {
+        touchProjectMeta(ref);
         sendJson(res, 200, {
           project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
           scripts,
@@ -6795,12 +6828,14 @@ async function handleRequest(req, res) {
           if (dir) args.push('--dir', dir);
           args.push(ref, script);
           const output = runProjectCtl(args);
+          touchProjectMeta(ref);
           sendJson(res, 200, { ok: true, message: output || `Activated ${script}` });
         } else {
           const args = ['script'];
           if (dir) args.push('--dir', dir);
           args.push(ref, script);
           const output = runProjectCtl(args);
+          touchProjectMeta(ref);
           sendJson(res, 200, { ok: true, message: output || `Ran ${script}` });
         }
         return;
@@ -6823,6 +6858,7 @@ async function handleRequest(req, res) {
           : target?.pm2_env?.pm_out_log_path;
         const content = logTail(logFile, lines) || '';
         const download = url.searchParams.get('download') === '1';
+        touchProjectMeta(ref);
         sendText(res, 200, content || `(no log data for ${ref})\n`, download ? {
           'Content-Disposition': `attachment; filename="${slugFromRef(ref)}-${stream}.log"`,
         } : {});
@@ -6840,6 +6876,7 @@ async function handleRequest(req, res) {
         runProjectCtl([action, ref]);
       }
 
+      touchProjectMeta(ref);
       sendJson(res, 200, { ok: true, message: `${action} complete for ${ref}` });
       return;
     }

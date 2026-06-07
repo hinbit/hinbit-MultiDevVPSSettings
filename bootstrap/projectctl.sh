@@ -1404,6 +1404,12 @@ update_meta_value() {
   fi
 }
 
+touch_meta_file() {
+  local meta="$1"
+  [[ -f "${meta}" ]] || return 0
+  touch "${meta}" >/dev/null 2>&1 || true
+}
+
 merge_env_file_preserving_current_values() {
   local current_file="$1"
   local new_file="$2"
@@ -2655,6 +2661,7 @@ do_install() {
   restart_pm2
   verify_project_install "${REPO_REF}"
   verify_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
+  touch_meta_file "${meta}"
   if [[ -n "${APP_DOMAIN}" ]]; then
     printf '[projectctl] installed %s in %s on port %s for %s\n' "${REPO_REF}" "${APP_DIR}" "${APP_PORT}" "${APP_DOMAIN}"
   else
@@ -2728,6 +2735,7 @@ do_update() {
   restart_pm2
   verify_project_install "${REPO_REF}"
   verify_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
+  touch_meta_file "${meta}"
   printf '[projectctl] updated %s\n' "${REPO_REF}"
 }
 
@@ -2740,6 +2748,7 @@ do_restart() {
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
   restart_pm2
+  touch_meta_file "${meta}"
   printf '[projectctl] restarted %s\n' "${REPO_REF}"
 }
 
@@ -2756,6 +2765,7 @@ do_stop() {
     pm2 stop "${PM2_NAME}" >/dev/null 2>&1 || true
     pm2 save || true
   fi
+  touch_meta_file "${meta}"
 
   printf '[projectctl] stopped %s\n' "${REPO_REF}"
 }
@@ -2813,6 +2823,7 @@ do_ssh() {
 
   ensure_project_ssh_user "${SSH_UPLOAD_USER}" "${SSH_UPLOAD_PASSWORD}" "${APP_DIR}"
   refresh_project_ssh_config
+  touch_meta_file "${meta}"
   show_project_ssh_details "${ref}"
 }
 
@@ -2862,6 +2873,7 @@ do_script() {
       env TZ=Asia/Jerusalem PORT="${APP_PORT}" pm2 start /bin/bash --name "${pm2_script_name}" --no-autorestart --time -- -lc 'set -a; [ -f .env ] && . ./.env; [ -f .env.machine ] && . ./.env.machine; set +a; '"${runner}"'; exit $?'
     )
     pm2 save
+    touch_meta_file "${meta}"
     printf '[projectctl] activated %s script %s as %s\n' "${REPO_REF}" "${script}" "${pm2_script_name}"
     return
   fi
@@ -2870,6 +2882,7 @@ do_script() {
     cd "${script_path}"
     /bin/bash -lc 'set -a; [ -f .env ] && . ./.env; [ -f .env.machine ] && . ./.env.machine; set +a; '"${runner}"'; exit $?'
   )
+  touch_meta_file "${meta}"
   printf '[projectctl] ran %s script %s\n' "${REPO_REF}" "${script}"
 }
 
@@ -2893,6 +2906,7 @@ do_password() {
   if [[ "${clear}" == "yes" ]]; then
     rm -f "${auth_file}"
     sync_app_map
+    touch_meta_file "${meta}"
     printf '[projectctl] cleared password for %s\n' "${REPO_REF}"
     return
   fi
@@ -2905,6 +2919,7 @@ do_password() {
   chown root:www-data "${auth_file}" 2>/dev/null || true
   chmod 0640 "${auth_file}"
   sync_app_map
+  touch_meta_file "${meta}"
   printf '[projectctl] set password for %s\n' "${REPO_REF}"
 }
 
@@ -3231,6 +3246,7 @@ do_mysql() {
   else
     printf '[projectctl] mysql permissions updated for %s (%s)\n' "${REPO_REF}" "${MYSQL_ALLOWED_IPS:-local only}"
   fi
+  touch_meta_file "${meta}"
 }
 
 remove_mysql_permissions() {
