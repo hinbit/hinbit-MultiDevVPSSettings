@@ -111,6 +111,7 @@ You can also save a default app-domain certificate such as `seach.co.il`; new su
 - `/etc/app-map.csv` maps domain to port
 - `/etc/app-watch.csv` lists PM2 apps to monitor
 - `/etc/vps-projects/*.env` stores project metadata for `projectctl`
+- the Manage UI env editor can switch between individual env files and saves back to the selected file
 - `/usr/local/bin/app-sync.sh` generates nginx and TLS config
 - `/usr/local/bin/pm2-smart-restart.sh` restarts PM2 apps when watched files change
 - `/usr/local/bin/projectctl` manages GitHub project installs and updates

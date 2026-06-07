@@ -157,6 +157,29 @@ function parseEnvText(text) {
   return data;
 }
 
+function discoverProjectEnvFiles(projectPath) {
+  const baseDirs = [projectPath, path.join(projectPath, 'server'), path.join(projectPath, 'client')];
+  const seen = new Set();
+  const files = [];
+  for (const baseDir of baseDirs) {
+    for (const candidate of ENV_CANDIDATES) {
+      const filePath = path.join(baseDir, candidate);
+      const resolved = path.resolve(filePath);
+      if (seen.has(resolved) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) continue;
+      seen.add(resolved);
+      const raw = fs.readFileSync(filePath, 'utf8');
+      files.push({
+        path: filePath,
+        relativePath: path.relative(projectPath, filePath) || path.basename(filePath),
+        name: path.basename(filePath),
+        content: raw,
+        env: parseEnvFile(filePath),
+      });
+    }
+  }
+  return files;
+}
+
 function shellQuoteEnvValue(value) {
   const raw = String(value ?? '');
   return `"${raw
@@ -177,16 +200,17 @@ function serializeEnvText(env) {
 }
 
 function readProjectEnv(projectPath) {
+  const envFiles = discoverProjectEnvFiles(projectPath);
   const merged = {};
-  const files = [];
-  for (const name of ENV_CANDIDATES) {
-    const filePath = path.join(projectPath, name);
-    if (!fs.existsSync(filePath)) continue;
-    files.push(filePath);
-    Object.assign(merged, parseEnvFile(filePath));
+  for (const file of envFiles) {
+    Object.assign(merged, file.env || {});
   }
 
-  return { merged, files };
+  return {
+    merged,
+    files: envFiles.map((file) => file.path),
+    envFiles,
+  };
 }
 
 function chooseProjectEnvSaveTarget(projectPath, files = []) {
@@ -198,6 +222,24 @@ function chooseProjectEnvSaveTarget(projectPath, files = []) {
     }
   }
   return path.join(projectPath || '', '.env');
+}
+
+function resolveProjectEnvSaveTarget(projectPath, files = [], requestedPath = '') {
+  const cleanRequested = String(requestedPath || '').trim();
+  if (cleanRequested) {
+    const candidate = path.isAbsolute(cleanRequested)
+      ? cleanRequested
+      : path.resolve(projectPath || '', cleanRequested);
+    const candidateResolved = path.resolve(candidate);
+    const fileSet = new Set((Array.isArray(files) ? files : []).map((file) => path.resolve(file)));
+    if (fileSet.has(candidateResolved)) {
+      return candidateResolved;
+    }
+    if (candidateResolved.startsWith(path.resolve(projectPath || '') + path.sep) && path.basename(candidateResolved).startsWith('.env')) {
+      return candidateResolved;
+    }
+  }
+  return chooseProjectEnvSaveTarget(projectPath, files);
 }
 
 function projectEnvBackupDir(ref) {
@@ -587,11 +629,16 @@ function pickDbDetails(projectPath) {
 }
 
 function pickEnvDetails(projectPath) {
-  const { merged, files } = readProjectEnv(projectPath);
+  const { merged, files, envFiles } = readProjectEnv(projectPath);
+  const preferredFile = envFiles.find((file) => path.basename(file.path) === '.env')
+    || envFiles[0]
+    || null;
   return {
     files,
+    envFiles,
     env: merged,
     saveTarget: chooseProjectEnvSaveTarget(projectPath, files),
+    selectedFile: preferredFile ? preferredFile.path : chooseProjectEnvSaveTarget(projectPath, files),
   };
 }
 
@@ -3922,12 +3969,17 @@ function renderPage() {
         <div class="row spread" style="gap: 12px; align-items: flex-start;">
           <div>
             <div class="small">Editable env file</div>
+            <div class="small">Choose a file to edit. The summary below shows the effective merged env used by the app.</div>
             <div class="small">Saved to <code id="envSaveTarget">(n/a)</code> as shell-safe quoted assignments.</div>
           </div>
           <div class="copy-actions">
             <button id="envReloadBtn" class="ghost" type="button">Reload</button>
             <button id="envSaveBtn" class="secondary" type="button">Save env</button>
           </div>
+        </div>
+        <div style="margin: 8px 0 10px;">
+          <label class="small" for="envFileSelect">Env file</label>
+          <select id="envFileSelect" class="secondary" style="width: 100%; margin-top: 4px;"></select>
         </div>
         <textarea id="envEditor" class="env-editor" spellcheck="false" placeholder="KEY=&quot;value&quot;"></textarea>
       </div>
@@ -4054,6 +4106,8 @@ function renderPage() {
     const sshCopyPassBtn = document.getElementById('sshCopyPassBtn');
     const sshCopyAllBtn = document.getElementById('sshCopyAllBtn');
     let currentMysqlDetails = null;
+    let currentEnvFiles = [];
+    let currentEnvFilePath = '';
     const envPanel = document.getElementById('envPanel');
     const envTitle = document.getElementById('envTitle');
     const envSubtitle = document.getElementById('envSubtitle');
@@ -4067,6 +4121,7 @@ function renderPage() {
     const envUploadInput = document.getElementById('envUploadInput');
     const envUploadBtn = document.getElementById('envUploadBtn');
     const envDownloadZipBtn = document.getElementById('envDownloadZipBtn');
+    const envFileSelect = document.getElementById('envFileSelect');
     const envEditor = document.getElementById('envEditor');
     const envSaveBtn = document.getElementById('envSaveBtn');
     const envReloadBtn = document.getElementById('envReloadBtn');
@@ -4678,6 +4733,37 @@ function renderPage() {
       selectEl.disabled = !list.length;
     }
 
+    function renderEnvFileSelect(selectEl, envFiles, selectedPath = '') {
+      if (!selectEl) return;
+      const list = Array.isArray(envFiles) ? envFiles : [];
+      if (!list.length) {
+        const value = selectedPath || '.env';
+        const label = String(value || '.env').split(/[\\/]/).pop() || '.env';
+        selectEl.innerHTML = '<option value="' + escapeHtml(value) + '" selected>' + escapeHtml(label) + '</option>';
+        selectEl.disabled = false;
+        selectEl.value = value;
+        return;
+      }
+      selectEl.innerHTML = list.map((file) => \`
+        <option value="\${escapeHtml(file.path || '')}"\${String(file.path || '') === String(selectedPath || '') ? ' selected' : ''}>
+          \${escapeHtml(file.relativePath || file.name || file.path || '.env')}
+        </option>
+      \`).join('');
+      selectEl.disabled = false;
+      if (selectedPath) {
+        selectEl.value = selectedPath;
+      } else if (list[0]) {
+        selectEl.value = list[0].path || '';
+      }
+    }
+
+    function getEnvFileByPath(envFiles, filePath) {
+      const list = Array.isArray(envFiles) ? envFiles : [];
+      const normalized = String(filePath || '').trim();
+      if (!normalized) return null;
+      return list.find((file) => String(file.path || '') === normalized || String(file.relativePath || '') === normalized || String(file.name || '') === normalized) || null;
+    }
+
     function openEnvPanel(ref, details, subtitle, options = {}) {
       closeScriptsModal();
       closeDbPanel();
@@ -4686,6 +4772,7 @@ function renderPage() {
       closeLogPanel();
       currentEnvRef = ref;
       currentEnvDetails = details || null;
+      currentEnvFiles = Array.isArray(details.envFiles) ? details.envFiles : [];
       currentEnvMergeMode = Boolean(options.mergeMode);
       envTitle.textContent = currentEnvMergeMode ? 'Merge Environment Values' : 'Environment Values';
       envSubtitle.textContent = currentEnvMergeMode
@@ -4693,13 +4780,16 @@ function renderPage() {
         : (subtitle || '');
       envFlash.hidden = true;
       const backups = Array.isArray(details.backups) ? details.backups : [];
+      currentEnvFilePath = String(options.selectedFile || details.selectedFile || details.saveTarget || currentEnvFiles[0]?.path || '').trim();
+      const selectedEnvFile = getEnvFileByPath(currentEnvFiles, currentEnvFilePath);
       const entries = Object.entries(details.env || {})
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([key, value]) => [key, String(value)]);
       renderKeyValueList(envList, entries);
       if (envEditor) {
-        envEditor.value = serializeEnvTextFromObject(details.env || {});
+        envEditor.value = selectedEnvFile ? String(selectedEnvFile.content || '') : '';
       }
+      renderEnvFileSelect(envFileSelect, currentEnvFiles, currentEnvFilePath);
       if (envMergeBox) {
         envMergeBox.hidden = !currentEnvMergeMode;
       }
@@ -4717,7 +4807,7 @@ function renderPage() {
       envDownloadBtn.href = \`\${API}/projects/\${ref}/env/download\`;
       if (envDownloadZipBtn) envDownloadZipBtn.href = \`\${API}/projects/\${ref}/env/download\`;
       if (envSaveTarget) {
-        envSaveTarget.textContent = details.saveTarget ? details.saveTarget.split('/').pop() : '(n/a)';
+        envSaveTarget.textContent = selectedEnvFile?.relativePath || selectedEnvFile?.path || currentEnvFilePath || '(n/a)';
       }
       envPanel.hidden = false;
       setModalLocked(true);
@@ -4727,9 +4817,12 @@ function renderPage() {
       envPanel.hidden = true;
       currentEnvRef = '';
       currentEnvDetails = null;
+      currentEnvFiles = [];
+      currentEnvFilePath = '';
       currentEnvMergeMode = false;
       envList.innerHTML = '';
       envBackupsList.innerHTML = '';
+      if (envFileSelect) envFileSelect.innerHTML = '';
       if (envRestoreSelect) envRestoreSelect.innerHTML = '';
       envFlash.hidden = true;
       envUploadInput.value = '';
@@ -4929,7 +5022,10 @@ function renderPage() {
 
     async function loadEnv(ref, options = {}) {
       const data = await api(\`/projects/\${ref}/env\`);
-      openEnvPanel(ref, data, data.project || ref, options);
+      openEnvPanel(ref, data, data.project || ref, {
+        ...options,
+        selectedFile: options.selectedFile || currentEnvFilePath || data.selectedFile || data.saveTarget,
+      });
     }
 
     async function saveEnv(ref, options = {}) {
@@ -4940,11 +5036,12 @@ function renderPage() {
         body: JSON.stringify({
           envText,
           overlayText: currentEnvMergeMode ? overlayText : '',
+          targetFile: currentEnvFilePath,
         }),
       });
       showMessage(envFlash, data.message || 'Environment values saved');
       await refresh();
-      await loadEnv(ref, options);
+      await loadEnv(ref, { ...options, selectedFile: currentEnvFilePath });
     }
 
     async function backupEnv(ref) {
@@ -4953,7 +5050,7 @@ function renderPage() {
         body: JSON.stringify({}),
       });
       showMessage(envFlash, data.message || 'Environment backup saved');
-      await loadEnv(ref);
+      await loadEnv(ref, { selectedFile: currentEnvFilePath });
       await refresh();
     }
 
@@ -4964,7 +5061,7 @@ function renderPage() {
       });
       showMessage(envFlash, data.message || 'Environment backup restored');
       await refresh();
-      await loadEnv(ref);
+      await loadEnv(ref, { selectedFile: currentEnvFilePath });
     }
 
     async function deleteEnvBackup(ref, backupName) {
@@ -4973,7 +5070,7 @@ function renderPage() {
       });
       showMessage(envFlash, data.message || 'Environment backup deleted');
       await refresh();
-      await loadEnv(ref);
+      await loadEnv(ref, { selectedFile: currentEnvFilePath });
     }
 
     async function uploadEnv(ref, file) {
@@ -5397,6 +5494,20 @@ function renderPage() {
       }
     });
 
+    if (envFileSelect) {
+      envFileSelect.addEventListener('change', async () => {
+        if (!currentEnvRef) return;
+        currentEnvFilePath = envFileSelect.value || currentEnvFilePath;
+        const selectedEnvFile = getEnvFileByPath(currentEnvFiles, currentEnvFilePath);
+        if (envEditor) {
+          envEditor.value = selectedEnvFile ? String(selectedEnvFile.content || '') : '';
+        }
+        if (envSaveTarget) {
+          envSaveTarget.textContent = selectedEnvFile?.relativePath || selectedEnvFile?.path || currentEnvFilePath || '(n/a)';
+        }
+      });
+    }
+
     if (envSaveBtn) {
       envSaveBtn.addEventListener('click', async () => {
         if (!currentEnvRef) return;
@@ -5417,7 +5528,7 @@ function renderPage() {
         if (!currentEnvRef) return;
         envReloadBtn.disabled = true;
         try {
-          await loadEnv(currentEnvRef, { mergeMode: currentEnvMergeMode });
+          await loadEnv(currentEnvRef, { mergeMode: currentEnvMergeMode, selectedFile: currentEnvFilePath });
         } catch (error) {
           showMessage(envFlash, error.message, false);
           envPanel.hidden = false;
@@ -6294,15 +6405,17 @@ async function handleRequest(req, res) {
       const mode = envMatch[2] || '';
       const meta = parseEnvFile(metaPathForRef(ref));
       const projectPath = meta.APP_DIR || '';
-      const { files, env, saveTarget } = pickEnvDetails(projectPath);
+      const { files, envFiles, env, saveTarget, selectedFile } = pickEnvDetails(projectPath);
       const backups = listProjectEnvBackups(ref);
 
       if (req.method === 'GET' && !mode) {
         sendJson(res, 200, {
           project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
           files,
+          envFiles,
           env,
           saveTarget,
+          selectedFile,
           backups,
           latestBackup: backups[0] || null,
         });
@@ -6355,11 +6468,12 @@ async function handleRequest(req, res) {
         const finalEnv = (body.overlayText && String(body.overlayText).trim())
           ? { ...parsedEnv, ...overlayEnv }
           : parsedEnv;
-        const targetPath = chooseProjectEnvSaveTarget(projectPath, files);
+        const targetPath = resolveProjectEnvSaveTarget(projectPath, files, body.targetFile || body.targetPath || '');
         if (!targetPath) {
           throw new Error(`Unable to choose env save target for ${ref}`);
         }
         const autoBackup = createProjectEnvBackup(ref, projectPath);
+        fs.mkdirSync(path.dirname(targetPath), { recursive: true });
         fs.writeFileSync(targetPath, serializeEnvText(finalEnv), 'utf8');
         fs.chmodSync(targetPath, 0o600);
         runProjectCtl(['restart', ref]);
@@ -6373,8 +6487,10 @@ async function handleRequest(req, res) {
           autoBackup,
           project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
           files: refreshed.files,
+          envFiles: refreshed.envFiles || [],
           env: refreshed.env,
           saveTarget: refreshed.saveTarget,
+          selectedFile: targetPath,
           backups: refreshedBackups,
           latestBackup: refreshedBackups[0] || null,
         });
