@@ -2004,6 +2004,63 @@ project_has_split_runtime() {
   return 1
 }
 
+project_domain_bindings_json() {
+  local raw="${APP_DOMAIN_BINDINGS_JSON:-}"
+
+  if [[ -z "${raw}" && -n "${APP_DOMAIN:-}" ]]; then
+    python3 - "${APP_DOMAIN}" "${APP_PORT:-}" "${APP_HTTPS:-yes}" <<'PY'
+import json
+import sys
+
+domain, port, https = sys.argv[1:4]
+bindings = [{
+    "domain": domain,
+    "port": port,
+    "https": https,
+    "envFile": ".env",
+    "primary": True,
+}]
+print(json.dumps(bindings, ensure_ascii=False))
+PY
+    return 0
+  fi
+
+  printf '%s' "${raw}"
+}
+
+project_domain_binding_rows() {
+  local raw="${APP_DOMAIN_BINDINGS_JSON:-}"
+  [[ -n "${raw}" ]] || return 0
+
+  python3 - "${raw}" "${APP_DOMAIN:-}" "${APP_PORT:-}" "${APP_TYPE:-project}" "${APP_HTTPS:-yes}" <<'PY'
+import json
+import sys
+
+raw, primary_domain, primary_port, primary_type, primary_https = sys.argv[1:6]
+if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+    raw = raw[1:-1]
+try:
+    data = json.loads(raw)
+except Exception:
+    raise SystemExit(0)
+
+if not isinstance(data, list):
+    raise SystemExit(0)
+
+for item in data:
+    if not isinstance(item, dict):
+        continue
+    domain = str(item.get("domain", "")).strip()
+    if not domain or domain == primary_domain:
+        continue
+    port = str(item.get("port", "")).strip() or primary_port
+    typ = str(item.get("type", "")).strip() or primary_type
+    https = str(item.get("https", "")).strip() or primary_https
+    if domain and port:
+        print(f"{domain}\t{port}\t{typ}\t{https}")
+PY
+}
+
 write_meta() {
   local meta="$1"
   if [[ -n "${REPO_REF:-}" ]]; then
@@ -2018,6 +2075,7 @@ APP_DIR=${APP_DIR}
 PM2_NAME=${PM2_NAME}
 APP_PORT=${APP_PORT}
 APP_DOMAIN=${APP_DOMAIN}
+APP_DOMAIN_BINDINGS_JSON=$(shell_quote "$(project_domain_bindings_json)")
 APP_HTTPS=${APP_HTTPS}
 APP_TYPE=${APP_TYPE}
 PACKAGE_MANAGER=${PACKAGE_MANAGER:-}
@@ -2114,6 +2172,10 @@ sync_app_map() {
   if [[ -n "${APP_DOMAIN:-}" ]]; then
     ensure_auth_file_accessible "${APP_DOMAIN}"
     app_map_upsert "${APP_DOMAIN}" "${APP_PORT}" "${APP_TYPE:-project}" "${APP_HTTPS:-yes}"
+    while IFS=$'\t' read -r extra_domain extra_port extra_type extra_https; do
+      [[ -n "${extra_domain:-}" && -n "${extra_port:-}" ]] || continue
+      app_map_upsert "${extra_domain}" "${extra_port}" "${extra_type:-${APP_TYPE:-project}}" "${extra_https:-${APP_HTTPS:-yes}}"
+    done < <(project_domain_binding_rows)
     if [[ -x /usr/local/bin/app-sync.sh ]]; then
       /usr/local/bin/app-sync.sh
     fi

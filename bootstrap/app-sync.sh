@@ -39,6 +39,50 @@ append_project_domains() {
     https="$(meta_env_value "${meta}" APP_HTTPS)"
     [[ -n "${domain}" && -n "${port}" ]] || continue
     printf '%s,%s,%s,%s\n' "${domain}" "${port}" "${type:-node}" "${https:-yes}"
+    APP_DOMAIN="${domain}" APP_PORT="${port}" APP_TYPE="${type:-node}" APP_HTTPS="${https:-yes}" python3 - "${meta}" <<'PY'
+import json
+import os
+import sys
+
+meta_path = sys.argv[1]
+raw = ""
+try:
+    with open(meta_path, "r", encoding="utf-8", errors="surrogateescape") as handle:
+        for line in handle:
+            line = line.rstrip("\n")
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() == "APP_DOMAIN_BINDINGS_JSON":
+                raw = value.strip()
+                break
+except OSError:
+    raise SystemExit(0)
+
+if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+    raw = raw[1:-1]
+
+if not raw.strip():
+    raise SystemExit(0)
+
+try:
+    data = json.loads(raw)
+except Exception:
+    raise SystemExit(0)
+
+primary_domain = os.environ.get("APP_DOMAIN", "")
+for item in data if isinstance(data, list) else []:
+    if not isinstance(item, dict):
+        continue
+    dom = str(item.get("domain", "")).strip()
+    if not dom or dom == primary_domain:
+        continue
+    port = str(item.get("port", "")).strip() or os.environ.get("APP_PORT", "")
+    typ = str(item.get("type", "")).strip() or os.environ.get("APP_TYPE", "node")
+    https = str(item.get("https", "")).strip() or os.environ.get("APP_HTTPS", "yes")
+    if dom and port:
+        print(f"{dom},{port},{typ},{https}")
+PY
   done
 }
 

@@ -257,6 +257,12 @@ function serializeEnvText(env) {
   return entries.map(([key, value]) => `${key}=${shellQuoteEnvValue(value)}`).join('\n') + (entries.length ? '\n' : '');
 }
 
+function updateEnvFileValue(filePath, key, value) {
+  const current = fs.existsSync(filePath) ? parseEnvFile(filePath) : {};
+  current[key] = value;
+  fs.writeFileSync(filePath, serializeEnvText(current), 'utf8');
+}
+
 function readProjectEnv(projectPath) {
   const envFiles = discoverProjectEnvFiles(projectPath);
   const merged = {};
@@ -554,6 +560,61 @@ function projectFallbackDomain(domain) {
   const parts = String(domain || '').trim().split('.').filter(Boolean);
   if (parts.length < 3) return '';
   return parts.slice(1).join('.');
+}
+
+function normalizeDomainBinding(binding, fallback = {}) {
+  const domain = String(binding?.domain || '').trim();
+  if (!domain) return null;
+  return {
+    domain,
+    port: String(binding?.port || fallback.port || '').trim(),
+    https: String(binding?.https || fallback.https || 'yes').trim() || 'yes',
+    envFile: String(binding?.envFile || '.env').trim() || '.env',
+    primary: Boolean(binding?.primary),
+    type: String(binding?.type || fallback.type || 'project').trim() || 'project',
+  };
+}
+
+function parseProjectDomainBindings(meta) {
+  const fallback = {
+    port: String(meta?.APP_PORT || '').trim(),
+    https: String(meta?.APP_HTTPS || 'yes').trim() || 'yes',
+    type: String(meta?.APP_TYPE || 'project').trim() || 'project',
+  };
+  const raw = String(meta?.APP_DOMAIN_BINDINGS_JSON || '').trim();
+  let bindings = [];
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        bindings = parsed.map((item) => normalizeDomainBinding(item, fallback)).filter(Boolean);
+      }
+    } catch {
+      bindings = [];
+    }
+  }
+  if (!bindings.length && String(meta?.APP_DOMAIN || '').trim()) {
+    bindings = [normalizeDomainBinding({
+      domain: meta.APP_DOMAIN,
+      port: meta.APP_PORT,
+      https: meta.APP_HTTPS,
+      envFile: '.env',
+      primary: true,
+      type: meta.APP_TYPE,
+    }, fallback)].filter(Boolean);
+  }
+  if (!bindings.some((item) => item.primary) && String(meta?.APP_DOMAIN || '').trim()) {
+    const primary = normalizeDomainBinding({
+      domain: meta.APP_DOMAIN,
+      port: meta.APP_PORT,
+      https: meta.APP_HTTPS,
+      envFile: '.env',
+      primary: true,
+      type: meta.APP_TYPE,
+    }, fallback);
+    if (primary) bindings.unshift(primary);
+  }
+  return bindings.filter(Boolean);
 }
 
 function readProjectSslStatus(project) {
@@ -1626,6 +1687,8 @@ function projectView() {
     const fsUsage = readProjectFilesystemUsage(project.APP_DIR || '');
     const gitInfo = readProjectGitInfo(project.APP_DIR || '');
     const ssl = readProjectSslStatus(project);
+    const domainBindings = parseProjectDomainBindings(project);
+    const aliasBindings = domainBindings.filter((item) => !item.primary);
     const lastBuildMode = String(project.LAST_BUILD_MODE || '').trim();
     const lastBuildStatus = String(project.LAST_BUILD_STATUS || '').trim();
     const lastBuildAt = String(project.LAST_BUILD_AT || '').trim();
@@ -1636,6 +1699,9 @@ function projectView() {
       pm2: project.PM2_NAME || '',
       port: project.APP_PORT || '',
       domain: project.APP_DOMAIN || '',
+      domainBindings,
+      aliasBindings,
+      domainCount: domainBindings.length,
       branch: project.BRANCH || '',
       https: project.APP_HTTPS || '',
       kind: project.START_KIND || '',
@@ -4130,6 +4196,48 @@ function renderPage() {
       <div id="envList" class="kv-list"></div>
     </div>
   </div>
+  <div id="domainsPanel" class="scripts-panel modal-panel" hidden>
+    <header>
+      <div>
+        <h2 id="domainsTitle">Project Domains</h2>
+        <div id="domainsSubtitle" class="muted"></div>
+      </div>
+      <button id="closeDomainsBtn" class="ghost" type="button">Close</button>
+    </header>
+    <div class="body">
+      <div id="domainsFlash" class="flash" hidden></div>
+      <div class="kv-item">
+        <div class="small">Primary domain</div>
+        <div id="domainsPrimaryLabel" class="small"></div>
+        <div class="small">Add extra domains that should point to the same project. Each alias can point at a different env file for management and editing.</div>
+      </div>
+      <div id="domainsList" class="stack"></div>
+      <div class="kv-item">
+        <div class="small">Add alias</div>
+        <div class="grid two">
+          <label>Domain
+            <input id="domainsAliasInput" type="text" placeholder="alias.example.com">
+          </label>
+          <label>Env file
+            <select id="domainsEnvSelect"></select>
+          </label>
+          <label>Port
+            <input id="domainsPortInput" type="number" min="1" max="65535" placeholder="same as project">
+          </label>
+          <label>HTTPS
+            <select id="domainsHttpsSelect">
+              <option value="yes">yes</option>
+              <option value="no">no</option>
+            </select>
+          </label>
+        </div>
+        <div class="copy-actions" style="margin-top: 8px;">
+          <button id="domainsAddBtn" class="secondary" type="button">Add alias</button>
+          <button id="domainsSaveBtn" class="secondary" type="button">Save domains</button>
+        </div>
+      </div>
+    </div>
+  </div>
   <div id="progressPanel" class="scripts-panel modal-panel" hidden>
     <header>
       <div>
@@ -4240,6 +4348,9 @@ function renderPage() {
     let currentMysqlDetails = null;
     let currentEnvFiles = [];
     let currentEnvFilePath = '';
+    let currentDomainsRef = '';
+    let currentDomainBindings = [];
+    let currentDomainEnvFiles = [];
     const envPanel = document.getElementById('envPanel');
     const envTitle = document.getElementById('envTitle');
     const envSubtitle = document.getElementById('envSubtitle');
@@ -4264,6 +4375,19 @@ function renderPage() {
     const envMergeSaveBtn = document.getElementById('envMergeSaveBtn');
     const closeEnvBtn = document.getElementById('closeEnvBtn');
     const envBackupsList = document.getElementById('envBackupsList');
+    const domainsPanel = document.getElementById('domainsPanel');
+    const domainsTitle = document.getElementById('domainsTitle');
+    const domainsSubtitle = document.getElementById('domainsSubtitle');
+    const domainsFlash = document.getElementById('domainsFlash');
+    const domainsPrimaryLabel = document.getElementById('domainsPrimaryLabel');
+    const domainsList = document.getElementById('domainsList');
+    const domainsAliasInput = document.getElementById('domainsAliasInput');
+    const domainsEnvSelect = document.getElementById('domainsEnvSelect');
+    const domainsPortInput = document.getElementById('domainsPortInput');
+    const domainsHttpsSelect = document.getElementById('domainsHttpsSelect');
+    const domainsAddBtn = document.getElementById('domainsAddBtn');
+    const domainsSaveBtn = document.getElementById('domainsSaveBtn');
+    const closeDomainsBtn = document.getElementById('closeDomainsBtn');
     const progressPanel = document.getElementById('progressPanel');
     const progressTitle = document.getElementById('progressTitle');
     const progressSubtitle = document.getElementById('progressSubtitle');
@@ -4531,6 +4655,7 @@ function renderPage() {
         <div class="actions">
           \${project.domain ? '<a class="btn ghost" href="https://' + escapeHtml(project.domain) + '/" target="_blank" rel="noreferrer">Open</a>' : ''}
           <a class="btn ghost" href="/manage/tls/?ref=\${ref}">SSL</a>
+          <button class="secondary" data-action="domains" data-ref="\${ref}">Domains</button>
           <button class="secondary" data-action="update" data-ref="\${ref}">Pull</button>
           <button class="secondary" data-action="restart" data-ref="\${ref}">Restart</button>
           <button class="secondary" data-action="stop" data-ref="\${ref}">Stop</button>
@@ -4569,6 +4694,8 @@ function renderPage() {
           </td>
           <td>
             <div>\${project.domain ? \`<a href="https://\${escapeHtml(project.domain)}/" target="_blank" rel="noreferrer">\${escapeHtml(project.domain)}</a>\` : '<span class="muted">n/a</span>'}</div>
+            <div class="small">domains: \${escapeHtml(String(project.domainCount || (project.domain ? 1 : 0)))}</div>
+            \${Array.isArray(project.aliasBindings) && project.aliasBindings.length ? '<div class="small">aliases: ' + escapeHtml(project.aliasBindings.map((item) => item.domain).join(', ')) + '</div>' : ''}
             <div class="small">\${project.https === 'yes' ? 'HTTPS' : 'HTTP only'} · <span class="pill \${escapeHtml(project.sslStatusClass || 'neutral')}">\${escapeHtml(project.sslStatus || 'n/a')}</span></div>
           </td>
           <td>
@@ -4667,6 +4794,7 @@ function renderPage() {
 
     function openDbPanel(ref, details, subtitle) {
       closeScriptsModal();
+      closeDomainsPanel();
       closeMysqlPanel();
       closeEnvPanel();
       closeProgressPanel();
@@ -4712,6 +4840,7 @@ function renderPage() {
     function openMysqlPanel(ref, details, subtitle) {
       closeScriptsModal();
       closeDbPanel();
+      closeDomainsPanel();
       closeEnvPanel();
       closeProgressPanel();
       closeLogPanel();
@@ -4786,6 +4915,7 @@ function renderPage() {
       closeDbPanel();
       closeMysqlPanel();
       closeEnvPanel();
+      closeDomainsPanel();
       closeProgressPanel();
       closeLogPanel();
       currentSshRef = ref;
@@ -4931,10 +5061,97 @@ function renderPage() {
       return list.find((file) => String(file.path || '') === normalized || String(file.relativePath || '') === normalized || String(file.name || '') === normalized) || null;
     }
 
+    function renderDomainBindings(listEl, bindings, envFiles) {
+      const list = Array.isArray(bindings) ? bindings : [];
+      if (!list.length) {
+        listEl.innerHTML = '<div class="muted">No extra domain aliases yet.</div>';
+        return;
+      }
+      const renderEnvOptions = (selectedPath) => {
+        const selected = String(selectedPath || '').trim();
+        if (Array.isArray(envFiles) && envFiles.length) {
+          return envFiles.map((file) => {
+            const value = String(file.path || '');
+            const label = file.relativePath || file.name || file.path || '.env';
+            const isSelected = String(value) === selected ? ' selected' : '';
+            return '<option value="' + escapeHtml(value) + '"' + isSelected + '>' + escapeHtml(label) + '</option>';
+          }).join('');
+        }
+        return '<option value=".env"' + (selected === '.env' || !selected ? ' selected' : '') + '>.env</option>';
+      };
+      listEl.innerHTML = list.filter((binding) => !binding.primary).map((binding, index) => {
+        const selectedEnv = getEnvFileByPath(envFiles, binding.envFile);
+        const envLabel = selectedEnv ? (selectedEnv.relativePath || selectedEnv.path || binding.envFile || '.env') : (binding.envFile || '.env');
+        return \`
+          <div class="kv-item">
+            <div class="row spread" style="gap: 12px; align-items: flex-start;">
+              <div>
+                <div><strong>\${escapeHtml(binding.domain || '')}</strong></div>
+                <div class="small">port: <code>\${escapeHtml(String(binding.port || ''))}</code> · https: <code>\${escapeHtml(String(binding.https || 'yes'))}</code></div>
+                <div class="small">env file: <code>\${escapeHtml(envLabel)}</code></div>
+                <div class="small" style="margin-top: 8px;">
+                  <label class="small" style="display:block; margin-bottom: 4px;">Alias env file</label>
+                  <select data-domain-envfile="\${escapeHtml(binding.domain || '')}" style="min-width: 280px;">
+                    \${renderEnvOptions(binding.envFile)}
+                  </select>
+                </div>
+              </div>
+              <div class="copy-actions">
+                <button class="secondary" type="button" data-domain-env="\${escapeHtml(binding.domain || '')}">Edit env</button>
+                <button class="danger" type="button" data-domain-delete="\${escapeHtml(binding.domain || '')}">Delete</button>
+              </div>
+            </div>
+          </div>
+        \`;
+      }).join('');
+    }
+
+    function openDomainsPanel(ref, details, subtitle) {
+      closeScriptsModal();
+      closeDbPanel();
+      closeMysqlPanel();
+      closeEnvPanel();
+      closeProgressPanel();
+      closeLogPanel();
+      currentDomainsRef = ref;
+      const primary = details.primary ? { ...details.primary, primary: true } : null;
+      const aliases = Array.isArray(details.bindings) ? details.bindings.map((binding) => ({ ...binding, primary: false })) : [];
+      currentDomainBindings = [primary, ...aliases].filter(Boolean);
+      currentDomainEnvFiles = Array.isArray(details.envFiles) ? details.envFiles : [];
+      domainsTitle.textContent = 'Project Domains';
+      domainsSubtitle.textContent = subtitle || '';
+      domainsFlash.hidden = true;
+      const primaryBinding = currentDomainBindings.find((binding) => binding.primary) || null;
+      domainsPrimaryLabel.innerHTML = primaryBinding
+        ? '<code>' + escapeHtml(primaryBinding.domain || '') + '</code> · port <code>' + escapeHtml(String(primaryBinding.port || '')) + '</code> · env <code>' + escapeHtml(primaryBinding.envFile || '.env') + '</code>'
+        : '<span class="muted">No primary domain</span>';
+      renderDomainBindings(domainsList, currentDomainBindings, currentDomainEnvFiles);
+      renderEnvFileSelect(domainsEnvSelect, currentDomainEnvFiles, currentDomainEnvFiles[0]?.path || '.env');
+      domainsAliasInput.value = '';
+      domainsPortInput.value = '';
+      domainsHttpsSelect.value = 'yes';
+      domainsPanel.hidden = false;
+      setModalLocked(true);
+    }
+
+    function closeDomainsPanel() {
+      domainsPanel.hidden = true;
+      currentDomainsRef = '';
+      currentDomainBindings = [];
+      currentDomainEnvFiles = [];
+      domainsFlash.hidden = true;
+      domainsPrimaryLabel.textContent = '';
+      domainsList.innerHTML = '';
+      domainsAliasInput.value = '';
+      domainsPortInput.value = '';
+      setModalLocked(false);
+    }
+
     function openEnvPanel(ref, details, subtitle, options = {}) {
       closeScriptsModal();
       closeDbPanel();
       closeMysqlPanel();
+      closeDomainsPanel();
       closeProgressPanel();
       closeLogPanel();
       currentEnvRef = ref;
@@ -5019,6 +5236,7 @@ function renderPage() {
       closeDbPanel();
       closeEnvPanel();
       closeMysqlPanel();
+      closeDomainsPanel();
       closeLogPanel();
       progressTitle.textContent = title;
       progressSubtitle.textContent = subtitle || ref || '';
@@ -5051,6 +5269,7 @@ function renderPage() {
       closeDbPanel();
       closeEnvPanel();
       closeMysqlPanel();
+      closeDomainsPanel();
       closeProgressPanel();
       closeLogPanel();
       currentPullRef = ref;
@@ -5090,6 +5309,7 @@ function renderPage() {
       closeDbPanel();
       closeEnvPanel();
       closeMysqlPanel();
+      closeDomainsPanel();
       closeProgressPanel();
       currentLogRef = ref;
       currentLogType = type || 'out';
@@ -5252,6 +5472,24 @@ function renderPage() {
         ...options,
         selectedFile: options.selectedFile || currentEnvFilePath || data.selectedFile || data.saveTarget,
       });
+    }
+
+    async function loadDomains(ref) {
+      const data = await api(\`/projects/\${ref}/domains\`);
+      openDomainsPanel(ref, data, data.project || ref);
+    }
+
+    async function saveDomains(ref) {
+      const payload = {
+        bindings: currentDomainBindings.filter((binding) => binding && !binding.primary),
+      };
+      const data = await api(\`/projects/\${ref}/domains\`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      showMessage(domainsFlash, data.message || 'Domains saved');
+      await refresh();
+      await loadDomains(ref);
     }
 
     async function saveEnv(ref, options = {}) {
@@ -5424,6 +5662,17 @@ function renderPage() {
         } catch (error) {
           showMessage(logFlash, error.message, false);
           logPanel.hidden = false;
+        } finally {
+          btn.disabled = false;
+        }
+        return;
+      }
+      if (action === 'domains') {
+        btn.disabled = true;
+        try {
+          await loadDomains(ref);
+        } catch (error) {
+          showMessage(listResult, error.message, false);
         } finally {
           btn.disabled = false;
         }
@@ -5697,6 +5946,72 @@ function renderPage() {
         btn.disabled = false;
       }
     });
+
+    document.addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-domain-delete], button[data-domain-env]');
+      if (!btn || !currentDomainsRef) return;
+      const domain = btn.dataset.domainDelete || btn.dataset.domainEnv || '';
+      if (!domain) return;
+      if (btn.dataset.domainDelete) {
+        currentDomainBindings = currentDomainBindings.filter((binding) => !binding || !binding.domain || binding.domain !== domain || binding.primary);
+        renderDomainBindings(domainsList, currentDomainBindings, currentDomainEnvFiles);
+        showMessage(domainsFlash, 'Removed alias ' + domain + ' from the pending list');
+        return;
+      }
+      const binding = currentDomainBindings.find((item) => item && item.domain === domain);
+      if (!binding) return;
+      await loadEnv(currentDomainsRef, { selectedFile: binding.envFile || '.env' });
+    });
+
+    if (closeDomainsBtn) {
+      closeDomainsBtn.addEventListener('click', closeDomainsPanel);
+    }
+    if (domainsAddBtn) {
+      domainsAddBtn.addEventListener('click', () => {
+        if (!currentDomainsRef) return;
+        const domain = String(domainsAliasInput?.value || '').trim();
+        if (!domain) {
+          showMessage(domainsFlash, 'Domain is required', false);
+          return;
+        }
+        if (currentDomainBindings.some((binding) => binding && binding.domain === domain)) {
+          showMessage(domainsFlash, 'Domain already exists in this project', false);
+          return;
+        }
+        const envFile = String(domainsEnvSelect?.value || '.env').trim() || '.env';
+        const port = String(domainsPortInput?.value || '').trim();
+        const https = String(domainsHttpsSelect?.value || 'yes').trim() || 'yes';
+        currentDomainBindings.push({ domain, envFile, port, https, primary: false, type: currentDomainBindings[0]?.type || 'project' });
+        renderDomainBindings(domainsList, currentDomainBindings, currentDomainEnvFiles);
+        domainsAliasInput.value = '';
+        domainsPortInput.value = '';
+        domainsHttpsSelect.value = 'yes';
+      });
+    }
+    document.addEventListener('change', (event) => {
+      const select = event.target.closest('select[data-domain-envfile]');
+      if (!select || !currentDomainsRef) return;
+      const domain = select.dataset.domainEnvfile || '';
+      const binding = currentDomainBindings.find((item) => item && item.domain === domain);
+      if (!binding) return;
+      binding.envFile = String(select.value || '.env').trim() || '.env';
+      renderDomainBindings(domainsList, currentDomainBindings, currentDomainEnvFiles);
+      showMessage(domainsFlash, 'Updated env file for ' + domain + ' (save domains to persist)');
+    });
+    if (domainsSaveBtn) {
+      domainsSaveBtn.addEventListener('click', async () => {
+        if (!currentDomainsRef) return;
+        domainsSaveBtn.disabled = true;
+        try {
+          await saveDomains(currentDomainsRef);
+        } catch (error) {
+          showMessage(domainsFlash, error.message, false);
+          domainsPanel.hidden = false;
+        } finally {
+          domainsSaveBtn.disabled = false;
+        }
+      });
+    }
 
     envUploadBtn.addEventListener('click', async () => {
       if (!currentEnvRef) return;
@@ -6482,6 +6797,70 @@ async function handleRequest(req, res) {
         scripts,
         dbScripts,
       });
+      return;
+    }
+
+    const domainsMatch = routePath.match(/^\/api\/projects\/(.+?)\/domains$/);
+    if (domainsMatch) {
+      const ref = decodeURIComponent(domainsMatch[1]);
+      const metaPath = metaPathForRef(ref);
+      const meta = parseEnvFile(metaPath);
+      const projectPath = meta.APP_DIR || '';
+      const { envFiles } = pickEnvDetails(projectPath);
+      const currentBindings = parseProjectDomainBindings(meta);
+      const primary = currentBindings.find((binding) => binding.primary) || normalizeDomainBinding({
+        domain: meta.APP_DOMAIN || '',
+        port: meta.APP_PORT || '',
+        https: meta.APP_HTTPS || 'yes',
+        envFile: '.env',
+        primary: true,
+        type: meta.APP_TYPE || 'project',
+      });
+      if (req.method === 'GET') {
+        sendJson(res, 200, {
+          project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
+          domain: meta.APP_DOMAIN || '',
+          primary,
+          bindings: currentBindings.filter((binding) => !binding.primary),
+          envFiles,
+        });
+        return;
+      }
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        const incoming = Array.isArray(body.bindings) ? body.bindings : [];
+        const aliases = [];
+        const seen = new Set();
+        for (const item of incoming) {
+          const normalized = normalizeDomainBinding(item, {
+            port: meta.APP_PORT || '',
+            https: meta.APP_HTTPS || 'yes',
+            type: meta.APP_TYPE || 'project',
+          });
+          if (!normalized || normalized.primary) continue;
+          if (primary && normalized.domain === primary.domain) continue;
+          if (seen.has(normalized.domain)) continue;
+          seen.add(normalized.domain);
+          aliases.push(normalized);
+        }
+        updateEnvFileValue(metaPath, 'APP_DOMAIN_BINDINGS_JSON', JSON.stringify(aliases));
+        touchProjectMeta(ref);
+        runSyncScript('app');
+        const refreshedMeta = parseEnvFile(metaPath);
+        const refreshedBindings = parseProjectDomainBindings(refreshedMeta);
+        sendJson(res, 200, {
+          ok: true,
+          message: `Saved domains for ${ref}`,
+          project: refreshedMeta.APP_DOMAIN || refreshedMeta.PROJECT_SLUG || ref,
+          domain: refreshedMeta.APP_DOMAIN || '',
+          primary: refreshedBindings.find((binding) => binding.primary) || primary,
+          bindings: refreshedBindings.filter((binding) => !binding.primary),
+          envFiles,
+        });
+        return;
+      }
+      res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Method not allowed');
       return;
     }
 

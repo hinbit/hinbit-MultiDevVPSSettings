@@ -55,6 +55,7 @@ Rules:
 - the Multidev env editor shows a read-only merged summary, grouped by key source, and it can switch between individual files such as `.env`, `.env.local`, `.env.production`, `.env.machine`, `server/.env`, and `client/.env`
 - duplicate keys inside a file or across files must be marked clearly in red in the merged summary
 - save actions write back to the selected file, not the merged view
+- if one project should answer to more than one domain, store a primary domain plus alias bindings, and let each alias carry its own env-file path for management and editing
 
 Examples:
 
@@ -231,6 +232,7 @@ The intended result is a one-run install that ends with:
 - correct domain mapping
 - correct runtime state
 - no manual rescue steps
+- if a project has multiple domains, verify every alias is present in the app map and that each alias points at the intended env file before reporting success
 
 ## 13. GitHub SSH mapping
 
