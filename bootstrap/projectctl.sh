@@ -48,6 +48,7 @@ usage() {
 Usage:
   projectctl install [--domain example.com] [--https yes|no] [--branch main] [--pm2-name name] [--port N] [--db-machine id] [--env-file path] [--entrypoint path] owner/repo
   projectctl update owner/repo
+  projectctl build [--all] owner/repo
   projectctl restart owner/repo
   projectctl stop owner/repo
   projectctl status owner/repo
@@ -71,6 +72,7 @@ Defaults:
   - `projectctl mysql` manages MySQL access IPs and DB machine placement for a project's DB user, and `--move-data` copies the DB to the selected machine before switching over
   - `projectctl ssh` shows or rotates the project's SSH/SFTP upload credentials
   - `projectctl update` prompts before pulling local changes; set PROJECTCTL_PULL_MODE=merge-env|stash-all to force the choice
+  - `projectctl build` runs the root build script, or `--all` to also build server/ and client/ when they exist
 EOF
 }
 
@@ -1681,16 +1683,75 @@ install_deps() {
   fi
 }
 
-maybe_build() {
-  if [[ -f package.json ]] && package_has_script build; then
-    case "${PACKAGE_MANAGER:-npm}" in
+record_last_build() {
+  local meta="$1"
+  local mode="$2"
+  local status="$3"
+  local at="$4"
+
+  [[ -n "${meta}" ]] || return 0
+  update_meta_value "${meta}" "LAST_BUILD_MODE" "${mode}"
+  update_meta_value "${meta}" "LAST_BUILD_STATUS" "${status}"
+  update_meta_value "${meta}" "LAST_BUILD_AT" "${at}"
+}
+
+run_package_build_in_dir() {
+  local dir="$1"
+  local label="$2"
+  local pm="${PACKAGE_MANAGER:-npm}"
+
+  [[ -d "${dir}" ]] || { printf '[projectctl] skipping %s build (missing directory)\n' "${label}" >&2; return 0; }
+  if ! (cd "${dir}" && package_has_script build); then
+    printf '[projectctl] skipping %s build (no build script)\n' "${label}" >&2
+    return 0
+  fi
+
+  printf '[projectctl] running %s build in %s\n' "${label}" "${dir}"
+  (
+    cd "${dir}"
+    case "${pm}" in
       pnpm) pnpm run build ;;
       corepack-pnpm) corepack pnpm run build ;;
       yarn) yarn build ;;
       corepack-yarn) corepack yarn build ;;
       *) npm run build ;;
     esac
+  )
+}
+
+maybe_build() {
+  local meta="${1:-}"
+  local mode="${2:-root}"
+  local status="success"
+  local at
+  at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  if [[ "${mode}" == "all" ]]; then
+    if ! run_package_build_in_dir "${PWD}" "root"; then
+      status="failed"
+    fi
+    if [[ -d server && -f server/package.json ]]; then
+      if ! run_package_build_in_dir "server" "server"; then
+        status="failed"
+      fi
+    fi
+    if [[ -d client && -f client/package.json ]]; then
+      if ! run_package_build_in_dir "client" "client"; then
+        status="failed"
+      fi
+    fi
+  else
+    if [[ -f package.json ]] && package_has_script build; then
+      if ! run_package_build_in_dir "${PWD}" "root"; then
+        status="failed"
+      fi
+    else
+      printf '[projectctl] skipping root build (no build script)\n' >&2
+    fi
   fi
+
+  record_last_build "${meta}" "${mode}" "${status}" "${at}"
+  [[ "${status}" == "success" ]]
 }
 
 ecosystem_file_is_supported() {
@@ -2549,6 +2610,7 @@ do_install() {
   local db_machine_id="${7:-}"
   local env_file="${8:-}"
   local entrypoint="${9:-}"
+  local build_failed="no"
 
   REPO_REF="$(repo_ref_from_arg "${ref}")"
   REPO_URL="$(repo_url_from_ref "${REPO_REF}")"
@@ -2640,8 +2702,14 @@ do_install() {
   (
     cd "${APP_DIR}"
     install_deps
-    maybe_build
+    if ! maybe_build "${meta}" root; then
+      build_failed="yes"
+    fi
   )
+
+  if [[ "${build_failed}" == "yes" ]]; then
+    die "Build failed for ${REPO_REF}"
+  fi
 
   if [[ "${custom_db_machine}" -eq 0 ]]; then
     if [[ -n "${db_name}" && -n "${db_user}" && -n "${db_password}" ]]; then
@@ -2679,6 +2747,7 @@ do_update() {
   local db_user=""
   local db_password=""
   local db_type=""
+  local build_failed="no"
 
   slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
@@ -2710,8 +2779,14 @@ do_update() {
     normalize_project_deployment_env_file "${APP_DIR}/server/.env"
     normalize_project_deployment_env_file "${APP_DIR}/client/.env"
     install_deps
-    maybe_build
+    if ! maybe_build "${meta}" root; then
+      build_failed="yes"
+    fi
   )
+
+  if [[ "${build_failed}" == "yes" ]]; then
+    die "Build failed for ${REPO_REF}"
+  fi
 
   if [[ "${DB_MACHINE_ID}" != "custom" && -n "${db_name}" && -n "${db_user}" && -n "${db_password}" ]]; then
     sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "${MYSQL_ALLOWED_IPS:-}" "${DB_MACHINE_ID}"
@@ -2737,6 +2812,37 @@ do_update() {
   verify_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   touch_meta_file "${meta}"
   printf '[projectctl] updated %s\n' "${REPO_REF}"
+}
+
+do_build() {
+  local ref="$1"
+  local mode="${2:-root}"
+  local slug
+  local meta
+  local build_failed="no"
+
+  slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
+  meta="$(meta_path_for_slug "${slug}")"
+  load_meta "${meta}"
+
+  [[ -d "${APP_DIR}" ]] || die "Missing app directory: ${APP_DIR}"
+  (
+    cd "${APP_DIR}"
+    if [[ "${mode}" == "all" ]]; then
+      if ! maybe_build "${meta}" "all"; then
+        build_failed="yes"
+      fi
+    else
+      if ! maybe_build "${meta}" "root"; then
+        build_failed="yes"
+      fi
+    fi
+  )
+  if [[ "${build_failed}" == "yes" ]]; then
+    die "Build failed for ${REPO_REF}"
+  fi
+  touch_meta_file "${meta}"
+  printf '[projectctl] built %s (%s)\n' "${REPO_REF}" "${mode}"
 }
 
 do_restart() {
@@ -3396,6 +3502,26 @@ main() {
     update)
       [[ $# -eq 1 ]] || { usage; exit 1; }
       do_update "$1"
+      ;;
+    build)
+      local build_mode="root"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --all)
+            build_mode="all"
+            shift
+            ;;
+          --help|-h)
+            usage
+            exit 0
+            ;;
+          *)
+            break
+            ;;
+        esac
+      done
+      [[ $# -eq 1 ]] || { usage; exit 1; }
+      do_build "$1" "${build_mode}"
       ;;
     restart)
       [[ $# -eq 1 ]] || { usage; exit 1; }

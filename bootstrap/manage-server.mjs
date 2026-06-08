@@ -1626,6 +1626,9 @@ function projectView() {
     const fsUsage = readProjectFilesystemUsage(project.APP_DIR || '');
     const gitInfo = readProjectGitInfo(project.APP_DIR || '');
     const ssl = readProjectSslStatus(project);
+    const lastBuildMode = String(project.LAST_BUILD_MODE || '').trim();
+    const lastBuildStatus = String(project.LAST_BUILD_STATUS || '').trim();
+    const lastBuildAt = String(project.LAST_BUILD_AT || '').trim();
     return {
       repo: project.REPO_REF || '',
       slug: project.PROJECT_SLUG || '',
@@ -1675,6 +1678,10 @@ function projectView() {
       gitCommit: gitInfo.commit || '',
       gitCommitShort: gitInfo.commitShort || '',
       gitCommitDate: gitInfo.commitDate || '',
+      lastBuildMode,
+      lastBuildStatus,
+      lastBuildAt,
+      lastBuildDate: lastBuildAt ? new Date(lastBuildAt).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }) : '',
       lastUsedAtMs: Number(project.metaMtimeMs || 0) || 0,
     };
   }).sort((a, b) => {
@@ -2812,6 +2819,7 @@ function renderProjectRows(projects) {
             <div><strong>${escapeHtml(project.repo || project.slug || '')}</strong></div>
             <div class="small">${escapeHtml(project.path || '')}</div>
             <div class="small">version: ${escapeHtml(project.gitCommitShort || 'n/a')} · ${escapeHtml(project.gitCommitDate ? new Date(project.gitCommitDate).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }) : 'n/a')}</div>
+            <div class="small">build: ${escapeHtml(project.lastBuildMode ? `${project.lastBuildMode} · ${project.lastBuildStatus || 'unknown'} · ${project.lastBuildDate || 'n/a'}` : 'n/a')}</div>
           </td>
           <td>
             <div>${project.domain ? `<a href="https://${escapeHtml(project.domain)}/" target="_blank" rel="noreferrer">${escapeHtml(project.domain)}</a>` : '<span class="muted">n/a</span>'}</div>
@@ -2844,6 +2852,8 @@ function renderProjectRows(projects) {
             mount: ${escapeHtml(project.filesystemMount || 'n/a')}<br>
             last commit: ${escapeHtml(project.gitCommitShort || 'n/a')}<br>
             committed at: ${escapeHtml(project.gitCommitDate ? new Date(project.gitCommitDate).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }) : 'n/a')}<br>
+            last build: ${escapeHtml(project.lastBuildMode ? `${project.lastBuildMode} · ${project.lastBuildStatus || 'unknown'}` : 'n/a')}<br>
+            build at: ${escapeHtml(project.lastBuildDate || 'n/a')}<br>
             ssh: ${escapeHtml(project.sshUser || 'n/a')}<br>
             mysql ips: ${escapeHtml(project.mysqlAllowedIps || 'local only')}
           </td>
@@ -5004,13 +5014,13 @@ function renderPage() {
       setModalLocked(false);
     }
 
-    function openProgressPanel(ref, subtitle) {
+    function openProgressPanel(ref, subtitle, title = 'Pull Progress') {
       closeScriptsModal();
       closeDbPanel();
       closeEnvPanel();
       closeMysqlPanel();
       closeLogPanel();
-      progressTitle.textContent = 'Pull Progress';
+      progressTitle.textContent = title;
       progressSubtitle.textContent = subtitle || ref || '';
       progressBody.textContent = '';
       progressFlash.hidden = true;
@@ -5132,7 +5142,8 @@ function renderPage() {
           ? 'Pulling ' + decodeURIComponent(ref) + ' with stash-all'
           : mode === 'merge-env2'
             ? 'Pulling ' + decodeURIComponent(ref) + ' with merge*2'
-          : 'Pulling ' + decodeURIComponent(ref),
+            : 'Pulling ' + decodeURIComponent(ref),
+        'Pull Progress',
       );
       try {
         const res = await fetch(API + '/projects/' + ref + '/update-stream?mode=' + encodeURIComponent(mode), {
@@ -5161,6 +5172,51 @@ function renderPage() {
       } catch (error) {
         showMessage(progressFlash, error.message, false);
         progressFlash.hidden = false;
+      } finally {
+        progressAbort = null;
+      }
+    }
+
+    async function runBuildWithProgress(ref, mode = 'root') {
+      if (progressAbort) {
+        progressAbort.abort();
+      }
+      progressAbort = new AbortController();
+      openProgressPanel(
+        decodeURIComponent(ref),
+        mode === 'all'
+          ? 'Building all scripts for ' + decodeURIComponent(ref)
+          : 'Building root script for ' + decodeURIComponent(ref),
+        'Build Progress',
+      );
+      try {
+        const res = await fetch(API + '/projects/' + ref + '/build-stream?mode=' + encodeURIComponent(mode), {
+          method: 'POST',
+          credentials: 'same-origin',
+          signal: progressAbort.signal,
+        });
+        if (!res.ok || !res.body) {
+          const text = await res.text();
+          throw new Error(text || 'Request failed: ' + res.status);
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          progressBody.textContent = buffer;
+          progressBody.scrollTop = progressBody.scrollHeight;
+        }
+        buffer += decoder.decode();
+        if (buffer.trim()) {
+          progressBody.textContent = buffer;
+        }
+      } catch (error) {
+        showMessage(progressFlash, error.message, false);
+        progressFlash.hidden = false;
+        throw error;
       } finally {
         progressAbort = null;
       }
@@ -5388,7 +5444,17 @@ function renderPage() {
               return;
             }
           }
-          await runPullWithProgress(ref, mode === 'merge-env2' ? 'merge-env' : mode);
+          const pullMode = mode === 'merge-env2' ? 'merge-env' : mode;
+          await runPullWithProgress(ref, pullMode);
+          const buildAllAfterPull = window.confirm(
+            'Pull completed for ' + decodeURIComponent(ref) + '. Build all now (root + server/client when present)?'
+          );
+          if (buildAllAfterPull) {
+            await runBuildWithProgress(ref, 'all');
+            showMessage(progressFlash, 'Build all completed for ' + decodeURIComponent(ref));
+          } else {
+            showMessage(progressFlash, 'Pull completed; build skipped.');
+          }
           if (mode === 'merge-env2') {
             await loadEnv(ref, { mergeMode: true });
             showMessage(envFlash, 'Paste extra .env keys in the overlay and click Merge overlay & save.');
@@ -6765,6 +6831,23 @@ async function handleRequest(req, res) {
             : 'merge-env';
       touchProjectMeta(ref);
       streamProjectCtl(res, ['update', ref], { PROJECTCTL_PULL_MODE: pullMode });
+      return;
+    }
+
+    const buildStreamMatch = routePath.match(/^\/api\/projects\/(.+?)\/build-stream$/);
+    if (buildStreamMatch) {
+      const ref = decodeURIComponent(buildStreamMatch[1]);
+      if (req.method !== 'POST') {
+        res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Method not allowed');
+        return;
+      }
+
+      const requestedMode = String(url.searchParams.get('mode') || '').toLowerCase();
+      const buildMode = requestedMode === 'all' ? 'all' : 'root';
+      const buildArgs = buildMode === 'all' ? ['build', '--all', ref] : ['build', ref];
+      touchProjectMeta(ref);
+      streamProjectCtl(res, buildArgs, { PROJECTCTL_BUILD_MODE: buildMode });
       return;
     }
 

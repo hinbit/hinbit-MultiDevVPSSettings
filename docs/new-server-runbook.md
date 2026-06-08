@@ -196,11 +196,16 @@ projectctl restart owner/repo
 - pull the repo
 - preserve local env files by default via `Merge .env`
 - rebuild when the repo has a build script
+- ask whether to run `build all` after a successful pull
 - restart PM2 and sidecar services
 
 When local changes exist, the update prompt offers:
 - `Merge .env (default)` to keep the current VPS env values after the pull and append any new upstream env keys
 - `Stash all` to stash every local change before pulling
+
+After pull, the UI also asks whether to run `build all`:
+- `build all` runs the root build script plus `server/` and `client/` build scripts when they exist
+- the project list displays the last build mode, status, and timestamp
 
 The merge path also normalizes project `.env` files into a shell-safe format, so values with spaces are quoted automatically and keep working in scripts that source the file.
 When choosing new ports, `projectctl` skips common reserved ports and preserves split-app internal ports instead of overwriting them with the public app port.

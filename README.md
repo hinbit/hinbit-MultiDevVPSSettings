@@ -62,6 +62,9 @@ projectctl uninstall owner/repo
 `projectctl update` now prompts with two choices when local changes exist:
 - `Merge .env (default)` keeps the current VPS env values after the pull and appends any new upstream env keys
 - `Stash all` stashes every local change before pulling
+After a successful pull, the UI asks whether to run `build all`:
+- `build all` runs the root build script plus `server/` and `client/` build scripts when they exist
+- the project list shows the last build mode, status, and timestamp
 `projectctl` now rewrites project `.env` files in a shell-safe form, so values with spaces are quoted automatically and remain safe for scripts that source the file.
 `projectctl` also skips common reserved ports when auto-picking a new app port, and it preserves split-app internal ports such as CherryWrapper's `PORT=8787` instead of overwriting them with the public UI port.
 

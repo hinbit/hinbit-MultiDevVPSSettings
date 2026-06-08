@@ -115,6 +115,8 @@ Recommended order:
 5. build if needed
 6. start the app
 
+After a pull, Multidev should also offer a `build all` choice that runs the root build script plus `server/` and `client/` build scripts when present.
+
 The app should not require a human to create the DB user manually after install.
 
 If the app has a demo login or required admin user:
@@ -188,6 +190,7 @@ Check these first when an install is not smooth:
 - wrong root `package.json` scripts
 - env values not quoted correctly
 - `DB_USER` / `DB_PASSWORD` mismatch
+- last build metadata not recorded after pull/install
 - support tables not created
 - app listening on the wrong port
 - app ignoring the installed env
