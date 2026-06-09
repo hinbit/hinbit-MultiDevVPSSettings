@@ -70,6 +70,7 @@ After every install or pull, `projectctl` runs dependency installs in the root p
 After every install or pull, `projectctl` runs `build all` automatically:
 - `build all` runs the root build script plus `server/` and `client/` build scripts when they exist
 - the project list shows the last build mode, status, and timestamp
+After install, update, or restart, `projectctl` reruns `app-sync` after PM2 is back up so `/etc/app-map.csv` and the nginx vhost are regenerated from the current project metadata.
 `projectctl` now rewrites project `.env` files in a shell-safe form, so values with spaces are quoted automatically and remain safe for scripts that source the file.
 `projectctl` also skips common reserved ports when auto-picking a new app port, and it preserves split-app internal ports such as CherryWrapper's `PORT=8787` instead of overwriting them with the public UI port.
 

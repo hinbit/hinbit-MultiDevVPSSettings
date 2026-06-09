@@ -235,6 +235,7 @@ The intended result is a one-run install that ends with:
 - no manual rescue steps
 - if a project has multiple domains, verify every alias is present in the app map and that each alias points at the intended env file before reporting success
 - install/update should run `build all` automatically after the dependency step, so root, `server/`, and `client/` builds are verified before handoff
+- after install, update, or restart, rerun app-sync after PM2 is online so `/etc/app-map.csv` and nginx are regenerated from the current project metadata
 
 ## 13. GitHub SSH mapping
 

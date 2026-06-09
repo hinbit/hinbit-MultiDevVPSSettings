@@ -2815,6 +2815,9 @@ do_install() {
   verify_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
   restart_pm2
+  sync_app_map
+  verify_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
+  verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
   verify_project_install "${REPO_REF}"
   verify_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   touch_meta_file "${meta}"
@@ -2897,6 +2900,9 @@ do_update() {
   verify_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
   restart_pm2
+  sync_app_map
+  verify_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
+  verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
   verify_project_install "${REPO_REF}"
   verify_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   touch_meta_file "${meta}"
@@ -2943,6 +2949,9 @@ do_restart() {
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
   restart_pm2
+  sync_app_map
+  verify_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
+  verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
   touch_meta_file "${meta}"
   printf '[projectctl] restarted %s\n' "${REPO_REF}"
 }
