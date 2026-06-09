@@ -49,6 +49,7 @@ const ENV_CANDIDATES = [
   '.env.production.local',
   '.env.development',
 ];
+const MAX_ENV_FILE_BYTES = 1024 * 1024;
 
 function loadSystemEnv() {
   if (!fs.existsSync(SYSTEM_ENV_FILE)) return;
@@ -227,6 +228,11 @@ function discoverProjectEnvFiles(projectPath) {
       const filePath = path.join(baseDir, candidate);
       const resolved = path.resolve(filePath);
       if (seen.has(resolved) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) continue;
+      const stat = fs.statSync(filePath);
+      if (!Number.isFinite(stat.size) || stat.size > MAX_ENV_FILE_BYTES) {
+        console.warn(`[manage] skipping oversized env file ${filePath} (${stat.size} bytes)`);
+        continue;
+      }
       seen.add(resolved);
       const raw = fs.readFileSync(filePath, 'utf8');
       const entries = parseEnvTextDetailed(raw);
@@ -4303,6 +4309,25 @@ function renderPage() {
       <pre id="pullConfirmBody" class="kv-item" style="margin:0; max-height: 60vh; overflow:auto; white-space: pre-wrap;"></pre>
     </div>
   </div>
+  <div id="uninstallPanel" class="scripts-panel modal-panel" hidden>
+    <header>
+      <div>
+        <h2 id="uninstallTitle">Remove Project</h2>
+        <div id="uninstallSubtitle" class="muted"></div>
+      </div>
+      <div class="actions">
+        <button id="uninstallCancelBtn" class="ghost" type="button">Cancel</button>
+        <button id="uninstallKeepDbBtn" class="secondary" type="button">Kill without deleting DB</button>
+        <button id="uninstallDropDbBtn" class="danger" type="button">Delete DB records and kill</button>
+      </div>
+    </header>
+    <div class="body">
+      <div id="uninstallFlash" class="flash" hidden></div>
+      <div id="uninstallSummary" class="kv-item"></div>
+      <div id="uninstallDbSummary" class="kv-item"></div>
+      <div id="uninstallDomainsSummary" class="kv-item"></div>
+    </div>
+  </div>
   <div id="logPanel" class="scripts-panel modal-panel" hidden>
     <header>
       <div>
@@ -4438,6 +4463,16 @@ function renderPage() {
     const pullConfirmMerge2Btn = document.getElementById('pullConfirmMerge2Btn');
     const pullConfirmStashBtn = document.getElementById('pullConfirmStashBtn');
     const pullConfirmNoBtn = document.getElementById('pullConfirmNoBtn');
+    const uninstallPanel = document.getElementById('uninstallPanel');
+    const uninstallTitle = document.getElementById('uninstallTitle');
+    const uninstallSubtitle = document.getElementById('uninstallSubtitle');
+    const uninstallFlash = document.getElementById('uninstallFlash');
+    const uninstallSummary = document.getElementById('uninstallSummary');
+    const uninstallDbSummary = document.getElementById('uninstallDbSummary');
+    const uninstallDomainsSummary = document.getElementById('uninstallDomainsSummary');
+    const uninstallCancelBtn = document.getElementById('uninstallCancelBtn');
+    const uninstallKeepDbBtn = document.getElementById('uninstallKeepDbBtn');
+    const uninstallDropDbBtn = document.getElementById('uninstallDropDbBtn');
     const logPanel = document.getElementById('logPanel');
     const logTitle = document.getElementById('logTitle');
     const logSubtitle = document.getElementById('logSubtitle');
@@ -4462,6 +4497,8 @@ function renderPage() {
     let currentLogType = 'out';
     let currentPullRef = '';
     let pullConfirmResolve = null;
+    let currentUninstallRef = '';
+    let currentUninstallPreview = null;
     let currentProjects = initialProjects.slice();
     let currentDbMachines = [];
     let progressAbort = null;
@@ -5331,6 +5368,87 @@ function renderPage() {
       setModalLocked(false);
     }
 
+    function renderUninstallDomains(domains) {
+      const list = Array.isArray(domains) ? domains.filter(Boolean) : [];
+      if (!list.length) {
+        return '<div class="muted">No mapped domains found.</div>';
+      }
+      return list.map((domain) => '<div class="kv-item"><code>' + escapeHtml(domain) + '</code></div>').join('');
+    }
+
+    function renderUninstallDbSummary(db) {
+      if (!db) {
+        return '<div class="muted">Database summary unavailable.</div>';
+      }
+      const tables = Array.isArray(db.tables) ? db.tables : [];
+      const tableRows = tables.length
+        ? tables.map((table) => '<div class="kv-item"><div class="row spread" style="gap: 12px;"><div><strong>' + escapeHtml(table.name || '') + '</strong></div><code>' + escapeHtml(String(table.rows ?? 0)) + ' rows</code></div></div>').join('')
+        : '<div class="muted">No tables found.</div>';
+      return [
+        db.available === false && db.error ? '<div class="kv-item"><div class="small">DB preview</div><div class="small" style="color:#fca5a5;">' + escapeHtml(db.error) + '</div></div>' : '',
+        '<div class="kv-item"><div class="small">Database</div><code>' + escapeHtml(db.dbName || 'n/a') + '</code></div>',
+        '<div class="kv-item"><div class="small">DB user</div><code>' + escapeHtml(db.dbUser || 'n/a') + '</code></div>',
+        '<div class="kv-item"><div class="small">Table count</div><code>' + escapeHtml(String(db.tableCount ?? 0)) + '</code></div>',
+        '<div class="kv-item"><div class="small">Total rows</div><code>' + escapeHtml(String(db.rowCountTotal ?? 0)) + '</code></div>',
+        '<div class="kv-item"><div class="small">Tables</div>' + tableRows + '</div>',
+      ].join('');
+    }
+
+    function openUninstallPanel(ref, preview) {
+      closeScriptsModal();
+      closeDbPanel();
+      closeMysqlPanel();
+      closeEnvPanel();
+      closeDomainsPanel();
+      closeProgressPanel();
+      closeLogPanel();
+      currentUninstallRef = ref;
+      currentUninstallPreview = preview || null;
+      uninstallTitle.textContent = 'Remove Project';
+      uninstallSubtitle.textContent = decodeURIComponent(ref) + ' · choose whether to delete the DB or keep it';
+      uninstallFlash.hidden = true;
+      const domains = Array.isArray(preview?.domains) ? preview.domains : [];
+      uninstallSummary.innerHTML = [
+        ['Project', preview?.project || decodeURIComponent(ref)],
+        ['App dir', preview?.appDir || 'n/a'],
+        ['PM2', preview?.pm2Name || 'n/a'],
+        ['Primary domain', preview?.primaryDomain || 'n/a'],
+        ['SSH user', preview?.sshUploadUser || 'n/a'],
+        ['Keep DB', 'Yes unless you choose Delete DB records and kill'],
+      ].map(([label, value]) => (
+        '<div class="kv-item"><div class="small">' + escapeHtml(label) + '</div><code>' + escapeHtml(String(value ?? '')) + '</code></div>'
+      )).join('');
+      uninstallDbSummary.innerHTML = renderUninstallDbSummary(preview?.db || null);
+      uninstallDomainsSummary.innerHTML = '<div class="small">Domains to remove</div><div style="display:grid; gap:8px; margin-top:8px;">' + renderUninstallDomains(domains) + '</div>';
+      uninstallPanel.hidden = false;
+      setModalLocked(true);
+    }
+
+    function closeUninstallPanel() {
+      uninstallPanel.hidden = true;
+      currentUninstallRef = '';
+      currentUninstallPreview = null;
+      uninstallFlash.hidden = true;
+      uninstallSummary.innerHTML = '';
+      uninstallDbSummary.innerHTML = '';
+      uninstallDomainsSummary.innerHTML = '';
+      setModalLocked(false);
+    }
+
+    async function loadUninstallPreview(ref) {
+      return api('/projects/' + ref + '/uninstall-preview');
+    }
+
+    async function runUninstall(ref, dropDb) {
+      const res = await api('/projects/' + ref + '/uninstall', {
+        method: 'POST',
+        body: JSON.stringify({ dropDb: Boolean(dropDb) }),
+      });
+      showMessage(listResult, res.message || 'Project removed');
+      closeUninstallPanel();
+      await refresh();
+    }
+
     function confirmPullMode(ref, preflight) {
       return new Promise((resolve) => {
         pullConfirmResolve = resolve;
@@ -5712,6 +5830,18 @@ function renderPage() {
         }
         return;
       }
+      if (action === 'uninstall') {
+        btn.disabled = true;
+        try {
+          const preview = await loadUninstallPreview(ref);
+          openUninstallPanel(ref, preview);
+        } catch (error) {
+          showMessage(listResult, error.message, false);
+        } finally {
+          btn.disabled = false;
+        }
+        return;
+      }
       if (action === 'update') {
         btn.disabled = true;
         try {
@@ -5779,6 +5909,45 @@ function renderPage() {
       pullConfirmMerge2Btn.addEventListener('click', () => closePullConfirmPanel('merge-env2'));
     }
     pullConfirmStashBtn.addEventListener('click', () => closePullConfirmPanel('stash-all'));
+    if (uninstallCancelBtn) {
+      uninstallCancelBtn.addEventListener('click', closeUninstallPanel);
+    }
+    if (uninstallKeepDbBtn) {
+      uninstallKeepDbBtn.addEventListener('click', async () => {
+        if (!currentUninstallRef) return;
+        uninstallKeepDbBtn.disabled = true;
+        uninstallDropDbBtn.disabled = true;
+        try {
+          showMessage(uninstallFlash, 'Removing project and keeping the database...');
+          await runUninstall(currentUninstallRef, false);
+        } catch (error) {
+          showMessage(uninstallFlash, error.message, false);
+          uninstallPanel.hidden = false;
+        } finally {
+          uninstallKeepDbBtn.disabled = false;
+          uninstallDropDbBtn.disabled = false;
+        }
+      });
+    }
+    if (uninstallDropDbBtn) {
+      uninstallDropDbBtn.addEventListener('click', async () => {
+        if (!currentUninstallRef) return;
+        const ok = window.confirm('Delete the database records too? This will remove the project mapping, auth files, app leftovers, and drop the database.');
+        if (!ok) return;
+        uninstallKeepDbBtn.disabled = true;
+        uninstallDropDbBtn.disabled = true;
+        try {
+          showMessage(uninstallFlash, 'Removing project and deleting database records...');
+          await runUninstall(currentUninstallRef, true);
+        } catch (error) {
+          showMessage(uninstallFlash, error.message, false);
+          uninstallPanel.hidden = false;
+        } finally {
+          uninstallKeepDbBtn.disabled = false;
+          uninstallDropDbBtn.disabled = false;
+        }
+      });
+    }
     closeLogBtn.addEventListener('click', closeLogPanel);
     sshCopyUserBtn.addEventListener('click', async () => {
       const user = sshDetails.querySelector('code');
@@ -7211,6 +7380,25 @@ async function handleRequest(req, res) {
       return;
     }
 
+    const uninstallPreviewMatch = routePath.match(/^\/api\/projects\/(.+?)\/uninstall-preview$/);
+    if (uninstallPreviewMatch) {
+      const ref = decodeURIComponent(uninstallPreviewMatch[1]);
+      if (req.method !== 'GET') {
+        res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Method not allowed');
+        return;
+      }
+      const output = runProjectCtl(['uninstall', '--preview', ref]);
+      let data;
+      try {
+        data = output ? JSON.parse(output) : {};
+      } catch {
+        data = { ok: false, error: output || 'Invalid uninstall preview response' };
+      }
+      sendJson(res, 200, data);
+      return;
+    }
+
     const pullPreflightMatch = routePath.match(/^\/api\/projects\/(.+?)\/pull-preflight$/);
     if (pullPreflightMatch) {
       const ref = decodeURIComponent(pullPreflightMatch[1]);
@@ -7378,12 +7566,22 @@ async function handleRequest(req, res) {
         } else {
           runProjectCtl(['password', '--password', String(body.password || '').trim(), ref]);
         }
+      } else if (action === 'uninstall') {
+        const dropDb = Boolean(body?.dropDb === true || body?.dropDb === 'true' || body?.dropDb === 1 || body?.dropDb === '1');
+        runProjectCtl(['uninstall', ...(dropDb ? ['--drop-db'] : []), ref]);
       } else {
         runProjectCtl([action, ref]);
       }
 
-      touchProjectMeta(ref);
-      sendJson(res, 200, { ok: true, message: `${action} complete for ${ref}` });
+      if (action !== 'uninstall') {
+        touchProjectMeta(ref);
+      }
+      sendJson(res, 200, {
+        ok: true,
+        message: action === 'uninstall'
+          ? `Project removed for ${ref}`
+          : `${action} complete for ${ref}`,
+      });
       return;
     }
 

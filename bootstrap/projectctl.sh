@@ -56,7 +56,7 @@ Usage:
   projectctl password [--password secret|--clear] owner/repo
   projectctl mysql [--move-data] [--db-name name] [--db-user user] [--db-password password] [--machine id] [--machine-name name] [--machine-host host] [--machine-port port] [--machine-root-user user] [--machine-root-password password] [--machine-notes notes] [--ips ip1,ip2] owner/repo
   projectctl ssh [--password secret|--generate] owner/repo
-  projectctl uninstall owner/repo
+  projectctl uninstall [--preview] [--keep-db|--drop-db] owner/repo
   projectctl list
 
 Defaults:
@@ -70,6 +70,7 @@ Defaults:
   - `projectctl script` runs a package.json script, with optional `--pm2` for runtime scripts and `--dir` for scripts living in `server/` or `client/`
   - `projectctl password` enables or clears nginx basic auth for a project's domain
   - `projectctl mysql` manages MySQL access IPs and DB machine placement for a project's DB user, and `--move-data` copies the DB to the selected machine before switching over
+  - `projectctl uninstall --preview` shows mapped domains and DB table/row counts before removal; `--drop-db` removes the database, `--keep-db` keeps it
   - `projectctl ssh` shows or rotates the project's SSH/SFTP upload credentials
   - `projectctl update` prompts before pulling local changes; set PROJECTCTL_PULL_MODE=merge-env|stash-all to force the choice
   - `projectctl build` runs the root build script, or `--all` to also build server/ and client/ when they exist
@@ -1160,7 +1161,7 @@ mysql_exec_machine() {
   local query="$1"
   [[ -n "${DB_MACHINE_HOST:-}" ]] || die "Missing DB machine host"
   [[ -n "${DB_MACHINE_ROOT_USER:-}" ]] || die "Missing DB machine root user"
-  MYSQL_PWD="${DB_MACHINE_ROOT_PASSWORD:-}" mysql --protocol=tcp -h "${DB_MACHINE_HOST}" -P "${DB_MACHINE_PORT:-3306}" -u "${DB_MACHINE_ROOT_USER}" --batch --skip-column-names -e "${query}"
+  MYSQL_PWD="${DB_MACHINE_ROOT_PASSWORD:-}" mysql --connect-timeout=5 --protocol=tcp -h "${DB_MACHINE_HOST}" -P "${DB_MACHINE_PORT:-3306}" -u "${DB_MACHINE_ROOT_USER}" --batch --skip-column-names -e "${query}"
 }
 
 mysql_exec_with_details() {
@@ -1172,7 +1173,7 @@ mysql_exec_with_details() {
 
   [[ -n "${host}" ]] || die "Missing MySQL host"
   [[ -n "${user}" ]] || die "Missing MySQL user"
-  MYSQL_PWD="${password}" mysql --protocol=tcp -h "${host}" -P "${port:-3306}" -u "${user}" --batch --skip-column-names -e "${query}"
+  MYSQL_PWD="${password}" mysql --connect-timeout=5 --protocol=tcp -h "${host}" -P "${port:-3306}" -u "${user}" --batch --skip-column-names -e "${query}"
 }
 
 mysql_dump_with_details() {
@@ -1186,6 +1187,7 @@ mysql_dump_with_details() {
   [[ -n "${host}" ]] || die "Missing MySQL host for dump"
   [[ -n "${db_name}" ]] || die "Missing database name for dump"
   MYSQL_PWD="${password}" mysqldump \
+    --connect-timeout=5 \
     --protocol=tcp \
     -h "${host}" \
     -P "${port:-3306}" \
@@ -1212,6 +1214,7 @@ mysql_import_with_details() {
   [[ -n "${host}" ]] || die "Missing MySQL host for import"
   [[ -n "${db_name}" ]] || die "Missing database name for import"
   MYSQL_PWD="${password}" mysql \
+    --connect-timeout=5 \
     --protocol=tcp \
     -h "${host}" \
     -P "${port:-3306}" \
@@ -2150,6 +2153,154 @@ for item in data:
     https = str(item.get("https", "")).strip() or primary_https
     if domain and port:
         print(f"{domain}\t{port}\t{typ}\t{https}")
+PY
+}
+
+project_all_domains() {
+  local primary_domain="${APP_DOMAIN:-}"
+  local raw="${APP_DOMAIN_BINDINGS_JSON:-}"
+
+  python3 - "${primary_domain}" "${raw}" <<'PY'
+import json
+import sys
+
+primary_domain = (sys.argv[1] or "").strip()
+raw = sys.argv[2] or ""
+domains = []
+seen = set()
+
+def add(value):
+    value = str(value or "").strip()
+    if not value or value in seen:
+        return
+    seen.add(value)
+    domains.append(value)
+
+add(primary_domain)
+
+if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+    raw = raw[1:-1]
+
+if raw.strip():
+    try:
+        data = json.loads(raw)
+    except Exception:
+        data = []
+    if isinstance(data, list):
+      for item in data:
+        if not isinstance(item, dict):
+          continue
+        add(item.get("domain", ""))
+
+for domain in domains:
+    print(domain)
+PY
+}
+
+project_db_summary_json() {
+  local db_name=""
+  local db_user=""
+  local machine_id=""
+  local table_names=""
+  local rows=""
+  local table=""
+  local count=""
+  local machine_name=""
+  local machine_host=""
+  local machine_port=""
+  local machine_root_user=""
+  local machine_root_password=""
+  local machine_notes=""
+  local table_query_ok="yes"
+
+  db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
+  db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
+  machine_id="$(project_db_machine_id)"
+
+  if [[ -z "${db_name}" || -z "${db_user}" ]]; then
+    python3 - <<'PY'
+import json
+print(json.dumps({
+    "available": False,
+    "dbName": "",
+    "dbUser": "",
+    "tableCount": 0,
+    "rowCountTotal": 0,
+    "tables": [],
+    "error": "Missing database name or user in project env",
+}, ensure_ascii=False))
+PY
+    return 0
+  fi
+
+  if ! resolve_db_machine "${machine_id}" >/dev/null 2>&1; then
+    python3 - "${db_name}" "${db_user}" <<'PY'
+import json
+import sys
+print(json.dumps({
+    "available": False,
+    "dbName": sys.argv[1] if len(sys.argv) > 1 else "",
+    "dbUser": sys.argv[2] if len(sys.argv) > 2 else "",
+    "tableCount": 0,
+    "rowCountTotal": 0,
+    "tables": [],
+    "error": "Unable to resolve DB machine",
+}, ensure_ascii=False))
+PY
+    return 0
+  fi
+
+  machine_name="${DB_MACHINE_NAME:-}"
+  machine_host="${DB_MACHINE_HOST:-}"
+  machine_port="${DB_MACHINE_PORT:-3306}"
+  machine_root_user="${DB_MACHINE_ROOT_USER:-}"
+  machine_root_password="${DB_MACHINE_ROOT_PASSWORD:-}"
+  machine_notes="${DB_MACHINE_NOTES:-}"
+
+  table_names="$(mysql_exec_machine "SELECT table_name FROM information_schema.tables WHERE table_schema=$(sql_quote "${db_name}") ORDER BY table_name;" 2>/dev/null)" || table_query_ok="no"
+
+  if [[ "${table_query_ok}" == "yes" && -n "${table_names}" ]]; then
+    while IFS= read -r table; do
+      [[ -n "${table}" ]] || continue
+      count="$(mysql_exec_machine "SELECT COUNT(*) FROM $(sql_ident "${table}");" 2>/dev/null || printf '0')"
+      rows+="${table}"$'\t'"${count}"$'\n'
+    done <<< "${table_names}"
+  fi
+
+  python3 - "${db_name}" "${db_user}" "${machine_id}" "${machine_name}" "${machine_host}" "${machine_port}" "${machine_root_user}" "${machine_root_password}" "${machine_notes}" "${table_query_ok}" "${rows}" <<'PY'
+import json
+import sys
+
+db_name, db_user, machine_id, machine_name, machine_host, machine_port, machine_root_user, machine_root_password, machine_notes, table_query_ok, rows_raw = [arg if arg is not None else "" for arg in sys.argv[1:12]]
+rows = []
+for raw in rows_raw.splitlines():
+    if not raw.strip() or "\t" not in raw:
+        continue
+    name, count = raw.split("\t", 1)
+    try:
+        value = int(str(count).strip() or "0")
+    except Exception:
+        value = 0
+    rows.append({"name": name, "rows": value})
+
+table_count = len(rows)
+row_count_total = sum(item["rows"] for item in rows)
+print(json.dumps({
+    "available": table_query_ok == "yes",
+    "dbName": db_name,
+    "dbUser": db_user,
+    "machineId": machine_id,
+    "machineName": machine_name,
+    "machineHost": machine_host,
+    "machinePort": machine_port,
+    "machineRootUser": machine_root_user,
+    "machineRootPassword": machine_root_password,
+    "machineNotes": machine_notes,
+    "tableCount": table_count,
+    "rowCountTotal": row_count_total,
+    "tables": rows,
+    "error": "" if table_query_ok == "yes" else "Unable to query tables on the selected DB machine",
+}, ensure_ascii=False))
 PY
 }
 
@@ -3549,14 +3700,113 @@ remove_mysql_permissions() {
   mysql_exec_machine "FLUSH PRIVILEGES;" >/dev/null 2>&1 || true
 }
 
+remove_domains_from_app_map() {
+  local domains_csv="$1"
+  local tmp
+
+  [[ -n "${domains_csv}" ]] || return 0
+  [[ -f "${APP_MAP}" ]] || return 0
+
+  tmp="$(mktemp)"
+  awk -F, -v OFS=, -v domains_csv="${domains_csv}" '
+    BEGIN {
+      split(domains_csv, items, "\n")
+      for (i in items) {
+        domain = items[i]
+        gsub(/^[ \t]+|[ \t]+$/, "", domain)
+        if (domain != "") {
+          remove[domain] = 1
+        }
+      }
+    }
+    NR == 1 { print; next }
+    !remove[$1] { print }
+  ' "${APP_MAP}" > "${tmp}"
+
+  mv "${tmp}" "${APP_MAP}"
+}
+
+cleanup_project_domain_artifacts() {
+  local domains_csv="$1"
+  local domain=""
+  local cert_dir=""
+
+  [[ -n "${domains_csv}" ]] || return 0
+
+  while IFS= read -r domain; do
+    [[ -n "${domain}" ]] || continue
+    rm -f "$(auth_file_for_domain "${domain}")"
+    rm -rf "/etc/vps-custom-certs/projects/${domain}" \
+      "/etc/letsencrypt/live/${domain}" \
+      "/etc/letsencrypt/archive/${domain}"
+    rm -f "/etc/letsencrypt/renewal/${domain}.conf"
+  done <<< "${domains_csv}"
+}
+
+do_uninstall_preview() {
+  local ref="$1"
+  local slug
+  local meta
+  local domains_csv=""
+  local all_domains_json
+  local db_summary_json
+
+  slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
+  meta="$(meta_path_for_slug "${slug}")"
+  load_meta "${meta}"
+
+  domains_csv="$(printf '%s\n' "${APP_DOMAIN:-}" "$(project_all_domains)" | awk 'NF && !seen[$0]++')"
+  all_domains_json="$(python3 - "${domains_csv}" <<'PY'
+import json
+import sys
+domains = [line.strip() for line in (sys.argv[1] if len(sys.argv) > 1 else "").splitlines() if line.strip()]
+print(json.dumps(domains, ensure_ascii=False))
+PY
+)"
+  db_summary_json="$(project_db_summary_json)"
+
+  python3 - "${REPO_REF:-}" "${APP_DIR:-}" "${PM2_NAME:-}" "${APP_DOMAIN:-}" "${SSH_UPLOAD_USER:-}" "${MYSQL_ALLOWED_IPS:-}" "${APP_TYPE:-}" "${APP_HTTPS:-yes}" "${db_summary_json}" "${all_domains_json}" <<'PY'
+import json
+import sys
+
+repo_ref, app_dir, pm2_name, primary_domain, ssh_user, mysql_allowed_ips, app_type, app_https, db_summary_raw, domains_raw = sys.argv[1:11]
+try:
+    db_summary = json.loads(db_summary_raw) if db_summary_raw else {}
+except Exception:
+    db_summary = {}
+try:
+    domains = json.loads(domains_raw) if domains_raw else []
+except Exception:
+    domains = []
+
+print(json.dumps({
+    "ok": True,
+    "project": repo_ref,
+    "appDir": app_dir,
+    "pm2Name": pm2_name,
+    "primaryDomain": primary_domain,
+    "domains": domains,
+    "sshUploadUser": ssh_user,
+    "mysqlAllowedIps": mysql_allowed_ips,
+    "appType": app_type,
+    "appHttps": app_https,
+    "db": db_summary,
+}, ensure_ascii=False))
+PY
+}
+
 do_uninstall() {
   local ref="$1"
+  local drop_db="${2:-no}"
   local slug
   local meta
   local tmp
   local db_name
   local db_user
   local db_password
+  local all_domains_csv
+  local domain
+  local current_domains
 
   slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
@@ -3567,31 +3817,35 @@ do_uninstall() {
   if [[ -z "${DB_MACHINE_ID:-}" ]]; then
     DB_MACHINE_ID="$(project_db_machine_id)"
   fi
+  all_domains_csv="$(printf '%s\n' "${APP_DOMAIN:-}" "$(project_all_domains)" | awk 'NF && !seen[$0]++')"
 
   if pm2 describe "${PM2_NAME}" >/dev/null 2>&1; then
     pm2 delete "${PM2_NAME}" >/dev/null 2>&1 || true
     pm2 save || true
   fi
 
-  if [[ -n "${APP_DOMAIN:-}" ]]; then
-    rm -f "$(auth_file_for_domain "${APP_DOMAIN}")"
-  fi
-
-  if [[ -n "${APP_DOMAIN:-}" ]] && [[ -f "${APP_MAP}" ]]; then
-    tmp="$(mktemp)"
-    awk -F, -v OFS=, -v domain="${APP_DOMAIN}" 'NR == 1 { print; next } $1 != domain { print }' "${APP_MAP}" > "${tmp}"
-    mv "${tmp}" "${APP_MAP}"
-    if [[ -x /usr/local/bin/app-sync.sh ]]; then
-      /usr/local/bin/app-sync.sh
-    fi
+  cleanup_project_domain_artifacts "${all_domains_csv}"
+  remove_domains_from_app_map "${all_domains_csv}"
+  if [[ -x /usr/local/bin/app-sync.sh ]]; then
+    /usr/local/bin/app-sync.sh
   fi
 
   remove_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "${DB_MACHINE_ID:-${LOCAL_DB_MACHINE_ID}}"
+  if [[ "${drop_db}" == "yes" ]]; then
+    resolve_db_machine "${DB_MACHINE_ID:-${LOCAL_DB_MACHINE_ID}}"
+    if [[ -n "${db_name}" ]]; then
+      mysql_exec_machine "DROP DATABASE IF EXISTS $(sql_ident "${db_name}");" >/dev/null 2>&1 || true
+    fi
+  fi
   remove_project_ssh_user "${SSH_UPLOAD_USER:-}"
 
   rm -rf "${APP_DIR}" "${meta}"
   refresh_project_ssh_config
-  printf '[projectctl] uninstalled %s\n' "${REPO_REF}"
+  if [[ "${drop_db}" == "yes" ]]; then
+    printf '[projectctl] uninstalled %s and dropped database %s\n' "${REPO_REF}" "${db_name:-n/a}"
+  else
+    printf '[projectctl] uninstalled %s and kept database %s\n' "${REPO_REF}" "${db_name:-n/a}"
+  fi
 }
 
 do_list() {
@@ -3853,8 +4107,37 @@ main() {
       do_ssh "$1" "${password}" "${generate}"
       ;;
     uninstall)
+      local drop_db="no"
+      local preview="no"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --drop-db)
+            drop_db="yes"
+            shift
+            ;;
+          --keep-db)
+            drop_db="no"
+            shift
+            ;;
+          --preview)
+            preview="yes"
+            shift
+            ;;
+          --help|-h)
+            usage
+            exit 0
+            ;;
+          *)
+            break
+            ;;
+        esac
+      done
       [[ $# -eq 1 ]] || { usage; exit 1; }
-      do_uninstall "$1"
+      if [[ "${preview}" == "yes" ]]; then
+        do_uninstall_preview "$1"
+      else
+        do_uninstall "$1" "${drop_db}"
+      fi
       ;;
     list)
       do_list
