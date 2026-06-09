@@ -18,6 +18,7 @@ This pack describes four skeleton application shapes and their runnable `2run_` 
 - `DB_HOST` / `DB_PORT` / `MYSQL_HOST` / `MYSQL_PORT` describe database connectivity.
 - `CONNECTOR_PORT` is for connector relay services.
 - `PUBLIC_URL` / `API_BASE_URL` should point at the installed domain, not localhost.
+- `VPS-INSTALL.MD` can hold a JSON route block for extra nginx wiring that should be installed automatically.
 
 ## Install goal
 

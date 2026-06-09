@@ -1589,6 +1589,84 @@ seed_project_env_from_templates() {
   seed_project_env_from_templates_for_dir "${project_dir}/dashboard"
 }
 
+find_vps_install_file() {
+  local project_dir="${1:-${APP_DIR}}"
+  local search_dir=""
+  local candidate=""
+
+  [[ -d "${project_dir}" ]] || return 0
+
+  for search_dir in "${project_dir}" "${project_dir}/server" "${project_dir}/client" "${project_dir}/dashboard"; do
+    [[ -d "${search_dir}" ]] || continue
+    for candidate in VPS-INSTALL.MD VPS-INSTALL.md vps-install.MD vps-install.md; do
+      if [[ -f "${search_dir}/${candidate}" ]]; then
+        printf '%s/%s' "${search_dir}" "${candidate}"
+        return 0
+      fi
+    done
+  done
+}
+
+project_vps_install_proxy_routes_json() {
+  local project_dir="${1:-${APP_DIR}}"
+  local install_file=""
+
+  install_file="$(find_vps_install_file "${project_dir}" || true)"
+  [[ -n "${install_file}" ]] || return 0
+
+  python3 - "${install_file}" <<'PY'
+import json
+import re
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, 'r', encoding='utf-8', errors='surrogateescape') as handle:
+        text = handle.read()
+except Exception:
+    raise SystemExit(0)
+
+block_re = re.compile(r'```(?:vps-install|json)\s*(.*?)```', re.I | re.S)
+for match in block_re.finditer(text):
+    content = match.group(1).strip()
+    if not content:
+        continue
+    try:
+        data = json.loads(content)
+    except Exception:
+        continue
+    if not isinstance(data, dict):
+        continue
+    routes = data.get('proxy_routes') or data.get('proxyRoutes') or data.get('routes') or []
+    if not isinstance(routes, list):
+        continue
+    normalized = []
+    for item in routes:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get('path', '')).strip()
+        port = str(item.get('port', '')).strip()
+        route_type = str(item.get('type', 'prefix')).strip().lower() or 'prefix'
+        if not path:
+            continue
+        if not path.startswith('/'):
+            path = '/' + path
+        if not port.isdigit():
+            continue
+        if route_type not in ('prefix', 'exact'):
+            route_type = 'prefix'
+        normalized.append({
+            'path': path,
+            'port': int(port),
+            'type': route_type,
+        })
+    if normalized:
+        print(json.dumps(normalized, ensure_ascii=False))
+        raise SystemExit(0)
+raise SystemExit(0)
+PY
+}
+
 ensure_meta_dir() {
   mkdir -p "${META_DIR}"
 }
@@ -2319,6 +2397,7 @@ PM2_NAME=${PM2_NAME}
 APP_PORT=${APP_PORT}
 APP_DOMAIN=${APP_DOMAIN}
 APP_DOMAIN_BINDINGS_JSON=$(shell_quote "$(project_domain_bindings_json)")
+APP_PROXY_ROUTES_JSON=$(shell_quote "${APP_PROXY_ROUTES_JSON:-}")
 APP_HTTPS=${APP_HTTPS}
 APP_TYPE=${APP_TYPE}
 PACKAGE_MANAGER=${PACKAGE_MANAGER:-}
@@ -2997,10 +3076,12 @@ do_install() {
 
   if [[ "${custom_db_machine}" -eq 0 ]]; then
     resolve_db_machine "${DB_MACHINE_ID}"
+    APP_PROXY_ROUTES_JSON="$(project_vps_install_proxy_routes_json "${APP_DIR}")"
     write_meta "${meta}"
     chmod 0644 "${meta}"
     sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
   else
+    APP_PROXY_ROUTES_JSON="$(project_vps_install_proxy_routes_json "${APP_DIR}")"
     write_meta "${meta}"
     chmod 0644 "${meta}"
     sync_project_db_machine_env "custom" "" "" "" "" "Custom / manual DB machine" "Configure DB host and credentials in MySQL Access after install"
@@ -3090,6 +3171,8 @@ do_update() {
     normalize_project_deployment_env_file "${APP_DIR}/server/.env"
     normalize_project_deployment_env_file "${APP_DIR}/client/.env"
     normalize_project_deployment_env_file "${APP_DIR}/dashboard/.env"
+    APP_PROXY_ROUTES_JSON="$(project_vps_install_proxy_routes_json "${APP_DIR}")"
+    update_meta_value "${meta}" "APP_PROXY_ROUTES_JSON" "${APP_PROXY_ROUTES_JSON}"
     install_deps
     if ! maybe_build "${meta}" "${build_mode}"; then
       build_failed="yes"

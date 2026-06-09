@@ -220,7 +220,59 @@ function templateReadme(app) {
     '## Install rule',
     '',
     'Future Codex sessions should copy this template into a real repo, keep the root scripts visible to Multidev, and make sure env values are complete before install.',
+    'If the app needs special nginx/path wiring, put it in `VPS-INSTALL.MD` as a JSON block so Multidev can wire it automatically during install/update.',
   ]);
+}
+
+function vpsInstallDoc(app, runnable = false) {
+  const routes = [];
+  if (app.slug === 'remote-connector') {
+    routes.push(
+      { path: '/upload_media', port: 8787, type: 'prefix' },
+      { path: '/media/save', port: 8787, type: 'prefix' },
+      { path: '/api/commands/next', port: 8787, type: 'prefix' },
+    );
+  }
+  if (app.slug === 'ui-control') {
+    routes.push({ path: '/api', port: app.examplePort, type: 'prefix' });
+  }
+
+  const runtimePort = runnable ? app.examplePort + 5000 : app.examplePort;
+  const body = [
+    `# VPS Install Notes - ${app.title}${runnable ? ' 2run' : ''}`,
+    '',
+    'This file is the Multidev install contract for the app.',
+    '',
+    '## What Multidev should look for',
+    '',
+    '- root scripts in `package.json`',
+    '- complete env templates, including empty keys',
+    '- optional extra nginx route hints',
+    '- optional DB / connector wiring',
+    '',
+    '## Route hints',
+    '',
+    'If the app exposes extra HTTP routes that need to be served by nginx on a different upstream port, keep them in the JSON block below.',
+    'Multidev will look for this file during install and update, and will wire the routes automatically when the block is present.',
+    '',
+    '```vps-install',
+    JSON.stringify(
+      {
+        proxy_routes: routes,
+      },
+      null,
+      2,
+    ),
+    '```',
+    '',
+    '## Notes',
+    '',
+    `- main runtime port example: ${runtimePort}`,
+    '- keep `PORT`, `APP_PORT`, `GUI_PORT`, `API_PORT`, `DB_*`, `MYSQL_*`, `CONNECTOR_*`, `PUBLIC_URL`, and `API_BASE_URL` in the env template when relevant',
+    '- use `server/.env`, `client/.env`, or `dashboard/.env` if the repo has split runtime files',
+    '- do not hardcode localhost ports into the browser bundle',
+  ];
+  return lines(body);
 }
 
 function runReadme(app) {
@@ -243,6 +295,10 @@ function runReadme(app) {
     '## Ports',
     '',
     'Use the generated `PORT` from Multidev. The sample runs on that port and should not be hardcoded to localhost:3001.',
+    '',
+    '## Install hints',
+    '',
+    'The sample also includes `VPS-INSTALL.MD` so Multidev can learn about extra nginx route wiring when it exists.',
   ]);
 }
 
@@ -375,6 +431,7 @@ function docsReadme() {
     '- `DB_HOST` / `DB_PORT` / `MYSQL_HOST` / `MYSQL_PORT` describe database connectivity.',
     '- `CONNECTOR_PORT` is for connector relay services.',
     '- `PUBLIC_URL` / `API_BASE_URL` should point at the installed domain, not localhost.',
+    '- `VPS-INSTALL.MD` can hold a JSON route block for extra nginx wiring that should be installed automatically.',
     '',
     '## Install goal',
     '',
@@ -393,9 +450,11 @@ for (const app of apps) {
 
   write(path.join(templateBase, 'README.md'), templateReadme(app));
   write(path.join(templateBase, '.env.example'), lines(app.envExample));
+  write(path.join(templateBase, 'VPS-INSTALL.MD'), vpsInstallDoc(app, false));
 
   write(path.join(runBase, 'README.md'), runReadme(app));
   write(path.join(runBase, '.env.example'), lines(app.runEnvExample));
+  write(path.join(runBase, 'VPS-INSTALL.MD'), vpsInstallDoc(app, true));
   write(path.join(runBase, 'package.json'), packageJson(app, app.hasDb));
   write(path.join(runBase, 'server.js'), quizServer(app));
 }
@@ -409,6 +468,8 @@ write(
     'The `samples/` tree contains four skeleton templates and four runnable `2run_` smoke-test copies.',
     '',
     'Use the templates for real app scaffolding, and the `2run_` copies to verify the install path works end to end.',
+    '',
+    'Every sample also includes `VPS-INSTALL.MD` with a machine-readable route block so Multidev can wire extra nginx paths automatically when needed.',
   ]),
 );
 

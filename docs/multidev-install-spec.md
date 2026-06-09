@@ -22,6 +22,8 @@ Recommended folders:
 - `server/` for the backend
 - `client/` for the frontend
 
+Also include a root `VPS-INSTALL.MD` when the app needs extra runtime wiring. Multidev looks for it during install/update and can use a machine-readable JSON route block inside it to generate extra nginx locations.
+
 If `server/`, `client/`, or `dashboard/` contain the real runtime logic, the root scripts must proxy to them so Multidev can still detect and run the app from the root.
 
 ## 2. Required script names
@@ -120,6 +122,8 @@ Recommended order:
 After a pull, Multidev should also offer a `build all` choice that runs the root build script plus `server/`, `client/`, and `dashboard/` build scripts when present.
 
 The app should not require a human to create the DB user manually after install.
+
+If the app has extra HTTP routes that must land on a non-default upstream port, document them in `VPS-INSTALL.MD` so Multidev can wire them automatically during install/update.
 
 If the app has a demo login or required admin user:
 - seed it in `db:seed`

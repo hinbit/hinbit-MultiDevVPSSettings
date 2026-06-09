@@ -23,3 +23,4 @@ An app that uses the local MySQL instance on the same VPS.
 ## Install rule
 
 Future Codex sessions should copy this template into a real repo, keep the root scripts visible to Multidev, and make sure env values are complete before install.
+If the app needs special nginx/path wiring, put it in `VPS-INSTALL.MD` as a JSON block so Multidev can wire it automatically during install/update.

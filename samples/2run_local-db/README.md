@@ -16,3 +16,7 @@ This copy is meant to validate that Multidev can install, start, map ports, and 
 ## Ports
 
 Use the generated `PORT` from Multidev. The sample runs on that port and should not be hardcoded to localhost:3001.
+
+## Install hints
+
+The sample also includes `VPS-INSTALL.MD` so Multidev can learn about extra nginx route wiring when it exists.

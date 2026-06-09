@@ -15,6 +15,7 @@ PROJECT_META_DIR="/etc/vps-projects"
 mkdir -p "${STATE_DIR}"
 
 declare -A desired_domains=()
+declare -A proxy_routes_by_domain=()
 declare -a desired_list=()
 
 meta_env_value() {
@@ -29,6 +30,7 @@ append_project_domains() {
   local port
   local type
   local https
+  local proxy_routes_json
 
   [[ -d "${PROJECT_META_DIR}" ]] || return 0
   for meta in "${PROJECT_META_DIR}"/*.env; do
@@ -37,9 +39,15 @@ append_project_domains() {
     port="$(meta_env_value "${meta}" APP_PORT)"
     type="$(meta_env_value "${meta}" APP_TYPE)"
     https="$(meta_env_value "${meta}" APP_HTTPS)"
+    proxy_routes_json="$(meta_env_value "${meta}" APP_PROXY_ROUTES_JSON)"
     [[ -n "${domain}" && -n "${port}" ]] || continue
+    proxy_routes_by_domain["${domain}"]="${proxy_routes_json}"
     printf '%s,%s,%s,%s\n' "${domain}" "${port}" "${type:-node}" "${https:-yes}"
-    APP_DOMAIN="${domain}" APP_PORT="${port}" APP_TYPE="${type:-node}" APP_HTTPS="${https:-yes}" python3 - "${meta}" <<'PY'
+    while IFS=$'\t' read -r extra_domain extra_port extra_type extra_https; do
+      [[ -n "${extra_domain:-}" && -n "${extra_port:-}" ]] || continue
+      proxy_routes_by_domain["${extra_domain}"]="${proxy_routes_json}"
+      printf '%s,%s,%s,%s\n' "${extra_domain}" "${extra_port}" "${extra_type:-${type:-node}}" "${extra_https:-${https:-yes}}"
+    done < <(APP_DOMAIN="${domain}" APP_PORT="${port}" APP_TYPE="${type:-node}" APP_HTTPS="${https:-yes}" python3 - "${meta}" <<'PY'
 import json
 import os
 import sys
@@ -81,8 +89,9 @@ for item in data if isinstance(data, list) else []:
     typ = str(item.get("type", "")).strip() or os.environ.get("APP_TYPE", "node")
     https = str(item.get("https", "")).strip() or os.environ.get("APP_HTTPS", "yes")
     if dom and port:
-        print(f"{dom},{port},{typ},{https}")
+        print(f"{dom}\t{port}\t{typ}\t{https}")
 PY
+    )
   done
 }
 
@@ -110,6 +119,7 @@ render_http_only() {
   local domain="$1"
   local port="$2"
   local auth_block="$3"
+  local extra_blocks="${4:-}"
   cat <<EOF2
 ${MARKER}
 server {
@@ -121,6 +131,8 @@ ${auth_block}
         auth_basic off;
         root ${ACME_ROOT};
     }
+
+${extra_blocks}
 
     location / {
         proxy_pass http://127.0.0.1:${port};
@@ -143,6 +155,7 @@ render_https() {
   local auth_block="$3"
   local cert_path="$4"
   local key_path="$5"
+  local extra_blocks="${6:-}"
   cat <<EOF2
 ${MARKER}
 server {
@@ -154,6 +167,8 @@ server {
         auth_basic off;
         root ${ACME_ROOT};
     }
+
+${extra_blocks}
 
     location / {
         return 301 https://\$host\$request_uri;
@@ -173,6 +188,8 @@ ${auth_block}
         root ${ACME_ROOT};
     }
 
+${extra_blocks}
+
     location / {
         proxy_pass http://127.0.0.1:${port};
         proxy_http_version 1.1;
@@ -186,6 +203,64 @@ ${auth_block}
     }
 }
 EOF2
+}
+
+render_proxy_route_blocks() {
+  local raw="${1:-}"
+  local fallback_port="${2:-}"
+
+  [[ -n "${raw}" ]] || return 0
+  python3 - "${raw}" "${fallback_port}" <<'PY'
+import json
+import sys
+
+raw = sys.argv[1] or ""
+fallback_port = sys.argv[2] or ""
+if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+    raw = raw[1:-1]
+try:
+    data = json.loads(raw)
+except Exception:
+    raise SystemExit(0)
+
+if not isinstance(data, list):
+    raise SystemExit(0)
+
+common = """        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection \"upgrade\";
+        proxy_redirect off;"""
+
+blocks = []
+for item in data:
+    if not isinstance(item, dict):
+        continue
+    path = str(item.get("path", "")).strip()
+    port = str(item.get("port", "")).strip() or fallback_port
+    route_type = str(item.get("type", "prefix")).strip().lower() or "prefix"
+    if not path:
+        continue
+    if not path.startswith("/"):
+        path = "/" + path
+    if not port.isdigit():
+        continue
+    if route_type not in ("prefix", "exact"):
+        route_type = "prefix"
+    location = f"location = {path}" if route_type == "exact" else f"location ^~ {path}"
+    blocks.append(
+        f"""    {location} {{
+        proxy_pass http://127.0.0.1:{port};
+{common}
+    }}"""
+    )
+
+if blocks:
+    print("\n\n".join(blocks))
+PY
 }
 
 cert_email_args=()
@@ -256,6 +331,7 @@ while IFS=, read -r domain port type https; do
   conf="${NGINX_AVAIL}/${domain}.conf"
   tmp="$(mktemp)"
   auth_block="$(auth_block_for_domain "${domain}")"
+  extra_blocks="$(render_proxy_route_blocks "${proxy_routes_by_domain[$domain]:-}" "${port}")"
   custom_cert_dir="${CUSTOM_CERT_ROOT}/${domain}"
   custom_cert="${custom_cert_dir}/fullchain.pem"
   custom_key="${custom_cert_dir}/privkey.pem"
@@ -294,17 +370,17 @@ while IFS=, read -r domain port type https; do
 
     if [[ "${cert_ready}" == "yes" ]]; then
       if [[ "${cert_source:-}" == "custom" ]]; then
-        render_https "${domain}" "${port}" "${auth_block}" "${custom_cert}" "${custom_key}" > "${tmp}"
+        render_https "${domain}" "${port}" "${auth_block}" "${custom_cert}" "${custom_key}" "${extra_blocks}" > "${tmp}"
       elif [[ "${cert_source:-}" == "default-domain" ]]; then
-        render_https "${domain}" "${port}" "${auth_block}" "${fallback_cert}" "${fallback_key}" > "${tmp}"
+        render_https "${domain}" "${port}" "${auth_block}" "${fallback_cert}" "${fallback_key}" "${extra_blocks}" > "${tmp}"
       else
-        render_https "${domain}" "${port}" "${auth_block}" "/etc/letsencrypt/live/${domain}/fullchain.pem" "/etc/letsencrypt/live/${domain}/privkey.pem" > "${tmp}"
+        render_https "${domain}" "${port}" "${auth_block}" "/etc/letsencrypt/live/${domain}/fullchain.pem" "/etc/letsencrypt/live/${domain}/privkey.pem" "${extra_blocks}" > "${tmp}"
       fi
     else
-      render_http_only "${domain}" "${port}" "${auth_block}" > "${tmp}"
+      render_http_only "${domain}" "${port}" "${auth_block}" "${extra_blocks}" > "${tmp}"
     fi
   else
-    render_http_only "${domain}" "${port}" "${auth_block}" > "${tmp}"
+    render_http_only "${domain}" "${port}" "${auth_block}" "${extra_blocks}" > "${tmp}"
   fi
 
   install -m 0644 "${tmp}" "${conf}"
