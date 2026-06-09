@@ -152,6 +152,7 @@ What the installer does:
 - maps the domain in `/etc/app-map.csv`
 - runs `app-sync.sh` to build nginx and TLS
 - creates a per-project SSH upload user
+- the SSH upload user name should be generated from the repo name part only, not the full owner/repo slug, so long owner names do not exceed Linux username limits
 - creates or wires the project DB on the selected DB machine
 - exports the correct domain-related env values for the runtime
 
