@@ -51,6 +51,8 @@ If the repo is private under a separate GitHub account, configure the SSH key in
 
 If you install a project before DNS/TLS is ready, `projectctl` will now finish the install and leave the site on HTTP for the moment. Re-run `sudo app-sync.sh` after the domain resolves to the VPS to activate the SSL vhost.
 
+`/manage/` supports multiple basic-auth users via `/etc/vps-system.env`. The legacy `MANAGE_PASSWORD` still works for the `manage` user, and you can add extra logins with `MANAGE_USERS=manage:existingpassword,amit:secret` style entries. On the seach box, `amit` is now allowed as an extra manage user.
+
 Pull updates and restart PM2 for an existing project:
 
 ```bash

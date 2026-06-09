@@ -30,6 +30,7 @@ Recommended environment variables for the installer:
 
 - `ACME_EMAIL` for Let's Encrypt notifications
 - `MANAGE_PASSWORD` for `https://multidev.hinbit.com/manage/`
+- `MANAGE_USERS` for extra `/manage/` basic-auth users, using `user:password` pairs separated by commas
 - `ADMIN_USER` and `ADMIN_SSH_PUBKEY` if you want a non-root sudo user
 
 The installer will set up:

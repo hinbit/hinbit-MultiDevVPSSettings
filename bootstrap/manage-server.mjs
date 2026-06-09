@@ -60,8 +60,8 @@ function loadSystemEnv() {
     if (idx === -1) continue;
     const key = trimmed.slice(0, idx).trim();
     const value = trimmed.slice(idx + 1).trim();
-    if (key === 'MANAGE_PASSWORD' && !process.env.MANAGE_PASSWORD) {
-      process.env.MANAGE_PASSWORD = value;
+    if (key.startsWith('MANAGE_') && !process.env[key]) {
+      process.env[key] = value;
     }
   }
 }
@@ -6383,7 +6383,25 @@ function basicAuth(req, res) {
   if (colon === -1) return false;
   const user = decoded.slice(0, colon);
   const pass = decoded.slice(colon + 1);
-  return user === BASIC_USER && pass === (process.env.MANAGE_PASSWORD || PASSWORD);
+  const allowed = new Map();
+  const legacyPassword = String(process.env.MANAGE_PASSWORD || PASSWORD || '').trim();
+  if (legacyPassword) {
+    allowed.set(BASIC_USER, legacyPassword);
+  }
+  const rawUsers = String(process.env.MANAGE_USERS || '').trim();
+  if (rawUsers) {
+    for (const entry of rawUsers.split(/[\n,]/)) {
+      const trimmed = String(entry || '').trim();
+      if (!trimmed) continue;
+      const sep = trimmed.indexOf(':');
+      if (sep === -1) continue;
+      const name = trimmed.slice(0, sep).trim();
+      const secret = trimmed.slice(sep + 1).trim();
+      if (!name || !secret) continue;
+      allowed.set(name, secret);
+    }
+  }
+  return allowed.has(user) && allowed.get(user) === pass;
 }
 
 function requireAuth(req, res) {
