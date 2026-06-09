@@ -2401,7 +2401,7 @@ verify_project_http_smoke() {
 
   local_body="$(mktemp)"
   domain_body="$(mktemp)"
-  trap 'rm -f "${local_body}" "${domain_body}"' RETURN
+  trap "rm -f '${local_body}' '${domain_body}'" RETURN
 
   local_code="$(curl -sS --max-time 15 --connect-timeout 5 -o "${local_body}" -w '%{http_code}' "http://127.0.0.1:${port}/" 2>/dev/null || printf '000')"
   if ! project_http_status_ok "${local_code}"; then
