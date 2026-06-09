@@ -216,11 +216,13 @@ EOF
 custom_cert_dir="${CUSTOM_CERT_ROOT}/${SYSTEM_DOMAIN}"
 custom_cert="${custom_cert_dir}/fullchain.pem"
 custom_key="${custom_cert_dir}/privkey.pem"
+letsencrypt_cert="/etc/letsencrypt/live/${SYSTEM_DOMAIN}/fullchain.pem"
+letsencrypt_key="/etc/letsencrypt/live/${SYSTEM_DOMAIN}/privkey.pem"
 
-if [[ -s "${custom_cert}" && -s "${custom_key}" ]]; then
+if [[ -s "${letsencrypt_cert}" && -s "${letsencrypt_key}" ]]; then
+  render_https "${letsencrypt_cert}" "${letsencrypt_key}" > "${SYSTEM_PORTAL_FILE}"
+elif [[ -s "${custom_cert}" && -s "${custom_key}" ]]; then
   render_https "${custom_cert}" "${custom_key}" > "${SYSTEM_PORTAL_FILE}"
-elif [[ -s "/etc/letsencrypt/live/${SYSTEM_DOMAIN}/fullchain.pem" ]]; then
-  render_https "/etc/letsencrypt/live/${SYSTEM_DOMAIN}/fullchain.pem" "/etc/letsencrypt/live/${SYSTEM_DOMAIN}/privkey.pem" > "${SYSTEM_PORTAL_FILE}"
 else
   if certbot certonly --webroot -w "${ACME_ROOT}" -d "${SYSTEM_DOMAIN}" --non-interactive --agree-tos --register-unsafely-without-email; then
     render_https "/etc/letsencrypt/live/${SYSTEM_DOMAIN}/fullchain.pem" "/etc/letsencrypt/live/${SYSTEM_DOMAIN}/privkey.pem" > "${SYSTEM_PORTAL_FILE}"
