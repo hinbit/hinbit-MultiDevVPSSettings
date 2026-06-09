@@ -66,13 +66,14 @@ projectctl uninstall owner/repo
 `projectctl update` now prompts with two choices when local changes exist:
 - `Merge .env (default)` keeps the current VPS env values after the pull and appends any new upstream env keys
 - `Stash all` stashes every local change before pulling
-After every install or pull, `projectctl` runs dependency installs in the root plus `server/` and `client/` when those folders exist. The subfolder installs use `npm --prefix ...` so each component is installed in its own directory before build and restart.
+After every install or pull, `projectctl` runs dependency installs in the root plus `server/`, `client/`, and `dashboard/` when those folders exist. The subfolder installs use `npm --prefix ...` so each component is installed in its own directory before build and restart.
 After every install or pull, `projectctl` runs `build all` automatically:
-- `build all` runs the root build script plus `server/` and `client/` build scripts when they exist
+- `build all` runs the root build script plus `server/`, `client/`, and `dashboard/` build scripts when they exist
 - the project list shows the last build mode, status, and timestamp
 After install, update, or restart, `projectctl` reruns `app-sync` after PM2 is back up so `/etc/app-map.csv` and the nginx vhost are regenerated from the current project metadata.
 `projectctl` now rewrites project `.env` files in a shell-safe form, so values with spaces are quoted automatically and remain safe for scripts that source the file.
 `projectctl` also skips common reserved ports when auto-picking a new app port, and it preserves split-app internal ports such as CherryWrapper's `PORT=8787` instead of overwriting them with the public UI port.
+When a repo name is too long for a MySQL username, `projectctl` shortens the generated DB user to stay within MySQL's 32-character limit while keeping the repo name as the base.
 
 Run an ad-hoc package script from an existing project:
 
@@ -82,11 +83,11 @@ projectctl script --pm2 owner/repo dev
 projectctl script --dir server owner/repo db:seed
 ```
 
-When you install a project from `/manage/`, the UI now scans the repo for DB-related scripts across the root, `server/`, and `client/` package manifests and shows the runnable ones after install.
+When you install a project from `/manage/`, the UI now scans the repo for DB-related scripts across the root, `server/`, `client/`, and `dashboard/` package manifests and shows the runnable ones after install.
 If the project repo does not already define DB name, user, and password values, the installer now generates them automatically and writes them into the project env files so the DB and MySQL panels are populated on first install.
 `projectctl install` also stamps the requested port into the project env files so the runtime uses the selected app port consistently.
 `projectctl install` and `projectctl update` also normalize common deployment env keys from local/dev values to server/web values when the repo ships them in `.env` or `.env.example`-style templates, so installed projects boot in production mode instead of local browser/dev mode.
-The env seeding/merge step covers the repo root plus `server/` and `client/` env files when they exist.
+The env seeding/merge step covers the repo root plus `server/`, `client/`, and `dashboard/` env files when they exist.
 In the Manage UI, the merged env list is read-only and source-aware; duplicates are highlighted in red, while edits happen in the selected file only.
 Projects can now keep additional domain aliases from the `Domains` panel. Each alias can point at its own env file for management, and `app-sync` will map all configured domains back to the same project.
 After install or update, `projectctl` now verifies that PM2 is actually online, retries the restart once if it is not, and fails loudly if the project still does not come up.

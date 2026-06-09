@@ -22,7 +22,7 @@ Recommended folders:
 - `server/` for the backend
 - `client/` for the frontend
 
-If `server/` or `client/` contain the real runtime logic, the root scripts must proxy to them so Multidev can still detect and run the app from the root.
+If `server/`, `client/`, or `dashboard/` contain the real runtime logic, the root scripts must proxy to them so Multidev can still detect and run the app from the root.
 
 ## 2. Required script names
 
@@ -30,7 +30,7 @@ Prefer these canonical script names in the root `package.json`:
 - `start` for the production runtime entry
 - `prod` for an explicit production runtime if needed
 - `build` for the production build
-- `install:all` for dependency installation across root, `server/`, and `client/`
+- `install:all` for dependency installation across root, `server/`, `client/`, and `dashboard/`
 - `db:init` for schema + support tables
 - `db:seed` for demo data and required users
 - `db:migrate` for schema evolution
@@ -51,12 +51,12 @@ Rules:
 - use `.env.example` and `.env.production.example` as the source of truth when possible
 - if the app has more than one runtime component, each component must have the keys it needs
 - quote values with spaces or special characters
-- seed and merge env templates in the repo root, `server/`, and `client/` when those folders exist
-- the Multidev env editor shows a read-only merged summary, grouped by key source, and it can switch between individual files such as `.env`, `.env.local`, `.env.production`, `.env.machine`, `server/.env`, and `client/.env`
+- seed and merge env templates in the repo root, `server/`, `client/`, and `dashboard/` when those folders exist
+- the Multidev env editor shows a read-only merged summary, grouped by key source, and it can switch between individual files such as `.env`, `.env.local`, `.env.production`, `.env.machine`, `server/.env`, `client/.env`, and `dashboard/.env`
 - duplicate keys inside a file or across files must be marked clearly in red in the merged summary
 - save actions write back to the selected file, not the merged view
 - if one project should answer to more than one domain, store a primary domain plus alias bindings, and let each alias carry its own env-file path for management and editing
-- when the install or pull flow resolves dependencies, root plus `server/` and `client/` should be installed separately, and the subfolder installs should use `npm --prefix <folder>` so each component is refreshed in place before build
+- when the install or pull flow resolves dependencies, root plus `server/`, `client/`, and `dashboard/` should be installed separately, and the subfolder installs should use `npm --prefix <folder>` so each component is refreshed in place before build
 
 Examples:
 
@@ -117,7 +117,7 @@ Recommended order:
 5. build if needed
 6. start the app
 
-After a pull, Multidev should also offer a `build all` choice that runs the root build script plus `server/` and `client/` build scripts when present.
+After a pull, Multidev should also offer a `build all` choice that runs the root build script plus `server/`, `client/`, and `dashboard/` build scripts when present.
 
 The app should not require a human to create the DB user manually after install.
 
@@ -234,8 +234,9 @@ The intended result is a one-run install that ends with:
 - correct runtime state
 - no manual rescue steps
 - if a project has multiple domains, verify every alias is present in the app map and that each alias points at the intended env file before reporting success
-- install/update should run `build all` automatically after the dependency step, so root, `server/`, and `client/` builds are verified before handoff
+- install/update should run `build all` automatically after the dependency step, so root, `server/`, `client/`, and `dashboard/` builds are verified before handoff
 - after install, update, or restart, rerun app-sync after PM2 is online so `/etc/app-map.csv` and nginx are regenerated from the current project metadata
+- if the repo name is too long for a MySQL username, shorten the generated DB user to stay within MySQL's 32-character limit while keeping the repo name as the base
 
 ## 13. GitHub SSH mapping
 

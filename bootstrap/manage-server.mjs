@@ -214,7 +214,12 @@ function entriesToEnvObject(entries) {
 }
 
 function discoverProjectEnvFiles(projectPath) {
-  const baseDirs = [projectPath, path.join(projectPath, 'server'), path.join(projectPath, 'client')];
+  const baseDirs = [
+    projectPath,
+    path.join(projectPath, 'server'),
+    path.join(projectPath, 'client'),
+    path.join(projectPath, 'dashboard'),
+  ];
   const seen = new Set();
   const files = [];
   for (const baseDir of baseDirs) {
@@ -1591,7 +1596,12 @@ function runPython(script, args = []) {
 function createEnvZip(projectPath) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vps-env-'));
   const zipPath = path.join(tmpDir, 'project-env.zip');
-  const filesJson = JSON.stringify(ENV_CANDIDATES);
+  const filesJson = JSON.stringify([
+    ...ENV_CANDIDATES,
+    ...ENV_CANDIDATES.map((name) => path.join('server', name)),
+    ...ENV_CANDIDATES.map((name) => path.join('client', name)),
+    ...ENV_CANDIDATES.map((name) => path.join('dashboard', name)),
+  ]);
   runPython(
     `
 import json, os, sys, zipfile
@@ -1618,7 +1628,12 @@ function replaceEnvZip(projectPath, zipBuffer) {
   const extractDir = path.join(tmpDir, 'extract');
   fs.writeFileSync(zipPath, zipBuffer);
   fs.mkdirSync(extractDir, { recursive: true });
-  const filesJson = JSON.stringify(ENV_CANDIDATES);
+  const filesJson = JSON.stringify([
+    ...ENV_CANDIDATES,
+    ...ENV_CANDIDATES.map((name) => path.join('server', name)),
+    ...ENV_CANDIDATES.map((name) => path.join('client', name)),
+    ...ENV_CANDIDATES.map((name) => path.join('dashboard', name)),
+  ]);
   runPython(
     `
 import json, os, pathlib, sys, zipfile
@@ -1630,10 +1645,12 @@ with zipfile.ZipFile(zip_path) as zf:
         name = info.filename.replace('\\\\', '/')
         if not name or name.endswith('/'):
             continue
-        if '/' in name or '\\\\' in name:
-            raise SystemExit(f'Invalid zip entry: {name}')
         if name not in allowed:
             continue
+        target = pathlib.Path(extract_dir, name).resolve()
+        root = pathlib.Path(extract_dir).resolve()
+        if root != target and root not in target.parents:
+            raise SystemExit(f'Invalid zip entry: {name}')
         zf.extract(info, extract_dir)
 print(extract_dir)
 `,
@@ -1646,12 +1663,29 @@ print(extract_dir)
       fs.rmSync(target, { force: true });
     }
   }
+  for (const parent of ['server', 'client', 'dashboard']) {
+    for (const name of ENV_CANDIDATES) {
+      const target = path.join(projectPath, parent, name);
+      if (fs.existsSync(target)) {
+        fs.rmSync(target, { force: true });
+      }
+    }
+  }
 
   for (const name of ENV_CANDIDATES) {
     const source = path.join(extractDir, name);
     if (!fs.existsSync(source)) continue;
     fs.copyFileSync(source, path.join(projectPath, name));
     fs.chmodSync(path.join(projectPath, name), 0o600);
+  }
+  for (const parent of ['server', 'client', 'dashboard']) {
+    for (const name of ENV_CANDIDATES) {
+      const source = path.join(extractDir, parent, name);
+      if (!fs.existsSync(source)) continue;
+      fs.mkdirSync(path.join(projectPath, parent), { recursive: true });
+      fs.copyFileSync(source, path.join(projectPath, parent, name));
+      fs.chmodSync(path.join(projectPath, parent, name), 0o600);
+    }
   }
 
   fs.rmSync(tmpDir, { recursive: true, force: true });

@@ -124,7 +124,7 @@ Use `projectctl install` from the app VPS:
 If the repo lives under a GitHub account that is not the server's default GitHub identity, set the key's `GitHub user` field in `/manage/ssh-keys/`. The manage panel will write root's SSH config for the matching host alias automatically (`github.com` for `shaykid`, `github-hinbit` for `hinbit`). `projectctl` runs `git clone` directly as root, so the key must be selected there or the clone will fail with `Permission denied (publickey)`.
 
 If HTTPS is not ready yet, the install still completes and the app is left on HTTP until DNS and certificate provisioning finish. Re-run `sudo app-sync.sh` after the domain resolves to the VPS to activate the SSL vhost.
-The `/manage/` install flow also scans root, `server/`, and `client/` package manifests for DB-related scripts and shows the runnable ones after install.
+The `/manage/` install flow also scans root, `server/`, `client/`, and `dashboard/` package manifests for DB-related scripts and shows the runnable ones after install.
 Use `/manage/tls/` to store a shared base-domain certificate like `seach.co.il` if you want new subdomains to inherit it automatically until a project-specific certificate is added.
 `projectctl install` and `projectctl update` also normalize deployment-oriented env keys from local/dev values to server/web values when the repo ships them in `.env` or `.env.example`-style templates. In practice, this means values like `SERVER_LOCATION=local` are rewritten for the VPS/web runtime, and URL-style settings are pointed at the installed domain when the template provides a production/web target.
 
@@ -153,6 +153,7 @@ What the installer does:
 - runs `app-sync.sh` to build nginx and TLS
 - creates a per-project SSH upload user
 - the SSH upload user name should be generated from the repo name part only, not the full owner/repo slug, and should be capped at 12 characters total so long owner names do not exceed Linux username limits
+- if a repo name is too long for a MySQL username, shorten the generated DB user to stay within MySQL's 32-character limit while keeping the repo name as the base
 - creates or wires the project DB on the selected DB machine
 - exports the correct domain-related env values for the runtime
 
@@ -206,7 +207,7 @@ When local changes exist, the update prompt offers:
 - `Stash all` to stash every local change before pulling
 
 After pull, the UI also asks whether to run `build all`:
-- `build all` runs the root build script plus `server/` and `client/` build scripts when they exist
+- `build all` runs the root build script plus `server/`, `client/`, and `dashboard/` build scripts when they exist
 - the project list displays the last build mode, status, and timestamp
 
 The merge path also normalizes project `.env` files into a shell-safe format, so values with spaces are quoted automatically and keep working in scripts that source the file.

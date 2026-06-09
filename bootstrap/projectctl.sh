@@ -335,6 +335,31 @@ sanitize_db_identifier() {
   printf '%s' "${value}"
 }
 
+truncate_identifier_with_hash() {
+  local value="$1"
+  local max_len="${2:-32}"
+  local hash_len="${3:-6}"
+  local hash=""
+  local prefix_len="$max_len"
+
+  [[ "${max_len}" =~ ^[0-9]+$ ]] || max_len=32
+  [[ "${hash_len}" =~ ^[0-9]+$ ]] || hash_len=6
+  (( max_len > 0 )) || max_len=32
+  (( hash_len >= 0 )) || hash_len=6
+
+  if (( ${#value} > max_len )); then
+    prefix_len=$((max_len - hash_len))
+    if (( prefix_len < 1 )); then
+      prefix_len=1
+      hash_len=$((max_len - prefix_len))
+    fi
+    hash="$(printf '%s' "${value}" | sha1sum | awk -v len="${hash_len}" '{print substr($1, 1, len)}')"
+    value="${value:0:${prefix_len}}${hash}"
+  fi
+
+  printf '%s' "${value:0:max_len}"
+}
+
 project_default_db_identifier() {
   local ref="${1:-${REPO_REF}}"
   local name=""
@@ -346,7 +371,21 @@ project_default_db_identifier() {
   if [[ -z "${name}" ]]; then
     name="$(sanitize_db_identifier "$(generate_secret)")"
   fi
-  printf '%s' "${name}"
+  truncate_identifier_with_hash "${name}" 64 6
+}
+
+project_default_db_user_identifier() {
+  local ref="${1:-${REPO_REF}}"
+  local name=""
+
+  name="$(sanitize_db_identifier "$(repo_name_from_ref "${ref}")")"
+  if [[ -z "${name}" ]]; then
+    name="$(sanitize_db_identifier "${PROJECT_SLUG:-}")"
+  fi
+  if [[ -z "${name}" ]]; then
+    name="$(sanitize_db_identifier "$(generate_secret)")"
+  fi
+  truncate_identifier_with_hash "${name}" 32 6
 }
 
 project_db_env_paths() {
@@ -366,6 +405,22 @@ project_db_env_paths() {
     for candidate in .env.local .env.production .env.credentials .env.production.local .env.development; do
       [[ -f "${project_dir}/server/${candidate}" ]] || continue
       printf '%s\n' "${project_dir}/server/${candidate}"
+    done
+  fi
+
+  if [[ -d "${project_dir}/client" ]]; then
+    printf '%s\n' "${project_dir}/client/.env"
+    for candidate in .env.local .env.production .env.credentials .env.production.local .env.development; do
+      [[ -f "${project_dir}/client/${candidate}" ]] || continue
+      printf '%s\n' "${project_dir}/client/${candidate}"
+    done
+  fi
+
+  if [[ -d "${project_dir}/dashboard" ]]; then
+    printf '%s\n' "${project_dir}/dashboard/.env"
+    for candidate in .env.local .env.production .env.credentials .env.production.local .env.development; do
+      [[ -f "${project_dir}/dashboard/${candidate}" ]] || continue
+      printf '%s\n' "${project_dir}/dashboard/${candidate}"
     done
   fi
 }
@@ -531,7 +586,7 @@ sync_project_db_env() {
   [[ -d "${project_dir}" ]] || return 0
 
   default_db_name="$(project_default_db_identifier "${REPO_REF}")"
-  default_db_user="${default_db_name}"
+  default_db_user="$(project_default_db_user_identifier "${REPO_REF}")"
 
   [[ -n "${db_name}" ]] || db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
   [[ -n "${db_user}" ]] || db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
@@ -1526,6 +1581,7 @@ seed_project_env_from_templates() {
   seed_project_env_from_templates_for_dir "${project_dir}"
   seed_project_env_from_templates_for_dir "${project_dir}/server"
   seed_project_env_from_templates_for_dir "${project_dir}/client"
+  seed_project_env_from_templates_for_dir "${project_dir}/dashboard"
 }
 
 ensure_meta_dir() {
@@ -1706,6 +1762,10 @@ install_deps() {
   if [[ -d client && -f client/package.json ]]; then
     npm_install_with_prefix_in_dir "client"
   fi
+
+  if [[ -d dashboard && -f dashboard/package.json ]]; then
+    npm_install_with_prefix_in_dir "dashboard"
+  fi
 }
 
 record_last_build() {
@@ -1762,6 +1822,11 @@ maybe_build() {
     fi
     if [[ -d client && -f client/package.json ]]; then
       if ! run_package_build_in_dir "client" "client"; then
+        status="failed"
+      fi
+    fi
+    if [[ -d dashboard && -f dashboard/package.json ]]; then
+      if ! run_package_build_in_dir "dashboard" "dashboard"; then
         status="failed"
       fi
     fi
@@ -2752,6 +2817,7 @@ do_install() {
   normalize_project_deployment_env_file "${APP_DIR}/.env"
   normalize_project_deployment_env_file "${APP_DIR}/server/.env"
   normalize_project_deployment_env_file "${APP_DIR}/client/.env"
+  normalize_project_deployment_env_file "${APP_DIR}/dashboard/.env"
   if [[ "${DB_MACHINE_ID}" == "custom" ]]; then
     custom_db_machine=1
   fi
@@ -2870,6 +2936,7 @@ do_update() {
     normalize_project_deployment_env_file "${APP_DIR}/.env"
     normalize_project_deployment_env_file "${APP_DIR}/server/.env"
     normalize_project_deployment_env_file "${APP_DIR}/client/.env"
+    normalize_project_deployment_env_file "${APP_DIR}/dashboard/.env"
     install_deps
     if ! maybe_build "${meta}" "${build_mode}"; then
       build_failed="yes"
