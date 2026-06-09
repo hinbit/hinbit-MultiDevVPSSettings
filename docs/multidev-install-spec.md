@@ -206,6 +206,27 @@ Typical symptoms:
 - `Table ... doesn't exist` => `db:init` did not run the support SQL
 - public domain opens the wrong app => app-map / nginx mapping mismatch
 
+## 10.1 Port-change checklist
+
+When a project changes port, treat it as a full runtime change, not just an env edit:
+- update the runtime port in the repo `.env` and `.env.example` if the app reads one
+- update `server/.env`, `client/.env`, or `dashboard/.env` when those folders own runtime values
+- restart or re-run the Node runtime so it actually loads the new port
+- regenerate nginx and `/etc/app-map.csv` so the public domain points at the new port
+- verify the new port locally on the VPS with `curl http://127.0.0.1:<port>/health` or `curl http://127.0.0.1:<port>/`
+- only after the local probe works, verify the public domain
+
+Common mistakes after a port change:
+- updated `.env` but not nginx => 502
+- updated nginx but did not restart Node => Node still listens on the old port => 502
+- PM2/systemd did not load the env file => the app falls back to a built-in port like `3000` or `config/twillo-settings.json`
+- two instances exist at once, one on the old port and one on the new port, and nginx is proxying the wrong one
+- `VITE_*` / `NEXT_PUBLIC_*` values are build-time frontend URLs, not the Node listen port, so changing them does not fix a 502 by itself
+
+Quick rule:
+- `curl http://127.0.0.1:<new-port>/health` works and the site still 502s => fix nginx/proxy mapping
+- `curl` to the new port fails => fix the Node startup or PM2/service env first
+
 ## 11. What the repo should document
 
 Before handing the app over to Multidev, the repo itself should explain:
@@ -237,6 +258,7 @@ The intended result is a one-run install that ends with:
 - install/update should run `build all` automatically after the dependency step, so root, `server/`, `client/`, and `dashboard/` builds are verified before handoff
 - after install, update, or restart, rerun app-sync after PM2 is online so `/etc/app-map.csv` and nginx are regenerated from the current project metadata
 - if the repo name is too long for a MySQL username, shorten the generated DB user to stay within MySQL's 32-character limit while keeping the repo name as the base; existing overlong DB usernames should be normalized on update too
+- keep `.env` files as config only; do not place huge generated payloads inside them, because the manage dashboard scans env files and a giant file can break the project list
 
 ## 13. GitHub SSH mapping
 
