@@ -1441,9 +1441,13 @@ update_meta_value() {
   local meta="$1"
   local key="$2"
   local value="$3"
+  local encoded_value="${value}"
   local tmp
   tmp="$(mktemp)"
-  awk -v key="${key}" -v value="${value}" '
+  if [[ "${key}" == *_JSON ]]; then
+    encoded_value="$(shell_quote "${value}")"
+  fi
+  awk -v key="${key}" -v value="${encoded_value}" '
     BEGIN { updated = 0 }
     {
       line = $0
