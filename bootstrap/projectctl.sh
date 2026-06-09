@@ -1653,6 +1653,26 @@ install_deps_in_dir() {
   )
 }
 
+npm_install_with_prefix_in_dir() {
+  local dir="$1"
+  [[ -f "${dir}/package.json" ]] || return 0
+
+  (
+    case "${dir}" in
+      .|./|'')
+        install_deps_in_dir "${PWD}"
+        ;;
+      *)
+        if [[ -f "${dir}/package-lock.json" ]]; then
+          npm --prefix "${dir}" ci
+        else
+          npm --prefix "${dir}" install
+        fi
+        ;;
+    esac
+  )
+}
+
 install_deps() {
   if [[ ! -f package.json ]]; then
     return
@@ -1675,11 +1695,11 @@ install_deps() {
   install_deps_in_dir "${PWD}"
 
   if [[ -d server && -f server/package.json ]]; then
-    install_deps_in_dir "server"
+    npm_install_with_prefix_in_dir "server"
   fi
 
   if [[ -d client && -f client/package.json ]]; then
-    install_deps_in_dir "client"
+    npm_install_with_prefix_in_dir "client"
   fi
 }
 
@@ -2722,6 +2742,7 @@ do_install() {
   local db_password=""
   local db_type=""
   local custom_db_machine=0
+  local build_mode="${PROJECTCTL_BUILD_MODE:-all}"
   IFS=$'\t' read -r db_name db_user db_password db_type < <(sync_project_db_env "${APP_DIR}")
   normalize_project_deployment_env_file "${APP_DIR}/.env"
   normalize_project_deployment_env_file "${APP_DIR}/server/.env"
@@ -2764,7 +2785,7 @@ do_install() {
   (
     cd "${APP_DIR}"
     install_deps
-    if ! maybe_build "${meta}" root; then
+    if ! maybe_build "${meta}" "${build_mode}"; then
       build_failed="yes"
     fi
   )
@@ -2810,6 +2831,7 @@ do_update() {
   local db_password=""
   local db_type=""
   local build_failed="no"
+  local build_mode="${PROJECTCTL_BUILD_MODE:-all}"
 
   slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
@@ -2841,7 +2863,7 @@ do_update() {
     normalize_project_deployment_env_file "${APP_DIR}/server/.env"
     normalize_project_deployment_env_file "${APP_DIR}/client/.env"
     install_deps
-    if ! maybe_build "${meta}" root; then
+    if ! maybe_build "${meta}" "${build_mode}"; then
       build_failed="yes"
     fi
   )

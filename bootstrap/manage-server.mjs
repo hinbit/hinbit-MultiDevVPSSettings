@@ -5695,15 +5695,7 @@ function renderPage() {
           }
           const pullMode = mode === 'merge-env2' ? 'merge-env' : mode;
           await runPullWithProgress(ref, pullMode);
-          const buildAllAfterPull = window.confirm(
-            'Pull completed for ' + decodeURIComponent(ref) + '. Build all now (root + server/client when present)?'
-          );
-          if (buildAllAfterPull) {
-            await runBuildWithProgress(ref, 'all');
-            showMessage(progressFlash, 'Build all completed for ' + decodeURIComponent(ref));
-          } else {
-            showMessage(progressFlash, 'Pull completed; build skipped.');
-          }
+          showMessage(progressFlash, 'Pull completed and build all ran for ' + decodeURIComponent(ref));
           if (mode === 'merge-env2') {
             await loadEnv(ref, { mergeMode: true });
             showMessage(envFlash, 'Paste extra .env keys in the overlay and click Merge overlay & save.');
@@ -7209,7 +7201,7 @@ async function handleRequest(req, res) {
             ? 'merge-env'
             : 'merge-env';
       touchProjectMeta(ref);
-      streamProjectCtl(res, ['update', ref], { PROJECTCTL_PULL_MODE: pullMode });
+      streamProjectCtl(res, ['update', ref], { PROJECTCTL_PULL_MODE: pullMode, PROJECTCTL_BUILD_MODE: 'all' });
       return;
     }
 

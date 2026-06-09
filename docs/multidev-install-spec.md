@@ -56,6 +56,7 @@ Rules:
 - duplicate keys inside a file or across files must be marked clearly in red in the merged summary
 - save actions write back to the selected file, not the merged view
 - if one project should answer to more than one domain, store a primary domain plus alias bindings, and let each alias carry its own env-file path for management and editing
+- when the install or pull flow resolves dependencies, root plus `server/` and `client/` should be installed separately, and the subfolder installs should use `npm --prefix <folder>` so each component is refreshed in place before build
 
 Examples:
 
@@ -233,6 +234,7 @@ The intended result is a one-run install that ends with:
 - correct runtime state
 - no manual rescue steps
 - if a project has multiple domains, verify every alias is present in the app map and that each alias points at the intended env file before reporting success
+- install/update should run `build all` automatically after the dependency step, so root, `server/`, and `client/` builds are verified before handoff
 
 ## 13. GitHub SSH mapping
 
