@@ -49,7 +49,7 @@ projectctl install --domain example.com --branch main --pm2-name example-app --e
 
 If the repo is private under a separate GitHub account, configure the SSH key in `/manage/ssh-keys/` with its GitHub user. The manage panel writes root's SSH config for you and `projectctl` will clone through the matching host alias (`github.com` for `shaykid`, `github-hinbit` for `hinbit`). `projectctl` clones as root, so uploading a key into the VPS is not enough by itself.
 
-Project SFTP upload users are now generated from the repo name part, not the full `owner/repo` string. That keeps the login name short enough for Linux user limits even when the owner name is long.
+Project SFTP upload users are now generated from the repo name part, not the full `owner/repo` string, and are capped at 12 characters total. That keeps the login name short enough for Linux user limits even when the owner name is long.
 
 If you install a project before DNS/TLS is ready, `projectctl` will now finish the install and leave the site on HTTP for the moment. Re-run `sudo app-sync.sh` after the domain resolves to the VPS to activate the SSL vhost.
 

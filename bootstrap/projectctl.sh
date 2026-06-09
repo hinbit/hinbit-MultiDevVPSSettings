@@ -756,21 +756,18 @@ normalize_login_name() {
 ssh_upload_user_from_slug() {
   local ref="$1"
   local clean
-  local hash
   local repo_part
-  local max_clean=22
+  local max_clean=12
 
   repo_part="${ref##*/}"
   if [[ "${ref}" != */* && "${ref}" == *-* ]]; then
     repo_part="${ref#*-}"
   fi
   clean="$(normalize_login_name "${repo_part}")"
-  hash="$(printf '%s' "${ref}" | sha1sum | awk '{print substr($1,1,6)}')"
   if (( ${#clean} < max_clean )); then
     max_clean=${#clean}
   fi
-  clean="${clean:0:max_clean}"
-  printf 'up-%s-%s' "${clean}" "${hash}"
+  printf 'up-%s' "${clean:0:max_clean}"
 }
 
 sql_quote() {
