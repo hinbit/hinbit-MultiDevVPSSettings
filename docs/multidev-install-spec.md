@@ -236,7 +236,7 @@ The intended result is a one-run install that ends with:
 - if a project has multiple domains, verify every alias is present in the app map and that each alias points at the intended env file before reporting success
 - install/update should run `build all` automatically after the dependency step, so root, `server/`, `client/`, and `dashboard/` builds are verified before handoff
 - after install, update, or restart, rerun app-sync after PM2 is online so `/etc/app-map.csv` and nginx are regenerated from the current project metadata
-- if the repo name is too long for a MySQL username, shorten the generated DB user to stay within MySQL's 32-character limit while keeping the repo name as the base
+- if the repo name is too long for a MySQL username, shorten the generated DB user to stay within MySQL's 32-character limit while keeping the repo name as the base; existing overlong DB usernames should be normalized on update too
 
 ## 13. GitHub SSH mapping
 

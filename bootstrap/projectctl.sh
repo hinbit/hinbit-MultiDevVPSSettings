@@ -606,6 +606,8 @@ sync_project_db_env() {
       [[ -n "${existing_password}" ]] && db_password="${existing_password}"
     fi
   fi
+  db_name="$(truncate_identifier_with_hash "${db_name}" 64 6)"
+  db_user="$(truncate_identifier_with_hash "${db_user}" 32 6)"
   [[ -n "${db_password}" ]] || db_password="$(generate_secret)"
   [[ -n "${db_type}" ]] || db_type="mysql"
 

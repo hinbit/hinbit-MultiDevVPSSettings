@@ -73,7 +73,7 @@ After every install or pull, `projectctl` runs `build all` automatically:
 After install, update, or restart, `projectctl` reruns `app-sync` after PM2 is back up so `/etc/app-map.csv` and the nginx vhost are regenerated from the current project metadata.
 `projectctl` now rewrites project `.env` files in a shell-safe form, so values with spaces are quoted automatically and remain safe for scripts that source the file.
 `projectctl` also skips common reserved ports when auto-picking a new app port, and it preserves split-app internal ports such as CherryWrapper's `PORT=8787` instead of overwriting them with the public UI port.
-When a repo name is too long for a MySQL username, `projectctl` shortens the generated DB user to stay within MySQL's 32-character limit while keeping the repo name as the base.
+When a repo name is too long for a MySQL username, `projectctl` shortens the generated DB user to stay within MySQL's 32-character limit while keeping the repo name as the base. Existing overlong DB usernames are normalized on update too, so old installs self-heal.
 
 Run an ad-hoc package script from an existing project:
 
