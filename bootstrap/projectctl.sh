@@ -1263,6 +1263,17 @@ project_db_machine_id() {
   printf '%s' "${machine_id:-${LOCAL_DB_MACHINE_ID}}"
 }
 
+project_db_effective_host() {
+  local host=""
+  host="$(project_db_value DB_HOST MYSQL_HOST DB_MACHINE_HOST POSTGRES_HOST)"
+  printf '%s' "${host}"
+}
+
+project_db_host_is_local() {
+  local host="${1:-}"
+  [[ "${host}" =~ ^(localhost|127\.0\.0\.1|::1)$ ]]
+}
+
 project_sidecar_ports() {
   local -a keys=(
     MYSQL_API_PORT
@@ -3048,6 +3059,9 @@ do_install() {
   local db_password=""
   local db_type=""
   local custom_db_machine=0
+  local effective_db_host=""
+  local bootstrap_db_machine_id=""
+  local bootstrap_db_ready="no"
   local build_mode="${PROJECTCTL_BUILD_MODE:-all}"
   IFS=$'\t' read -r db_name db_user db_password db_type < <(sync_project_db_env "${APP_DIR}")
   normalize_project_deployment_env_file "${APP_DIR}/.env"
@@ -3056,6 +3070,11 @@ do_install() {
   normalize_project_deployment_env_file "${APP_DIR}/dashboard/.env"
   if [[ "${DB_MACHINE_ID}" == "custom" ]]; then
     custom_db_machine=1
+  fi
+  effective_db_host="$(project_db_effective_host)"
+  bootstrap_db_machine_id="${DB_MACHINE_ID}"
+  if [[ "${custom_db_machine}" -eq 1 && -n "${effective_db_host}" && "$(project_db_host_is_local "${effective_db_host}" && printf yes || printf no)" == "yes" ]]; then
+    bootstrap_db_machine_id="${LOCAL_DB_MACHINE_ID}"
   fi
 
   PACKAGE_MANAGER="$(cd "${APP_DIR}" && detect_package_manager)"
@@ -3103,13 +3122,24 @@ do_install() {
     die "Build failed for ${REPO_REF}"
   fi
 
-  if [[ "${custom_db_machine}" -eq 0 ]]; then
-    if [[ -n "${db_name}" && -n "${db_user}" && -n "${db_password}" ]]; then
-      sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "" "${DB_MACHINE_ID}"
+  if [[ -n "${db_name}" && -n "${db_user}" && -n "${db_password}" ]]; then
+    if [[ "${custom_db_machine}" -eq 0 ]]; then
+      bootstrap_db_ready="yes"
+    elif project_db_host_is_local "${effective_db_host}"; then
+      bootstrap_db_ready="yes"
     fi
+  fi
+
+  if [[ "${bootstrap_db_ready}" == "yes" ]]; then
+    if [[ "${bootstrap_db_machine_id}" == "${LOCAL_DB_MACHINE_ID}" && "${custom_db_machine}" -eq 1 ]]; then
+      printf '[projectctl] custom DB machine points to local host for %s; bootstrapping through the local DB machine\n' "${REPO_REF}"
+    fi
+    sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "" "${bootstrap_db_machine_id}"
     run_install_db_scripts "${APP_DIR}"
   else
-    printf '[projectctl] custom DB machine selected for %s; skipping automatic DB bootstrap until MySQL Access is filled in.\n' "${REPO_REF}"
+    if [[ "${custom_db_machine}" -eq 1 ]]; then
+      printf '[projectctl] custom DB machine selected for %s; skipping automatic DB bootstrap until MySQL Access is filled in.\n' "${REPO_REF}"
+    fi
   fi
 
   ensure_project_ssh_user "${SSH_UPLOAD_USER}" "${SSH_UPLOAD_PASSWORD}" "${APP_DIR}"
@@ -3144,6 +3174,9 @@ do_update() {
   local db_type=""
   local build_failed="no"
   local build_mode="${PROJECTCTL_BUILD_MODE:-all}"
+  local effective_db_host=""
+  local bootstrap_db_machine_id=""
+  local bootstrap_db_ready="no"
 
   slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
@@ -3165,6 +3198,18 @@ do_update() {
 
   [[ -d "${APP_DIR}/.git" ]] || die "Missing git repo at ${APP_DIR}"
   IFS=$'\t' read -r db_name db_user db_password db_type < <(sync_project_db_env "${APP_DIR}")
+  effective_db_host="$(project_db_effective_host)"
+  bootstrap_db_machine_id="${DB_MACHINE_ID}"
+  if [[ "${DB_MACHINE_ID}" == "custom" && -n "${effective_db_host}" && "$(project_db_host_is_local "${effective_db_host}" && printf yes || printf no)" == "yes" ]]; then
+    bootstrap_db_machine_id="${LOCAL_DB_MACHINE_ID}"
+  fi
+  if [[ -n "${db_name}" && -n "${db_user}" && -n "${db_password}" ]]; then
+    if [[ "${DB_MACHINE_ID}" != "custom" ]]; then
+      bootstrap_db_ready="yes"
+    elif project_db_host_is_local "${effective_db_host}"; then
+      bootstrap_db_ready="yes"
+    fi
+  fi
 
   (
     cd "${APP_DIR}"
@@ -3187,8 +3232,11 @@ do_update() {
     die "Build failed for ${REPO_REF}"
   fi
 
-  if [[ "${DB_MACHINE_ID}" != "custom" && -n "${db_name}" && -n "${db_user}" && -n "${db_password}" ]]; then
-    sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "${MYSQL_ALLOWED_IPS:-}" "${DB_MACHINE_ID}"
+  if [[ "${bootstrap_db_ready}" == "yes" ]]; then
+    if [[ "${bootstrap_db_machine_id}" == "${LOCAL_DB_MACHINE_ID}" && "${DB_MACHINE_ID}" == "custom" ]]; then
+      printf '[projectctl] custom DB machine points to local host for %s; bootstrapping through the local DB machine\n' "${REPO_REF}"
+    fi
+    sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "${MYSQL_ALLOWED_IPS:-}" "${bootstrap_db_machine_id}"
   fi
   refresh_project_start_kind "${meta}"
 

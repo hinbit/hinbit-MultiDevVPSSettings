@@ -167,6 +167,7 @@ For custom DB machines:
 - moving data should be a separate action
 - the app should use the saved custom DB values after reconnect
 - DB host, user, password, name, and port should all be savable per project
+- if the custom DB host still points to the local VPS MySQL (`127.0.0.1`, `localhost`, or `::1`), Multidev should still bootstrap the local user/grants before `db:init` so sample-derived apps do not fail with `Access denied`
 
 ## 9. Install-time verification
 
