@@ -1,6 +1,6 @@
 # Multidev Sample Program Pack
 
-This pack describes four skeleton application shapes and their runnable `2run_` smoke-test copies.
+This pack describes four installable skeleton application shapes and their runnable `2run_` smoke-test copies.
 
 ## The four sample programs
 
@@ -23,8 +23,9 @@ This pack describes four skeleton application shapes and their runnable `2run_` 
 ## Install goal
 
 The idea is to let another Codex session copy one of these skeletons into a real app repo and have Multidev install it in one run without manual rescue.
+Each template already includes a root `package.json` with `start`, `dev`, and `check`, so the Multidev start detector has a real entrypoint to find.
 
 ## Samples layout
 
-- `samples/templates/{progname}` = skeleton only
+- `samples/templates/{progname}` = installable skeleton with root runtime files
 - `samples/2run_{progname}` = runnable quiz smoke test copy

@@ -32,6 +32,8 @@ Bootstrap for a clean Ubuntu VPS that hosts multiple Node/React apps behind ngin
 - [docs/multidev-sample-programs.md](docs/multidev-sample-programs.md)
 - [samples/README.md](samples/README.md)
 
+The sample pack now includes installable skeleton templates with root `package.json` start scripts, so sample-derived repos can be installed by Multidev without a manual rescue step.
+
 ## Usage
 
 Run the installer as root on a clean Ubuntu VPS:

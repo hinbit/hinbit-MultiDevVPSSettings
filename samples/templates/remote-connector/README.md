@@ -1,6 +1,6 @@
 # Remote DB + Connector App Template
 
-This is the skeleton version only.
+This is the installable skeleton version.
 
 ## Purpose
 
@@ -22,5 +22,5 @@ An app that uses a remote DB machine and an outbound connector such as 360dialog
 
 ## Install rule
 
-Future Codex sessions should copy this template into a real repo, keep the root scripts visible to Multidev, and make sure env values are complete before install.
+Future Codex sessions should copy this template into a real repo, keep the root `package.json` start script visible to Multidev, and make sure env values are complete before install.
 If the app needs special nginx/path wiring, put it in `VPS-INSTALL.MD` as a JSON block so Multidev can wire it automatically during install/update.

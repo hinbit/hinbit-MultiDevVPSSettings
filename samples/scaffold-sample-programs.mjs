@@ -197,7 +197,7 @@ function templateReadme(app) {
   return lines([
     `# ${app.title} Template`,
     '',
-    'This is the skeleton version only.',
+    'This is the installable skeleton version.',
     '',
     '## Purpose',
     '',
@@ -219,9 +219,80 @@ function templateReadme(app) {
     '',
     '## Install rule',
     '',
-    'Future Codex sessions should copy this template into a real repo, keep the root scripts visible to Multidev, and make sure env values are complete before install.',
+    'Future Codex sessions should copy this template into a real repo, keep the root `package.json` start script visible to Multidev, and make sure env values are complete before install.',
     'If the app needs special nginx/path wiring, put it in `VPS-INSTALL.MD` as a JSON block so Multidev can wire it automatically during install/update.',
   ]);
+}
+
+function templatePackageJson(app) {
+  return `${JSON.stringify(
+    {
+      name: `${app.slug}-template`,
+      version: '1.0.0',
+      private: true,
+      type: 'module',
+      scripts: {
+        start: 'node server.js',
+        dev: 'node --watch server.js',
+        check: 'node --check server.js',
+      },
+    },
+    null,
+    2,
+  )}\n`;
+}
+
+function templateServer(app) {
+  const envKeys = [
+    'PORT',
+    'APP_PORT',
+    'GUI_PORT',
+    'API_PORT',
+    'DB_MACHINE_ID',
+    'DB_HOST',
+    'DB_PORT',
+    'MYSQL_HOST',
+    'MYSQL_PORT',
+    'DB_NAME',
+    'DB_USER',
+    'ACTIVE_CONNECTOR',
+    'PUBLIC_URL',
+    'API_BASE_URL',
+  ];
+  const source = lines([
+    "import http from 'http';",
+    "import { URL } from 'url';",
+    '',
+    'const port = Number(process.env.PORT || 3000);',
+    `const title = process.env.APP_TITLE || ${JSON.stringify(app.title)};`,
+    `const envKeys = ${JSON.stringify(envKeys, null, 2)};`,
+    '',
+    'function envSummary() {',
+    '  return envKeys.reduce((acc, key) => {',
+    "    acc[key] = process.env[key] || '';",
+    '    return acc;',
+    '  }, {});',
+    '}',
+    '',
+    'function htmlPage() {',
+    '  const env = envSummary();',
+    "  return `<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>${title}</title><style>body{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;padding:0 20px;line-height:1.5}code,pre{background:#f5f5f5;padding:2px 5px;border-radius:4px}.card{border:1px solid #ddd;border-radius:12px;padding:16px;margin:16px 0}</style></head><body><h1>${title}</h1><p>Template skeleton for Multidev install testing.</p><div class=\"card\"><h2>Config</h2><pre>\${JSON.stringify(env, null, 2)}</pre></div><div class=\"card\"><h2>Install contract</h2><p>This repo must keep a root <code>package.json</code> with <code>start</code> so Multidev can detect the runtime without manual rescue.</p></div></body></html>`;",
+    '}',
+    '',
+    'const server = http.createServer((req, res) => {',
+    "  const url = new URL(req.url, `http://${req.headers.host}`);",
+    "  if (url.pathname === '/api/health') {",
+    "    res.writeHead(200, { 'Content-Type': 'application/json' });",
+    `    res.end(JSON.stringify({ ok: true, name: ${JSON.stringify(app.slug)}, port }));`,
+    '    return;',
+    '  }',
+    "  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });",
+    '  res.end(htmlPage());',
+    '});',
+    '',
+    "server.listen(port, () => console.log(`${title} listening on http://127.0.0.1:${port}`));",
+  ]);
+  return source;
 }
 
 function vpsInstallDoc(app, runnable = false) {
@@ -449,6 +520,8 @@ for (const app of apps) {
   const runBase = path.join(samplesDir, `2run_${app.slug}`);
 
   write(path.join(templateBase, 'README.md'), templateReadme(app));
+  write(path.join(templateBase, 'package.json'), templatePackageJson(app));
+  write(path.join(templateBase, 'server.js'), templateServer(app));
   write(path.join(templateBase, '.env.example'), lines(app.envExample));
   write(path.join(templateBase, 'VPS-INSTALL.MD'), vpsInstallDoc(app, false));
 

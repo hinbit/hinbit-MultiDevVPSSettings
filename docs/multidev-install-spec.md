@@ -38,6 +38,7 @@ Prefer these canonical script names in the root `package.json`:
 - `db:migrate` for schema evolution
 
 If the real runtime or DB command lives in a subfolder, expose a root alias for it.
+Sample-derived repos must still ship a root `package.json` with `start`, even if the real implementation lives under `server/`, `client/`, or `dashboard/`.
 
 Avoid:
 - commands that only work after `cd server`
