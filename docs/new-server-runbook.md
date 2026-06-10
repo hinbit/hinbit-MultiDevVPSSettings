@@ -213,6 +213,22 @@ After pull, the UI also asks whether to run `build all`:
 The merge path also normalizes project `.env` files into a shell-safe format, so values with spaces are quoted automatically and keep working in scripts that source the file.
 When choosing new ports, `projectctl` skips common reserved ports and preserves split-app internal ports instead of overwriting them with the public app port.
 
+### Repo-specific deploy scripts
+
+Some apps ship their own root deploy script, such as `full_vps_deploy`. When that exists and is the repo’s documented install path, use it after the pull to keep the repo’s own build and DB steps in one place.
+
+For Mondial-style repos, the expected flow is:
+
+1. pull to the GitHub tip
+2. install dev dependencies in root plus `server/` and `client/`
+3. run `db:init`
+4. run `db:seed`
+5. build the client
+6. restart the matching PM2 app
+7. verify the public domain and local health check
+
+The key lesson from the `vite: not found` incident is that the repo must install devDependencies before the client build, otherwise the deploy can look “up to date” while still failing on the build step.
+
 ## 8. Env backup and restore
 
 The manage dashboard supports:
