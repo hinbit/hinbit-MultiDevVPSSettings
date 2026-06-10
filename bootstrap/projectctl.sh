@@ -2544,6 +2544,20 @@ verify_https_vhost() {
   fi
 }
 
+prepare_project_domain_mapping() {
+  local label="${1:-${REPO_REF}}"
+  local domain="${2:-${APP_DOMAIN:-}}"
+  local port="${3:-${APP_PORT:-}}"
+  local https="${4:-${APP_HTTPS:-yes}}"
+
+  [[ -n "${domain}" ]] || return 0
+  [[ -n "${port}" ]] || return 0
+
+  sync_app_map
+  verify_project_mapping "${label}" "${domain}" "${port}" "${https}"
+  verify_https_vhost "${domain}" "${https}"
+}
+
 app_map_port_for_domain() {
   local domain="$1"
 
@@ -3110,6 +3124,8 @@ do_install() {
     sync_project_db_machine_env "custom" "" "" "" "" "Custom / manual DB machine" "Configure DB host and credentials in MySQL Access after install"
   fi
 
+  prepare_project_domain_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
+
   (
     cd "${APP_DIR}"
     install_deps
@@ -3222,6 +3238,7 @@ do_update() {
     normalize_project_deployment_env_file "${APP_DIR}/dashboard/.env"
     APP_PROXY_ROUTES_JSON="$(project_vps_install_proxy_routes_json "${APP_DIR}")"
     update_meta_value "${meta}" "APP_PROXY_ROUTES_JSON" "${APP_PROXY_ROUTES_JSON}"
+    prepare_project_domain_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
     install_deps
     if ! maybe_build "${meta}" "${build_mode}"; then
       build_failed="yes"

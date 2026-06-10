@@ -120,7 +120,8 @@ Recommended order:
 5. build if needed
 6. start the app
 
-After a pull, Multidev should also offer a `build all` choice that runs the root build script plus `server/`, `client/`, and `dashboard/` build scripts when present.
+After a pull, Multidev should first re-run the domain mapping and HTTPS vhost checks, then run `build all` so any missing app-map or vhost wiring is repaired before the build is considered done.
+`build all` runs the root build script plus `server/`, `client/`, and `dashboard/` build scripts when present.
 
 The app should not require a human to create the DB user manually after install.
 

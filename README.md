@@ -68,6 +68,7 @@ projectctl uninstall owner/repo
 `projectctl update` now prompts with two choices when local changes exist:
 - `Merge .env (default)` keeps the current VPS env values after the pull and appends any new upstream env keys
 - `Stash all` stashes every local change before pulling
+After every pull, `projectctl` now rechecks domain mapping and HTTPS wiring before `build all`, so a missing app-map entry is repaired during the pull run instead of surfacing as a broken deploy later.
 After every install or pull, `projectctl` runs dependency installs in the root plus `server/`, `client/`, and `dashboard/` when those folders exist. The subfolder installs use `npm --prefix ...` so each component is installed in its own directory before build and restart.
 After every install or pull, `projectctl` runs `build all` automatically:
 - `build all` runs the root build script plus `server/`, `client/`, and `dashboard/` build scripts when they exist
