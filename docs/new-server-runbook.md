@@ -37,6 +37,7 @@ The installer will set up:
 - nginx
 - Node.js
 - PM2
+- Docker engine
 - MySQL on the app server if needed
 - certbot
 - phpMyAdmin
@@ -127,6 +128,8 @@ If HTTPS is not ready yet, the install still completes and the app is left on HT
 The `/manage/` install flow also scans root, `server/`, `client/`, and `dashboard/` package manifests for DB-related scripts and shows the runnable ones after install.
 Use `/manage/tls/` to store a shared base-domain certificate like `seach.co.il` if you want new subdomains to inherit it automatically until a project-specific certificate is added.
 `projectctl install` and `projectctl update` also normalize deployment-oriented env keys from local/dev values to server/web values when the repo ships them in `.env` or `.env.example`-style templates. In practice, this means values like `SERVER_LOCATION=local` are rewritten for the VPS/web runtime, and URL-style settings are pointed at the installed domain when the template provides a production/web target.
+
+`projectctl install --runtime docker` is available when you want the app supervised as a Docker container instead of directly by PM2. The container runs with host networking, so local MySQL on `127.0.0.1` still works and remote DB machine settings keep working as normal.
 
 ```bash
 projectctl install --domain example.com --branch main --pm2-name example-app --db-machine local-current owner/repo

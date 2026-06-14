@@ -47,6 +47,7 @@ Install a new GitHub project and map it to a domain:
 ```bash
 projectctl install --domain example.com --branch main --pm2-name example-app owner/repo
 projectctl install --domain example.com --branch main --pm2-name example-app --env-file /root/app.env --entrypoint server/index.js owner/repo
+projectctl install --domain example.com --branch main --pm2-name example-app --runtime docker owner/repo
 ```
 
 If the repo is private under a separate GitHub account, configure the SSH key in `/manage/ssh-keys/` with its GitHub user. The manage panel writes root's SSH config for you and `projectctl` will clone through the matching host alias (`github.com` for `shaykid`, `github-hinbit` for `hinbit`). `projectctl` clones as root, so uploading a key into the VPS is not enough by itself.
@@ -110,6 +111,7 @@ Optional environment variables:
 - `--branch` and `--pm2-name` on `projectctl install` to override repo branch and PM2 process name
 - `--env-file` to inject a repo `.env` before build/start
 - `--entrypoint` to force the PM2-managed runtime file or command when auto-detection is not enough
+- `--runtime docker` to run the app inside a Docker container with host networking while still using the project env files and the same local/remote MySQL settings
 - when a domain is set, `VITE_ALLOWED_HOSTS` and `CORS_ORIGIN` are exported into the PM2 runtime
 
 Manage access can be exposed either directly on public `80/443` with nginx and Let's Encrypt, or through Cloudflare Tunnel.

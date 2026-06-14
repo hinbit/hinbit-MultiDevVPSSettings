@@ -37,6 +37,8 @@ Prefer these canonical script names in the root `package.json`:
 - `db:seed` for demo data and required users
 - `db:migrate` for schema evolution
 
+If the app is intended to run in Docker on Multidev, it should still keep the same root contract and scripts. Multidev can launch it with `projectctl install --runtime docker`, which runs the app inside a host-network container so local MySQL on `127.0.0.1` and remote DB machines both continue to work through the same env files.
+
 If the real runtime or DB command lives in a subfolder, expose a root alias for it.
 Sample-derived repos must still ship a root `package.json` with `start`, even if the real implementation lives under `server/`, `client/`, or `dashboard/`.
 

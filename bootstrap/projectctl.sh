@@ -46,7 +46,7 @@ die() {
 usage() {
   cat <<'EOF'
 Usage:
-  projectctl install [--domain example.com] [--https yes|no] [--branch main] [--pm2-name name] [--port N] [--db-machine id] [--env-file path] [--entrypoint path] owner/repo
+  projectctl install [--domain example.com] [--https yes|no] [--branch main] [--pm2-name name] [--port N] [--db-machine id] [--runtime auto|node|docker] [--env-file path] [--entrypoint path] owner/repo
   projectctl update owner/repo
   projectctl build [--all] owner/repo
   projectctl restart owner/repo
@@ -74,6 +74,7 @@ Defaults:
   - `projectctl ssh` shows or rotates the project's SSH/SFTP upload credentials
   - `projectctl update` prompts before pulling local changes; set PROJECTCTL_PULL_MODE=merge-env|stash-all to force the choice
   - `projectctl build` runs the root build script, or `--all` to also build server/ and client/ when they exist
+  - `projectctl install --runtime docker` runs the app through a Docker container with host networking so local MySQL still works; use `auto` to keep the existing node/PM2 flow
 EOF
 }
 
@@ -2047,6 +2048,84 @@ start_kind_target() {
   esac
 }
 
+project_runtime_mode() {
+  local runtime="${DEPLOY_RUNTIME:-auto}"
+
+  case "${runtime,,}" in
+    auto|node|docker)
+      printf '%s' "${runtime,,}"
+      ;;
+    *)
+      printf 'auto'
+      ;;
+  esac
+}
+
+package_runner_command() {
+  local script="$1"
+
+  case "${PACKAGE_MANAGER:-npm}" in
+    pnpm) printf 'pnpm run %q' "${script}" ;;
+    corepack-pnpm) printf 'corepack pnpm run %q' "${script}" ;;
+    yarn) printf 'yarn %q' "${script}" ;;
+    corepack-yarn) printf 'corepack yarn %q' "${script}" ;;
+    *) printf 'npm run %q' "${script}" ;;
+  esac
+}
+
+docker_package_runner_command() {
+  local script="$1"
+
+  case "${PACKAGE_MANAGER:-npm}" in
+    pnpm|corepack-pnpm) printf 'corepack pnpm run %q' "${script}" ;;
+    yarn|corepack-yarn) printf 'corepack yarn %q' "${script}" ;;
+    *) printf 'npm run %q' "${script}" ;;
+  esac
+}
+
+docker_runtime_command() {
+  local runtime_cmd=""
+  local env_prefix="set -a; [ -f .env ] && . ./.env; [ -f .env.machine ] && . ./.env.machine; [ -f server/.env ] && . ./server/.env; [ -f client/.env ] && . ./client/.env; [ -f dashboard/.env ] && . ./dashboard/.env; set +a;"
+
+  case "${START_KIND}" in
+    npm-start)
+      runtime_cmd="$(docker_package_runner_command start)"
+      ;;
+    npm-prod)
+      runtime_cmd="$(docker_package_runner_command prod)"
+      ;;
+    npm-dev)
+      runtime_cmd="$(docker_package_runner_command dev)"
+      ;;
+    node:*)
+      runtime_cmd="node $(shell_quote "${START_TARGET}")"
+      ;;
+    serve:*)
+      runtime_cmd="npx --yes serve $(shell_quote "${START_TARGET}") -l $(shell_quote "${APP_PORT}") --single"
+      ;;
+    ecosystem:*)
+      if package_has_script start; then
+        runtime_cmd="$(docker_package_runner_command start)"
+      elif package_has_script prod; then
+        runtime_cmd="$(docker_package_runner_command prod)"
+      elif package_has_script dev; then
+        runtime_cmd="$(docker_package_runner_command dev)"
+      else
+        die "Docker runtime requires a package.json start/prod/dev script when ecosystem.config.js is the detected start kind"
+      fi
+      ;;
+    *)
+      die "Unsupported Docker runtime start kind: ${START_KIND}"
+      ;;
+  esac
+
+  printf 'docker run --rm --network host -v %s:%s -w %s node:20 bash -lc %s' \
+    "$(shell_quote "${APP_DIR}")" \
+    "$(shell_quote "${APP_DIR}")" \
+    "$(shell_quote "${APP_DIR}")" \
+    "$(shell_quote "${env_prefix} export TZ=Asia/Jerusalem; export NODE_ENV=production; export PORT=$(shell_quote "${APP_PORT}"); if [[ -n $(shell_quote "${APP_DOMAIN:-}") ]]; then export VITE_ALLOWED_HOSTS=$(shell_quote "${APP_DOMAIN}"); export CORS_ORIGIN=$(shell_quote "https://${APP_DOMAIN}"); fi; exec ${runtime_cmd}")"
+}
+
 ecosystem_pm2_name() {
   local ecosystem_file="${1:-}"
   local resolved_file=""
@@ -2420,6 +2499,7 @@ BRANCH=${BRANCH}
 GIT_REMOTE=${GIT_REMOTE}
 START_KIND=${START_KIND}
 START_TARGET=${START_TARGET}
+DEPLOY_RUNTIME=${DEPLOY_RUNTIME:-auto}
 DB_MACHINE_ID=${DB_MACHINE_ID:-${LOCAL_DB_MACHINE_ID}}
 MYSQL_ALLOWED_IPS=${MYSQL_ALLOWED_IPS:-}
 SSH_UPLOAD_USER=${SSH_UPLOAD_USER:-}
@@ -3021,8 +3101,9 @@ do_install() {
   local pm2_name="${5:-}"
   local forced_port="${6:-}"
   local db_machine_id="${7:-}"
-  local env_file="${8:-}"
-  local entrypoint="${9:-}"
+  local deploy_runtime="${8:-auto}"
+  local env_file="${9:-}"
+  local entrypoint="${10:-}"
   local build_failed="no"
 
   REPO_REF="$(repo_ref_from_arg "${ref}")"
@@ -3037,6 +3118,7 @@ do_install() {
   APP_DOMAIN="${domain:-}"
   APP_HTTPS="${https:-yes}"
   APP_TYPE="project"
+  DEPLOY_RUNTIME="$(normalize_deploy_runtime "${deploy_runtime}")"
   GIT_REMOTE="origin"
   SSH_UPLOAD_USER="$(ssh_upload_user_from_slug "${PROJECT_SLUG}")"
   SSH_UPLOAD_PASSWORD="$(generate_secret)"
@@ -3197,6 +3279,7 @@ do_update() {
   slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
+  DEPLOY_RUNTIME="$(normalize_deploy_runtime "${DEPLOY_RUNTIME:-auto}")"
   if [[ -z "${DB_MACHINE_ID:-}" ]]; then
     DB_MACHINE_ID="$(project_db_machine_id)"
   fi
@@ -3362,8 +3445,8 @@ do_status() {
     DB_MACHINE_ID="$(project_db_machine_id)"
   fi
 
-  printf 'repo: %s\npath: %s\npm2: %s\nport: %s\ndomain: %s\nhttps: %s\nkind: %s\n' \
-    "${REPO_REF}" "${APP_DIR}" "${PM2_NAME}" "${APP_PORT}" "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}" "${START_KIND}"
+  printf 'repo: %s\npath: %s\npm2: %s\nport: %s\ndomain: %s\nhttps: %s\nkind: %s\nruntime: %s\n' \
+    "${REPO_REF}" "${APP_DIR}" "${PM2_NAME}" "${APP_PORT}" "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}" "${START_KIND}" "${DEPLOY_RUNTIME:-auto}"
   printf 'protected: %s\n' "$(project_auth_enabled "${APP_DOMAIN:-}" && printf yes || printf no)"
   printf 'mysql_allowed_ips: %s\n' "${MYSQL_ALLOWED_IPS:-}"
   printf 'db_machine_id: %s\n' "${DB_MACHINE_ID:-${LOCAL_DB_MACHINE_ID}}"
@@ -4024,6 +4107,7 @@ main() {
       local branch=""
       local pm2_name=""
       local db_machine_id=""
+      local deploy_runtime="auto"
       local env_file=""
       local entrypoint=""
       while [[ $# -gt 0 ]]; do
@@ -4052,6 +4136,10 @@ main() {
             db_machine_id="${2:-}"
             shift 2
             ;;
+          --runtime)
+            deploy_runtime="${2:-auto}"
+            shift 2
+            ;;
           --env-file)
             env_file="${2:-}"
             shift 2
@@ -4070,7 +4158,7 @@ main() {
         esac
       done
       [[ $# -eq 1 ]] || { usage; exit 1; }
-      do_install "$1" "${domain}" "${https}" "${branch}" "${pm2_name}" "${port}" "${db_machine_id}" "${env_file}" "${entrypoint}"
+      do_install "$1" "${domain}" "${https}" "${branch}" "${pm2_name}" "${port}" "${db_machine_id}" "${deploy_runtime}" "${env_file}" "${entrypoint}"
       ;;
     update)
       [[ $# -eq 1 ]] || { usage; exit 1; }

@@ -1745,6 +1745,7 @@ function projectView() {
       branch: project.BRANCH || '',
       https: project.APP_HTTPS || '',
       kind: project.START_KIND || '',
+      runtime: project.DEPLOY_RUNTIME || 'auto',
       type: project.APP_TYPE || '',
       packageManager: project.PACKAGE_MANAGER || '',
       mysqlAllowedIps: project.MYSQL_ALLOWED_IPS || '',
@@ -2930,6 +2931,7 @@ function renderProjectRows(projects) {
           <td>
             <div>${project.domain ? `<a href="https://${escapeHtml(project.domain)}/" target="_blank" rel="noreferrer">${escapeHtml(project.domain)}</a>` : '<span class="muted">n/a</span>'}</div>
             <div class="small">${project.https === 'yes' ? 'HTTPS' : 'HTTP only'} · <span class="pill ${escapeHtml(project.sslStatusClass || 'neutral')}">${escapeHtml(project.sslStatus || 'n/a')}</span></div>
+            <div class="small">runtime: <code>${escapeHtml(project.runtime || 'auto')}</code></div>
           </td>
           <td>
             <div><code>${escapeHtml(project.pm2 || '')}</code></div>
@@ -2947,6 +2949,7 @@ function renderProjectRows(projects) {
           <td>${escapeHtml(project.branch || '')}</td>
           <td class="small">
             kind: ${escapeHtml(project.kind || '')}<br>
+            runtime: ${escapeHtml(project.runtime || 'auto')}<br>
             type: ${escapeHtml(project.type || '')}<br>
             pm: ${escapeHtml(project.packageManager || '')}<br>
             restarts: ${escapeHtml(String(project.restarts ?? 0))}<br>
@@ -3987,6 +3990,14 @@ function renderPage() {
         </label>
         <label>Entrypoint
           <input id="entrypoint" placeholder="server/index.js">
+        </label>
+        <label>Deploy runtime
+          <select id="deployRuntime">
+            <option value="auto" selected>Auto</option>
+            <option value="node">Node / PM2</option>
+            <option value="docker">Docker</option>
+          </select>
+          <div class="small">Docker runs the app in a host-network container so local MySQL on 127.0.0.1 still works.</div>
         </label>
         <label>DB machine
           <select id="dbMachineId">${dbMachineOptions}</select>
@@ -6430,6 +6441,7 @@ function renderPage() {
       const branch = document.getElementById('branch').value.trim();
       const pm2Name = document.getElementById('pm2Name').value.trim();
       const port = document.getElementById('port').value.trim();
+      const deployRuntime = document.getElementById('deployRuntime').value.trim() || 'auto';
       const dbMachineId = dbMachineSelect ? dbMachineSelect.value : '${LOCAL_DB_MACHINE_ID}';
       const entrypoint = document.getElementById('entrypoint').value.trim();
       const envText = document.getElementById('envText').value;
@@ -6440,6 +6452,7 @@ function renderPage() {
         'Branch: ' + (branch || '(default)'),
         'PM2: ' + (pm2Name || '(default)'),
         'Port: ' + (port || '(auto)'),
+        'Runtime: ' + (deployRuntime || '(auto)'),
         'DB machine: ' + (dbMachineId || '(local-current)'),
         'Entrypoint: ' + (entrypoint || '(auto-detect)'),
       ].join('\\n');
@@ -6456,6 +6469,7 @@ function renderPage() {
         branch,
         pm2Name,
         port,
+        deployRuntime,
         dbMachineId,
         entrypoint,
         envText,
@@ -6472,6 +6486,8 @@ function renderPage() {
           const el = document.getElementById(id);
           if (el) el.value = '';
         }
+        const deployRuntimeEl = document.getElementById('deployRuntime');
+        if (deployRuntimeEl) deployRuntimeEl.value = 'auto';
         const envText = document.getElementById('envText');
         if (envText) envText.value = '';
         const accessPassword = document.getElementById('accessPassword');
@@ -6533,6 +6549,8 @@ function renderPage() {
         const el = document.getElementById(id);
         if (el) el.value = '';
       }
+      const deployRuntimeEl = document.getElementById('deployRuntime');
+      if (deployRuntimeEl) deployRuntimeEl.value = 'auto';
       const envText = document.getElementById('envText');
       if (envText) envText.value = '';
       const accessPassword = document.getElementById('accessPassword');
@@ -6979,6 +6997,7 @@ async function handleRequest(req, res) {
       if (body.branch) args.push('--branch', String(body.branch).trim());
       if (body.pm2Name) args.push('--pm2-name', String(body.pm2Name).trim());
       if (body.port) args.push('--port', String(body.port).trim());
+      if (body.deployRuntime) args.push('--runtime', String(body.deployRuntime).trim());
       if (body.dbMachineId) args.push('--db-machine', String(body.dbMachineId).trim());
       if (body.entrypoint) args.push('--entrypoint', String(body.entrypoint).trim());
       let tempEnv = '';

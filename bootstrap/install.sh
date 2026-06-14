@@ -78,6 +78,7 @@ EOF
     certbot \
     python3-certbot-nginx \
     mysql-server \
+    docker.io \
     php-fpm \
     php-cli \
     php-mysql \
@@ -98,6 +99,8 @@ EOF
     log "Installing PM2"
     npm install -g pm2
   fi
+
+  systemctl enable --now docker >/dev/null 2>&1 || true
 
   corepack enable >/dev/null 2>&1 || true
 
