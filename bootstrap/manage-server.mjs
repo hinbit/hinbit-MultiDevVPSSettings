@@ -3989,7 +3989,8 @@ function renderPage() {
           <input id="port" placeholder="auto">
         </label>
         <label>Entrypoint
-          <input id="entrypoint" placeholder="server/index.js">
+          <input id="entrypoint" placeholder="auto-detect" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          <div class="small">Leave blank to auto-detect. The install flow will still remap nginx and app-map to the chosen port.</div>
         </label>
         <label>Deploy runtime
           <select id="deployRuntime">
@@ -4011,9 +4012,10 @@ function renderPage() {
         <div class="password-field">
           <label for="accessPassword">Project access password</label>
           <div class="password-wrap">
-            <input id="accessPassword" type="password" placeholder="Optional: set a password for the project domain after install">
+            <input id="accessPassword" type="password" placeholder="Optional: set a password after install" autocomplete="new-password" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true">
             <button id="toggleAccessPasswordBtn" class="ghost" type="button" aria-label="Show password">👁</button>
           </div>
+          <div class="small">Leave blank if you do not want project access protection. The field clears after a successful install.</div>
         </div>
       </div>
       <div class="space"></div>
@@ -6452,6 +6454,7 @@ function renderPage() {
         'Branch: ' + (branch || '(default)'),
         'PM2: ' + (pm2Name || '(default)'),
         'Port: ' + (port || '(auto)'),
+        'Port mapping: app-map + nginx will be synced to this port',
         'Runtime: ' + (deployRuntime || '(auto)'),
         'DB machine: ' + (dbMachineId || '(local-current)'),
         'Entrypoint: ' + (entrypoint || '(auto-detect)'),

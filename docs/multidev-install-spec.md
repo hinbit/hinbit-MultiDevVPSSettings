@@ -190,6 +190,7 @@ After install or pull, verify these in order:
 12. if a domain is set, Multidev verifies `/etc/app-map.csv` and the generated nginx vhost point to the installed port
 13. if the mapping is stale, Multidev resyncs once and fails loudly if the domain still points at the wrong port
 14. after PM2 is online, Multidev runs an HTTP host-header smoke test against the installed domain and compares it against the local app response; if the domain serves different content, installation fails loudly
+15. after a successful install, the install form should clear the default entrypoint and project access password so the next install starts from a clean state
 
 If anything is wrong, fix it before handoff.
 

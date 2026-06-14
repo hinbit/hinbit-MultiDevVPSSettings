@@ -97,6 +97,7 @@ Projects can now keep additional domain aliases from the `Domains` panel. Each a
 After install or update, `projectctl` now verifies that PM2 is actually online, retries the restart once if it is not, and fails loudly if the project still does not come up.
 After install or update, `projectctl` also verifies that the domain maps to the installed port in `/etc/app-map.csv` and in the generated nginx vhost, then resyncs once if the mapping is stale.
 After PM2 is online, `projectctl` also runs a host-header HTTP smoke test against the installed domain, compares it against the local app response, and fails loudly if the domain serves different content.
+The install form clears the default entrypoint and project access password after a successful install so the next install starts clean.
 If the repo defines root-level `db:init` and `db:seed` scripts, a fresh install runs them automatically so the new database starts with schema and seed data.
 If a project changes port, follow the port-change checklist in `docs/multidev-install-spec.md` before handoff so `.env`, Node, PM2, nginx, and app-map all agree.
 If the app needs special path routing, add a root `VPS-INSTALL.MD` file with a JSON route block so Multidev can wire extra nginx locations automatically during install/update.
