@@ -138,6 +138,59 @@ If the app needs support tables outside the main schema:
 - put them in a separate support SQL file
 - make `db:init` apply them every time
 
+## 6.1 Exact repo shape for reliable first install
+
+The safest structure for Multidev is:
+
+```text
+repo-root/
+  package.json
+  README.md
+  CODEX.md
+  PREINSTALL_REQUIREMENTS.md
+  VPS-INSTALL.MD
+  .env.example
+  .env.production.example
+  server/
+    package.json
+    .env.example
+    .env.production.example
+    index.js
+  client/
+    package.json
+    .env.example
+    .env.production.example
+  dashboard/
+    package.json
+    .env.example
+    .env.production.example
+```
+
+Minimum root contract:
+- root `package.json` exists
+- root `package.json` has `start`
+- root `package.json` has `build`
+- root `package.json` has `install:all`, `db:init`, and `db:seed` when the app needs them
+- root scripts proxy into `server/`, `client/`, or `dashboard/` when that is where the real code lives
+- env templates exist before the first install
+- route special cases are documented in root `VPS-INSTALL.MD`
+
+Good pattern:
+- Multidev installs the root app first
+- subfolders are optional, but if they exist, they also have package.json files
+- root scripts are the stable install surface
+- `projectctl` can install root deps, then `npm --prefix server install`, `npm --prefix client install`, and `npm --prefix dashboard install`
+- `build all` can then verify every runtime piece before handoff
+
+Bad pattern:
+- `cd server && npm start` as the only real entrypoint
+- missing root `package.json`
+- missing `.env.example` keys
+- hidden laptop-only setup steps
+- generated blobs or huge data inside `.env`
+
+If the app must answer on more than one route or domain, keep the root scripts stable and document the routing in `VPS-INSTALL.MD`.
+
 ## 7. Start kind
 
 Multidev needs a clear start path it can infer.
