@@ -3301,6 +3301,7 @@ do_update() {
   DEPLOY_RUNTIME="$(normalize_deploy_runtime "${DEPLOY_RUNTIME:-auto}")"
   if [[ -n "${APP_DOMAIN:-}" ]]; then
     APP_DOMAIN="$(normalize_domain "${APP_DOMAIN}")"
+    update_meta_value "${meta}" "APP_DOMAIN" "${APP_DOMAIN}"
   fi
   if [[ -z "${DB_MACHINE_ID:-}" ]]; then
     DB_MACHINE_ID="$(project_db_machine_id)"
