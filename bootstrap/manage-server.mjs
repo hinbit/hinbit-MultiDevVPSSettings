@@ -4022,7 +4022,7 @@ function renderPage() {
         </label>
         <label>VPN profile
           <input id="vpnProfile" placeholder="CyberGhost / wireguard-prod / none" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
-          <div class="small">Optional per-project egress profile. If a hook exists at <code>/etc/vps-vpn-profiles/&lt;profile&gt;.sh</code>, install/update will run it.</div>
+          <div class="small">Optional per-project egress profile. Leave blank or use <code>none</code> for no VPN. If a hook exists at <code>/etc/vps-vpn-profiles/&lt;profile&gt;.sh</code>, install/update will run it.</div>
         </label>
       </div>
       <div class="space"></div>
