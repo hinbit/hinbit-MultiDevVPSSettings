@@ -230,6 +230,22 @@ Bad pattern:
 
 If the app must answer on more than one route or domain, keep the root scripts stable and document the routing in `VPS-INSTALL.MD`.
 
+## 6.7 Per-project VPN / egress profile
+
+Some apps need different outbound IPs or a separate tunnel. Multidev supports that as an install-time option.
+
+Use `projectctl install --vpn-profile <name>` or the `VPN profile` field in the install UI.
+Leave it blank, or type `none`, when you do not want a per-project VPN.
+
+Rules:
+- store the selected profile in the project metadata and env files
+- keep the normal nginx/app-map/public-domain wiring unchanged
+- the VPN profile only affects outbound traffic for that project
+- if an executable hook exists at `/etc/vps-vpn-profiles/<name>.sh`, Multidev runs it during install and update
+- the hook receives project context via env vars such as `PROJECT_VPN_PROFILE`, `PROJECT_VPN_STAGE`, `PROJECT_REPO`, `PROJECT_SLUG`, `PROJECT_DIR`, `PROJECT_DOMAIN`, `PROJECT_PORT`, and `PROJECT_DB_MACHINE_ID`
+
+If a project needs a bundled VPN config, document how to activate it in the repo and keep the hook name stable. The Multidev manager should treat the profile name as the user-visible choice, not the implementation detail of the tunnel.
+
 ## 7. Start kind
 
 Multidev needs a clear start path it can infer.

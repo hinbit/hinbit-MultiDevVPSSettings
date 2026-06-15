@@ -1723,6 +1723,7 @@ function projectView() {
   return readProjects().map((project) => {
     const proc = byName.get(project.PM2_NAME || project.PROJECT_SLUG);
     const env = proc?.pm2_env || {};
+    const projectEnv = project.APP_DIR ? pickEnvDetails(project.APP_DIR) : { env: {} };
     const { db } = pickDbDetails(project.APP_DIR || '');
     const projectMachineContext = resolveProjectMysqlMachine(project, project.APP_DIR || '');
     const projectMachine = projectMachineContext.machine || null;
@@ -1755,6 +1756,7 @@ function projectView() {
       runtime: project.DEPLOY_RUNTIME || 'auto',
       type: project.APP_TYPE || '',
       packageManager: project.PACKAGE_MANAGER || '',
+      vpnProfile: project.VPN_PROFILE || project.VPN_PROFILE_NAME || project.VPN_EGRESS_PROFILE || projectEnv.env.VPN_PROFILE || projectEnv.env.VPN_PROFILE_NAME || projectEnv.env.VPN_EGRESS_PROFILE || '',
       duplicate: Boolean(project.duplicate),
       duplicateSourceRepoRef: project.duplicateSourceRepoRef || '',
       duplicateEnvMode: project.duplicateEnvMode || '',
@@ -2945,6 +2947,7 @@ function renderProjectRows(projects) {
             <div>${project.domain ? `<a href="https://${escapeHtml(project.domain)}/" target="_blank" rel="noreferrer">${escapeHtml(project.domain)}</a>` : '<span class="muted">n/a</span>'}</div>
             <div class="small">${project.https === 'yes' ? 'HTTPS' : 'HTTP only'} · <span class="pill ${escapeHtml(project.sslStatusClass || 'neutral')}">${escapeHtml(project.sslStatus || 'n/a')}</span></div>
             <div class="small">runtime: <code>${escapeHtml(project.runtime || 'auto')}</code></div>
+            <div class="small">vpn: <code>${escapeHtml(project.vpnProfile || 'none')}</code></div>
           </td>
           <td>
             <div><code>${escapeHtml(project.pm2 || '')}</code></div>
@@ -2963,6 +2966,7 @@ function renderProjectRows(projects) {
           <td class="small">
             kind: ${escapeHtml(project.kind || '')}<br>
             runtime: ${escapeHtml(project.runtime || 'auto')}<br>
+            vpn: ${escapeHtml(project.vpnProfile || 'none')}<br>
             type: ${escapeHtml(project.type || '')}<br>
             pm: ${escapeHtml(project.packageManager || '')}<br>
             restarts: ${escapeHtml(String(project.restarts ?? 0))}<br>
@@ -4015,6 +4019,10 @@ function renderPage() {
         </label>
         <label>DB machine
           <select id="dbMachineId">${dbMachineOptions}</select>
+        </label>
+        <label>VPN profile
+          <input id="vpnProfile" placeholder="CyberGhost / wireguard-prod / none" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          <div class="small">Optional per-project egress profile. If a hook exists at <code>/etc/vps-vpn-profiles/&lt;profile&gt;.sh</code>, install/update will run it.</div>
         </label>
       </div>
       <div class="space"></div>
@@ -7206,6 +7214,7 @@ async function handleRequest(req, res) {
       if (body.pm2Name) args.push('--pm2-name', String(body.pm2Name).trim());
       if (body.port) args.push('--port', String(body.port).trim());
       if (body.deployRuntime) args.push('--runtime', String(body.deployRuntime).trim());
+      if (body.vpnProfile) args.push('--vpn-profile', String(body.vpnProfile).trim());
       if (body.dbMachineId) args.push('--db-machine', String(body.dbMachineId).trim());
       if (body.entrypoint) args.push('--entrypoint', String(body.entrypoint).trim());
       let tempEnv = '';

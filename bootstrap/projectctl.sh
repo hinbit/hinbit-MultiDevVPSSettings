@@ -47,7 +47,7 @@ die() {
 usage() {
   cat <<'EOF'
 Usage:
-  projectctl install [--domain example.com] [--https yes|no] [--branch main] [--pm2-name name] [--port N] [--db-machine id] [--runtime auto|node|docker] [--env-file path] [--entrypoint path] owner/repo
+  projectctl install [--domain example.com] [--https yes|no] [--branch main] [--pm2-name name] [--port N] [--db-machine id] [--runtime auto|node|docker] [--vpn-profile name] [--env-file path] [--entrypoint path] owner/repo
   projectctl update owner/repo
   projectctl build [--all] owner/repo
   projectctl duplicate [--domain example.com] [--env-mode share|copy] [--db-mode same|separate] [--pm2-name name] [--port N] owner/repo
@@ -77,6 +77,7 @@ Defaults:
   - `projectctl update` prompts before pulling local changes; set PROJECTCTL_PULL_MODE=merge-env|stash-all to force the choice
   - `projectctl build` runs the root build script, or `--all` to also build server/ and client/ when they exist
   - `projectctl install --runtime docker` runs the app through a Docker container with host networking so local MySQL still works; use `auto` to keep the existing node/PM2 flow
+  - `projectctl install --vpn-profile name` stores a per-project VPN/egress profile and runs `/etc/vps-vpn-profiles/<name>.sh` if such a hook exists
 EOF
 }
 
@@ -1690,6 +1691,24 @@ project_db_machine_id() {
   printf '%s' "${machine_id:-${LOCAL_DB_MACHINE_ID}}"
 }
 
+project_vpn_profile() {
+  local vpn_profile=""
+  vpn_profile="$(project_db_value VPN_PROFILE VPN_PROFILE_NAME VPN_EGRESS_PROFILE)"
+  case "${vpn_profile,,}" in
+    none|default) vpn_profile="" ;;
+  esac
+  printf '%s' "${vpn_profile}"
+}
+
+normalize_vpn_profile_value() {
+  local vpn_profile="${1:-}"
+  vpn_profile="$(printf '%s' "${vpn_profile}" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  case "${vpn_profile,,}" in
+    none|default) vpn_profile="" ;;
+  esac
+  printf '%s' "${vpn_profile}"
+}
+
 project_db_effective_host() {
   local host=""
   host="$(project_db_value DB_HOST MYSQL_HOST DB_MACHINE_HOST POSTGRES_HOST)"
@@ -1973,6 +1992,42 @@ sync_project_db_identity_env() {
     update_meta_value "${project_env}" "MYSQL_PASSWORD" "${db_password}"
     normalize_env_file_shell_safe "${project_env}"
   done
+}
+
+sync_project_vpn_profile_env() {
+  local vpn_profile="${1:-}"
+  local vpn_notes="${2:-}"
+  local project_env=""
+  local env_file="${APP_DIR}/.env.machine"
+
+  for project_env in "${APP_DIR}/.env" "${APP_DIR}/server/.env" "${APP_DIR}/client/.env" "${APP_DIR}/dashboard/.env"; do
+    [[ -f "${project_env}" ]] || continue
+    update_meta_value "${project_env}" "VPN_PROFILE" "${vpn_profile}"
+    [[ -n "${vpn_notes}" ]] && update_meta_value "${project_env}" "VPN_PROFILE_NOTES" "${vpn_notes}"
+    normalize_env_file_shell_safe "${project_env}"
+  done
+
+  touch "${env_file}"
+  chmod 0600 "${env_file}"
+  update_meta_value "${env_file}" "VPN_PROFILE" "${vpn_profile}"
+  [[ -n "${vpn_notes}" ]] && update_meta_value "${env_file}" "VPN_PROFILE_NOTES" "${vpn_notes}"
+  normalize_env_file_shell_safe "${env_file}"
+}
+
+run_project_vpn_hook() {
+  local stage="${1:-install}"
+  local vpn_profile="${2:-}"
+  local hook=""
+
+  [[ -n "${vpn_profile}" ]] || return 0
+  hook="/etc/vps-vpn-profiles/${vpn_profile}.sh"
+  [[ -x "${hook}" ]] || return 0
+
+  printf '[projectctl] applying VPN profile %s via %s (%s)\n' "${vpn_profile}" "${hook}" "${stage}" >&2
+  PROJECT_VPN_PROFILE="${vpn_profile}" PROJECT_VPN_STAGE="${stage}" \
+    PROJECT_REPO="${REPO_REF}" PROJECT_SLUG="${PROJECT_SLUG}" PROJECT_DIR="${APP_DIR}" \
+    PROJECT_DOMAIN="${APP_DOMAIN:-}" PROJECT_PORT="${APP_PORT:-}" PROJECT_DB_MACHINE_ID="${DB_MACHINE_ID:-}" \
+    bash "${hook}" "${stage}" "${APP_DIR}"
 }
 
 read_project_db_machine_accounts() {
@@ -3260,6 +3315,8 @@ GIT_REMOTE=${GIT_REMOTE}
 START_KIND=${START_KIND}
 START_TARGET=${START_TARGET}
 DEPLOY_RUNTIME=${DEPLOY_RUNTIME:-auto}
+VPN_PROFILE=${VPN_PROFILE:-}
+VPN_PROFILE_NOTES=${VPN_PROFILE_NOTES:-}
 SOURCE_REPO_REF=${SOURCE_REPO_REF:-}
 DUPLICATE_SOURCE_REPO_REF=${DUPLICATE_SOURCE_REPO_REF:-}
 DUPLICATE_ENV_MODE=${DUPLICATE_ENV_MODE:-}
@@ -3867,8 +3924,9 @@ do_install() {
   local forced_port="${6:-}"
   local db_machine_id="${7:-}"
   local deploy_runtime="${8:-auto}"
-  local env_file="${9:-}"
-  local entrypoint="${10:-}"
+  local vpn_profile="${9:-}"
+  local env_file="${10:-}"
+  local entrypoint="${11:-}"
   local build_failed="no"
 
   REPO_REF="$(repo_ref_from_arg "${ref}")"
@@ -3889,6 +3947,7 @@ do_install() {
   APP_HTTPS="${https:-yes}"
   APP_TYPE="project"
   DEPLOY_RUNTIME="$(normalize_deploy_runtime "${deploy_runtime}")"
+  VPN_PROFILE="$(normalize_vpn_profile_value "${vpn_profile}")"
   GIT_REMOTE="origin"
   SSH_UPLOAD_USER="$(ssh_upload_user_from_slug "${PROJECT_SLUG}")"
   SSH_UPLOAD_PASSWORD="$(generate_secret)"
@@ -3975,6 +4034,7 @@ do_install() {
     chmod 0644 "${meta}"
     sync_project_db_machine_env "custom" "" "" "" "" "Custom / manual DB machine" "Configure DB host and credentials in MySQL Access after install"
   fi
+  sync_project_vpn_profile_env "${VPN_PROFILE}" "Per-project VPN / egress profile"
 
   prepare_project_domain_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
 
@@ -4010,6 +4070,8 @@ do_install() {
       printf '[projectctl] custom DB machine selected for %s; skipping automatic DB bootstrap until MySQL Access is filled in.\n' "${REPO_REF}"
     fi
   fi
+
+  run_project_vpn_hook "install" "${VPN_PROFILE}"
 
   ensure_project_ssh_user "${SSH_UPLOAD_USER}" "${SSH_UPLOAD_PASSWORD}" "${APP_DIR}"
   refresh_project_ssh_config
@@ -4050,6 +4112,7 @@ do_update() {
   local duplicate_env_mode=""
   local duplicate_db_mode=""
   local duplicate_sync_env_base="yes"
+  local vpn_profile=""
 
   slug="$(slug_from_ref "$(project_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
@@ -4076,6 +4139,7 @@ do_update() {
   if [[ -z "${DB_MACHINE_ID:-}" ]]; then
     DB_MACHINE_ID="$(project_db_machine_id)"
   fi
+  vpn_profile="$(project_vpn_profile)"
   if [[ "${DB_MACHINE_ID}" == "custom" ]]; then
     if project_custom_db_machine_details >/dev/null 2>&1; then
       resolve_db_machine "${DB_MACHINE_ID}"
@@ -4087,6 +4151,9 @@ do_update() {
     resolve_db_machine "${DB_MACHINE_ID:-${LOCAL_DB_MACHINE_ID}}"
     sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
   fi
+  vpn_profile="$(normalize_vpn_profile_value "${vpn_profile}")"
+  sync_project_vpn_profile_env "${vpn_profile}" "Per-project VPN / egress profile"
+  update_meta_value "${meta}" "VPN_PROFILE" "${vpn_profile}"
 
   [[ -d "${APP_DIR}/.git" ]] || die "Missing git repo at ${APP_DIR}"
   IFS=$'\t' read -r db_name db_user db_password db_type < <(sync_project_db_env "${APP_DIR}")
@@ -4132,6 +4199,7 @@ do_update() {
     fi
     sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "${MYSQL_ALLOWED_IPS:-}" "${bootstrap_db_machine_id}"
   fi
+  run_project_vpn_hook "update" "${vpn_profile}"
   refresh_project_start_kind "${meta}"
 
   if [[ -z "${SSH_UPLOAD_USER:-}" ]]; then
@@ -4936,6 +5004,7 @@ main() {
       local pm2_name=""
       local db_machine_id=""
       local deploy_runtime="auto"
+      local vpn_profile=""
       local env_file=""
       local entrypoint=""
       while [[ $# -gt 0 ]]; do
@@ -4968,6 +5037,10 @@ main() {
             deploy_runtime="${2:-auto}"
             shift 2
             ;;
+          --vpn-profile)
+            vpn_profile="${2:-}"
+            shift 2
+            ;;
           --env-file)
             env_file="${2:-}"
             shift 2
@@ -4986,7 +5059,7 @@ main() {
         esac
       done
       [[ $# -eq 1 ]] || { usage; exit 1; }
-      do_install "$1" "${domain}" "${https}" "${branch}" "${pm2_name}" "${port}" "${db_machine_id}" "${deploy_runtime}" "${env_file}" "${entrypoint}"
+      do_install "$1" "${domain}" "${https}" "${branch}" "${pm2_name}" "${port}" "${db_machine_id}" "${deploy_runtime}" "${vpn_profile}" "${env_file}" "${entrypoint}"
       ;;
     duplicate)
       local duplicate_domain=""
