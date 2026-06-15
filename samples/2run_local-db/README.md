@@ -20,3 +20,4 @@ Use the generated `PORT` from Multidev. The sample runs on that port and should 
 ## Install hints
 
 The sample also includes `VPS-INSTALL.MD` so Multidev can learn about extra nginx route wiring when it exists.
+If the sample ever needs a browser or OS package, `PREINSTALL_REQUIREMENTS.md` is where that requirement belongs.

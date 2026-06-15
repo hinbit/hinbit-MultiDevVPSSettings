@@ -201,6 +201,7 @@ projectctl restart owner/repo
 `projectctl update` will:
 - pull the repo
 - preserve local env files by default via `Merge .env`
+- install any project-level system requirements declared in `PREINSTALL_REQUIREMENTS.md`
 - rebuild when the repo has a build script
 - ask whether to run `build all` after a successful pull
 - restart PM2 and sidecar services

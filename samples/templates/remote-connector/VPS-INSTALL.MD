@@ -41,4 +41,5 @@ Multidev will look for this file during install and update, and will wire the ro
 - main runtime port example: 3003
 - keep `PORT`, `APP_PORT`, `GUI_PORT`, `API_PORT`, `DB_*`, `MYSQL_*`, `CONNECTOR_*`, `PUBLIC_URL`, and `API_BASE_URL` in the env template when relevant
 - use `server/.env`, `client/.env`, or `dashboard/.env` if the repo has split runtime files
+- use `PREINSTALL_REQUIREMENTS.md` for OS packages or browser binaries such as Chromium
 - do not hardcode localhost ports into the browser bundle

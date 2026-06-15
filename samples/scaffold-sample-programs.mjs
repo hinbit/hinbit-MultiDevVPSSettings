@@ -216,11 +216,34 @@ function templateReadme(app) {
     '- `ACTIVE_CONNECTOR`: connector selector such as 360dialog or Twilio.',
     '- `WEBHOOK_TOKEN`: auth token for webhook or callback endpoints.',
     '- `PUBLIC_URL` / `API_BASE_URL`: public domain or API base used by the client.',
+    '- `PREINSTALL_REQUIREMENTS.md`: OS packages or browser binaries the app needs before startup.',
     '',
     '## Install rule',
     '',
     'Future Codex sessions should copy this template into a real repo, keep the root `package.json` start script visible to Multidev, and make sure env values are complete before install.',
     'If the app needs special nginx/path wiring, put it in `VPS-INSTALL.MD` as a JSON block so Multidev can wire it automatically during install/update.',
+    'If the app needs OS packages or browser binaries before startup, add them to `PREINSTALL_REQUIREMENTS.md` so Multidev installs them before dependency setup.',
+  ]);
+}
+
+function preinstallRequirementsDoc(app) {
+  return lines([
+    `# Preinstall Requirements - ${app.title}`,
+    '',
+    'Use this file for OS packages or runtime binaries that must exist before Multidev runs dependency install or build.',
+    '',
+    '```vps-requirements',
+    JSON.stringify(
+      {
+        apt: [],
+      },
+      null,
+      2,
+    ),
+    '```',
+    '',
+    'If the app needs Chromium, add `"chromium"` to the `apt` array.',
+    'Keep the list empty when no extra system packages are required.',
   ]);
 }
 
@@ -341,6 +364,7 @@ function vpsInstallDoc(app, runnable = false) {
     `- main runtime port example: ${runtimePort}`,
     '- keep `PORT`, `APP_PORT`, `GUI_PORT`, `API_PORT`, `DB_*`, `MYSQL_*`, `CONNECTOR_*`, `PUBLIC_URL`, and `API_BASE_URL` in the env template when relevant',
     '- use `server/.env`, `client/.env`, or `dashboard/.env` if the repo has split runtime files',
+    '- use `PREINSTALL_REQUIREMENTS.md` for OS packages or browser binaries such as Chromium',
     '- do not hardcode localhost ports into the browser bundle',
   ];
   return lines(body);
@@ -370,6 +394,7 @@ function runReadme(app) {
     '## Install hints',
     '',
     'The sample also includes `VPS-INSTALL.MD` so Multidev can learn about extra nginx route wiring when it exists.',
+    'If the sample ever needs a browser or OS package, `PREINSTALL_REQUIREMENTS.md` is where that requirement belongs.',
   ]);
 }
 
@@ -503,6 +528,7 @@ function docsReadme() {
     '- `CONNECTOR_PORT` is for connector relay services.',
     '- `PUBLIC_URL` / `API_BASE_URL` should point at the installed domain, not localhost.',
     '- `VPS-INSTALL.MD` can hold a JSON route block for extra nginx wiring that should be installed automatically.',
+    '- `PREINSTALL_REQUIREMENTS.md` can list OS packages or browser binaries such as Chromium that must exist before install.',
     '',
     '## Install goal',
     '',
@@ -523,10 +549,12 @@ for (const app of apps) {
   write(path.join(templateBase, 'package.json'), templatePackageJson(app));
   write(path.join(templateBase, 'server.js'), templateServer(app));
   write(path.join(templateBase, '.env.example'), lines(app.envExample));
+  write(path.join(templateBase, 'PREINSTALL_REQUIREMENTS.md'), preinstallRequirementsDoc(app));
   write(path.join(templateBase, 'VPS-INSTALL.MD'), vpsInstallDoc(app, false));
 
   write(path.join(runBase, 'README.md'), runReadme(app));
   write(path.join(runBase, '.env.example'), lines(app.runEnvExample));
+  write(path.join(runBase, 'PREINSTALL_REQUIREMENTS.md'), preinstallRequirementsDoc(app));
   write(path.join(runBase, 'VPS-INSTALL.MD'), vpsInstallDoc(app, true));
   write(path.join(runBase, 'package.json'), packageJson(app, app.hasDb));
   write(path.join(runBase, 'server.js'), quizServer(app));
@@ -543,6 +571,7 @@ write(
     'Use the templates for real app scaffolding, and the `2run_` copies to verify the install path works end to end.',
     '',
     'Every sample also includes `VPS-INSTALL.MD` with a machine-readable route block so Multidev can wire extra nginx paths automatically when needed.',
+    'The templates also ship `PREINSTALL_REQUIREMENTS.md` so Multidev can install OS packages or browser binaries before dependency setup when a sample needs them.',
   ]),
 );
 

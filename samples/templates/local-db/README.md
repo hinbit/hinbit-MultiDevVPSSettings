@@ -19,8 +19,10 @@ An app that uses the local MySQL instance on the same VPS.
 - `ACTIVE_CONNECTOR`: connector selector such as 360dialog or Twilio.
 - `WEBHOOK_TOKEN`: auth token for webhook or callback endpoints.
 - `PUBLIC_URL` / `API_BASE_URL`: public domain or API base used by the client.
+- `PREINSTALL_REQUIREMENTS.md`: OS packages or browser binaries the app needs before startup.
 
 ## Install rule
 
 Future Codex sessions should copy this template into a real repo, keep the root `package.json` start script visible to Multidev, and make sure env values are complete before install.
 If the app needs special nginx/path wiring, put it in `VPS-INSTALL.MD` as a JSON block so Multidev can wire it automatically during install/update.
+If the app needs OS packages or browser binaries before startup, add them to `PREINSTALL_REQUIREMENTS.md` so Multidev installs them before dependency setup.

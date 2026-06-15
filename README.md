@@ -72,13 +72,14 @@ projectctl uninstall owner/repo
 - `Merge .env (default)` keeps the current VPS env values after the pull and appends any new upstream env keys
 - `Stash all` stashes every local change before pulling
 After every pull, `projectctl` now rechecks domain mapping and HTTPS wiring before `build all`, so a missing app-map entry is repaired during the pull run instead of surfacing as a broken deploy later.
-After every install or pull, `projectctl` runs dependency installs in the root plus `server/`, `client/`, and `dashboard/` when those folders exist. The subfolder installs use `npm --prefix ...` so each component is installed in its own directory before build and restart.
-After every install or pull, `projectctl` runs `build all` automatically:
+After every install or pull, `projectctl` reads `PREINSTALL_REQUIREMENTS.md` from the repo root and any `server/`, `client/`, or `dashboard/` copy, installs any declared apt packages, and only then runs dependency installs and `build all`. Use that file for extra runtime binaries such as Chromium or other OS-level tools the app needs before startup.
+Then it runs dependency installs in the root plus `server/`, `client/`, and `dashboard/` when those folders exist. The subfolder installs use `npm --prefix ...` so each component is installed in its own directory before build and restart.
+Then it runs `build all` automatically:
 - `build all` runs the root build script plus `server/`, `client/`, and `dashboard/` build scripts when they exist
 - the project list shows the last build mode, status, and timestamp
 After install, update, or restart, `projectctl` reruns `app-sync` after PM2 is back up so `/etc/app-map.csv` and the nginx vhost are regenerated from the current project metadata.
 `projectctl` now rewrites project `.env` files in a shell-safe form, so values with spaces are quoted automatically and remain safe for scripts that source the file.
-`projectctl` also skips common reserved ports when auto-picking a new app port, and it preserves split-app internal ports such as CherryWrapper's `PORT=8787` instead of overwriting them with the public UI port.
+`projectctl` also skips common reserved ports when auto-picking a new app port, refuses ports already assigned to another Multidev project, and it preserves split-app internal ports such as CherryWrapper's `PORT=8787` instead of overwriting them with the public UI port.
 When a repo name is too long for a MySQL username, `projectctl` shortens the generated DB user to stay within MySQL's 32-character limit while keeping the repo name as the base. Existing overlong DB usernames are normalized on update too, so old installs self-heal.
 
 Run an ad-hoc package script from an existing project:
@@ -103,6 +104,7 @@ The install form clears the default entrypoint and project access password after
 If the repo defines root-level `db:init` and `db:seed` scripts, a fresh install runs them automatically so the new database starts with schema and seed data.
 If a project changes port, follow the port-change checklist in `docs/multidev-install-spec.md` before handoff so `.env`, Node, PM2, nginx, and app-map all agree.
 If the app needs special path routing, add a root `VPS-INSTALL.MD` file with a JSON route block so Multidev can wire extra nginx locations automatically during install/update.
+If the app needs browser or OS-level packages before install/build, add them to `PREINSTALL_REQUIREMENTS.md` so Multidev installs them automatically.
 For the exact repo shape Multidev expects on the first install, see the new `6.1 Exact repo shape for reliable first install` section in `docs/multidev-install-spec.md`.
 For duplicate projects, see `6.5 Project duplication behavior` in the same doc.
 

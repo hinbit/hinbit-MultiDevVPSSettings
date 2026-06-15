@@ -6646,6 +6646,7 @@ function renderPage() {
         'PM2: ' + (pm2Name || '(default)'),
         'Port: ' + (port || '(auto)'),
         'Port mapping: app-map + nginx will be synced to this port',
+        'Port safety: occupied Multidev ports will be auto-reassigned',
         'Runtime: ' + (deployRuntime || '(auto)'),
         'DB machine: ' + (dbMachineId || '(local-current)'),
         'Entrypoint: ' + (entrypoint || '(auto-detect)'),

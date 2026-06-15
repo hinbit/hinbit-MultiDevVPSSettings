@@ -14,7 +14,7 @@ Recommended root files:
 - `package.json`
 - `README.md`
 - `CODEX.md`
-- `PREINSTALL_REQUIREMENTS.md`
+- `PREINSTALL_REQUIREMENTS.md` for any OS packages or runtime binaries the app needs before install/build
 - `EMBEDDING_GUIDE.md` if the app actually needs embedding/model setup
 
 Recommended folders:
@@ -72,6 +72,23 @@ DB_PASSWORD='secret value'
 
 The app should remain safe when env files are sourced by shell-based scripts.
 
+## 3.5 Preinstall requirements
+
+If an app needs extra OS packages or runtime binaries before Multidev runs `npm install` and builds the repo, declare them in `PREINSTALL_REQUIREMENTS.md`.
+Multidev reads the root file and any `server/`, `client/`, or `dashboard/` copy, merges the declared package list, and installs it with `apt-get install -y` before dependency installation.
+
+Use a fenced `vps-requirements` JSON block:
+
+```md
+```vps-requirements
+{
+  "apt": ["chromium", "fonts-liberation"]
+}
+```
+```
+
+Keep the list empty when no extra system packages are required. Use package names that `apt-get install` can resolve on the target Ubuntu image.
+
 ## 4. Production normalization
 
 Multidev installs should normalize deployment-facing env values from local/dev to production/web.
@@ -98,7 +115,7 @@ Do not hardcode ports that can collide with other apps.
 Rules:
 - respect the port Multidev writes into the env
 - preserve split-runtime apps correctly
-- choose a new port if the requested one is already occupied
+- choose a new port if the requested one is already occupied or already assigned to another Multidev project in `/etc/vps-projects`
 - avoid common ports when possible
 
 Split-runtime apps should keep their responsibilities explicit, for example:
@@ -317,6 +334,7 @@ Quick rule:
 Before handing the app over to Multidev, the repo itself should explain:
 - where the production start command lives
 - which env values are required
+- which system packages or browser binaries are required, and what `PREINSTALL_REQUIREMENTS.md` contains
 - whether the app uses MySQL and what `db:init` / `db:seed` do
 - whether the app has multiple runtime ports
 - whether the app needs any support tables or demo users

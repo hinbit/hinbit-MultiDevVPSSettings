@@ -676,6 +676,11 @@ sync_duplicate_project_from_source() {
   BRANCH="${source_branch}"
   PM2_NAME="${pm2_name:-${target_existing_pm2_name:-${PROJECT_SLUG}}}"
   APP_PORT="${target_port:-${target_existing_port:-$(pick_port)}}"
+  if [[ -n "${target_port}" && ! -d "${target_dir}" ]] && ! is_port_available_for_multidev "${APP_PORT}"; then
+    printf '[projectctl] requested duplicate port %s is already in use in Multidev; picking a free port instead\n' "${APP_PORT}" >&2
+    APP_PORT="$(pick_port)"
+    printf '[projectctl] using port %s instead\n' "${APP_PORT}" >&2
+  fi
   APP_DOMAIN="$(normalize_domain "${target_domain}")"
   APP_HTTPS="${target_existing_https:-${source_https}}"
   APP_TYPE="${target_existing_app_type:-${source_app_type}}"
@@ -758,6 +763,7 @@ sync_duplicate_project_from_source() {
 
   (
     cd "${APP_DIR}"
+    install_project_requirements "${APP_DIR}"
     install_deps
     if ! maybe_build "${meta}" "${build_mode}"; then
       build_failed="yes"
@@ -2214,6 +2220,175 @@ raise SystemExit(0)
 PY
 }
 
+project_preinstall_requirements_packages() {
+  local project_dir="${1:-${APP_DIR}}"
+
+  [[ -d "${project_dir}" ]] || return 0
+
+  python3 - "${project_dir}" <<'PY'
+import json
+import os
+import re
+import sys
+
+project_dir = sys.argv[1]
+candidate_names = (
+    "PREINSTALL_REQUIREMENTS.json",
+    "PREINSTALL_REQUIREMENTS.md",
+    "PREINSTALL_REQUIREMENTS.txt",
+    "preinstall_requirements.json",
+    "preinstall_requirements.md",
+    "preinstall_requirements.txt",
+)
+package_re = re.compile(r'^[A-Za-z0-9][A-Za-z0-9+._:-]*$')
+block_re = re.compile(r'```(?:vps-requirements|json)\s*(.*?)```', re.I | re.S)
+heading_re = re.compile(r'^(#{1,6})\s+(.*)$')
+bullet_re = re.compile(r'^[-*]\s+(.*)$')
+seen = set()
+packages = []
+
+
+def add_package(value):
+    if value is None:
+        return
+    if isinstance(value, bool):
+        return
+    if isinstance(value, (int, float)):
+        value = str(int(value) if isinstance(value, int) or value.is_integer() else value)
+    else:
+        value = str(value)
+    value = value.strip()
+    if not value or value.startswith('#') or value.startswith('//'):
+        return
+    if not package_re.match(value):
+        return
+    if value not in seen:
+        seen.add(value)
+        packages.append(value)
+
+
+def extract_packages(data):
+    if isinstance(data, dict):
+        for key in (
+            'apt',
+            'packages',
+            'system_packages',
+            'systemPackages',
+            'apt_packages',
+            'aptPackages',
+        ):
+            value = data.get(key)
+            if isinstance(value, dict):
+                extract_packages(value)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    extract_packages(item)
+            elif value is not None:
+                add_package(value)
+        return
+
+    if isinstance(data, (list, tuple)):
+        for item in data:
+            extract_packages(item)
+        return
+
+    add_package(data)
+
+
+def parse_jsonish(text):
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def parse_markdown(text):
+    for match in block_re.finditer(text):
+        content = match.group(1).strip()
+        if not content:
+            continue
+        data = parse_jsonish(content)
+        if data is not None:
+            extract_packages(data)
+
+    current_heading = ''
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('```'):
+            continue
+
+        heading_match = heading_re.match(line)
+        if heading_match:
+            current_heading = heading_match.group(2).strip().lower()
+            continue
+
+        bullet_match = bullet_re.match(line)
+        if not bullet_match:
+            continue
+
+        if any(token in current_heading for token in ('apt', 'package', 'requirement', 'system')):
+            add_package(bullet_match.group(1).strip())
+
+    data = parse_jsonish(text.strip())
+    if data is not None:
+        extract_packages(data)
+
+
+def parse_file(path):
+    try:
+        with open(path, 'r', encoding='utf-8', errors='surrogateescape') as handle:
+            text = handle.read()
+    except OSError:
+        return
+
+    if path.endswith('.json'):
+        data = parse_jsonish(text)
+        if data is not None:
+            extract_packages(data)
+        return
+
+    parse_markdown(text)
+
+
+candidate_paths = []
+for base in (
+    project_dir,
+    os.path.join(project_dir, 'server'),
+    os.path.join(project_dir, 'client'),
+    os.path.join(project_dir, 'dashboard'),
+):
+    if not os.path.isdir(base):
+        continue
+    for name in candidate_names:
+        path = os.path.join(base, name)
+        if os.path.isfile(path):
+            candidate_paths.append(path)
+
+for path in candidate_paths:
+    parse_file(path)
+
+for package in packages:
+    print(package)
+PY
+}
+
+install_project_requirements() {
+  local project_dir="${1:-${APP_DIR}}"
+  local -a packages=()
+
+  [[ -d "${project_dir}" ]] || return 0
+
+  mapfile -t packages < <(project_preinstall_requirements_packages "${project_dir}")
+  if [[ ${#packages[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  printf '[projectctl] installing project system requirements: %s\n' "${packages[*]}"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y "${packages[@]}"
+}
+
 ensure_meta_dir() {
   mkdir -p "${META_DIR}"
 }
@@ -2752,11 +2927,34 @@ refresh_project_start_kind() {
   fi
 }
 
+registry_used_ports() {
+  if [[ -d "${META_DIR}" ]]; then
+    for meta in "${META_DIR}"/*.env; do
+      [[ -f "${meta}" ]] || continue
+      while IFS= read -r line; do
+        case "${line}" in
+          APP_PORT=*|PORT=*)
+            port="${line#*=}"
+            port="${port//$'\r'/}"
+            port="${port//[[:space:]]/}"
+            port="${port%\"}"
+            port="${port#\"}"
+            port="${port%\'}"
+            port="${port#\'}"
+            [[ "${port}" =~ ^[0-9]+$ ]] && printf '%s\n' "${port}"
+            ;;
+        esac
+      done < "${meta}"
+    done
+  fi
+}
+
 used_ports() {
   {
     if [[ -f /etc/app-map.csv ]]; then
       awk -F, 'NR > 1 && $2 ~ /^[0-9]+$/ { print $2 }' /etc/app-map.csv
     fi
+    registry_used_ports
     ss -Htanl 2>/dev/null | awk '
       {
         for (i = 1; i <= NF; i++) {
@@ -2779,6 +2977,22 @@ is_common_reserved_port() {
   done
 
   return 1
+}
+
+is_port_available_for_multidev() {
+  local port="${1:-}"
+
+  [[ -n "${port}" ]] || return 1
+  [[ "${port}" =~ ^[0-9]+$ ]] || return 1
+  if is_common_reserved_port "${port}"; then
+    return 1
+  fi
+
+  if used_ports | grep -qx "${port}"; then
+    return 1
+  fi
+
+  return 0
 }
 
 pick_port() {
@@ -3666,6 +3880,11 @@ do_install() {
   BRANCH="$(branch_from_repo "${REPO_REF}" "${branch}")"
   PM2_NAME="${pm2_name:-${PROJECT_SLUG}}"
   APP_PORT="${forced_port:-$(pick_port)}"
+  if [[ -n "${forced_port}" ]] && ! is_port_available_for_multidev "${APP_PORT}"; then
+    printf '[projectctl] requested port %s is already in use in Multidev; picking a free port instead\n' "${APP_PORT}" >&2
+    APP_PORT="$(pick_port)"
+    printf '[projectctl] using port %s instead\n' "${APP_PORT}" >&2
+  fi
   APP_DOMAIN="$(normalize_domain "${domain:-}")"
   APP_HTTPS="${https:-yes}"
   APP_TYPE="project"
@@ -3761,6 +3980,7 @@ do_install() {
 
   (
     cd "${APP_DIR}"
+    install_project_requirements "${APP_DIR}"
     install_deps
     if ! maybe_build "${meta}" "${build_mode}"; then
       build_failed="yes"
@@ -3895,6 +4115,7 @@ do_update() {
     APP_PROXY_ROUTES_JSON="$(project_vps_install_proxy_routes_json "${APP_DIR}")"
     update_meta_value "${meta}" "APP_PROXY_ROUTES_JSON" "${APP_PROXY_ROUTES_JSON}"
     prepare_project_domain_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
+    install_project_requirements "${APP_DIR}"
     install_deps
     if ! maybe_build "${meta}" "${build_mode}"; then
       build_failed="yes"
