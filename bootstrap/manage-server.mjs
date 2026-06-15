@@ -4,6 +4,7 @@ import path from 'path';
 import http from 'http';
 import { execFileSync, spawn, spawnSync } from 'child_process';
 import os from 'os';
+import { randomUUID } from 'crypto';
 import { fileURLToPath } from 'url';
 
 const META_DIR = '/etc/vps-projects';
@@ -70,6 +71,11 @@ const DEFAULT_PROXY_CONFIG = {
   max_clients: 100,
   log_level: 'Info',
   disable_via_header: true,
+  proxy_pool: {
+    source_file: '',
+    selected_id: '',
+    entries: [],
+  },
 };
 
 function loadSystemEnv() {
@@ -1161,10 +1167,162 @@ function proxyConfigValidationError(config) {
   return '';
 }
 
+function inferProxyProtocol(port) {
+  const socksPorts = new Set([1080, 1081, 9050, 1085, 9150, 4145]);
+  if (socksPorts.has(Number(port))) return 'socks5';
+  return 'http';
+}
+
+function normalizeProxyPoolEntry(input = {}, index = 0) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error(`Proxy pool entry ${index + 1} must be an object`);
+  }
+  const host = String(input.host || input.hostname || input.ip_address || input.ip || '').trim();
+  if (!host) throw new Error(`Proxy pool entry ${index + 1} is missing a host`);
+  const portValue = Number.parseInt(String(input.port ?? input.proxy_port ?? ''), 10);
+  if (!Number.isInteger(portValue) || portValue < 1 || portValue > 65535) {
+    throw new Error(`Proxy pool entry ${index + 1} has an invalid port`);
+  }
+  const protocolRaw = String(input.protocol || input.scheme || input.type || '').trim().toLowerCase();
+  const protocol = protocolRaw || inferProxyProtocol(portValue);
+  const allowedProtocols = new Set(['http', 'https', 'socks4', 'socks5', 'auto']);
+  if (!allowedProtocols.has(protocol)) {
+    throw new Error(`Proxy pool entry ${index + 1} has an invalid protocol`);
+  }
+  const username = String(input.username || input.proxy_username || '').trim();
+  const password = String(input.password || input.proxy_password || '');
+  const label = String(input.label || input.name || host).trim() || host;
+  const id = String(input.id || `proxy-${index + 1}-${randomUUID().slice(0, 8)}`);
+  return {
+    id,
+    label,
+    host,
+    port: portValue,
+    protocol,
+    username,
+    password,
+    notes: String(input.notes || '').trim(),
+    working: Boolean(input.working),
+    status: String(input.status || (input.working ? 'working' : 'unchecked')).trim() || 'unchecked',
+    checked_at: String(input.checked_at || input.checkedAt || '').trim(),
+    last_error: String(input.last_error || input.lastError || '').trim(),
+  };
+}
+
+function normalizeProxyPool(input = {}) {
+  const poolInput = input.proxy_pool && typeof input.proxy_pool === 'object' && !Array.isArray(input.proxy_pool) ? input.proxy_pool : {};
+  const rawEntries = Array.isArray(poolInput.entries)
+    ? poolInput.entries
+    : Array.isArray(input.proxy_entries)
+      ? input.proxy_entries
+      : Array.isArray(input.proxies)
+        ? input.proxies
+        : [];
+  const entries = rawEntries.map((entry, index) => normalizeProxyPoolEntry(entry, index));
+  const selectedId = String(poolInput.selected_id || input.selected_proxy_id || input.selectedId || '').trim();
+  const sourceFile = String(poolInput.source_file || input.proxy_source_file || input.source_file || '').trim();
+  const checkedAt = String(poolInput.checked_at || input.proxy_checked_at || '').trim();
+  const selectedEntry = entries.find((entry) => entry.id === selectedId) || entries.find((entry) => entry.working) || entries[0] || null;
+  return {
+    source_file: sourceFile,
+    selected_id: selectedEntry ? selectedEntry.id : '',
+    checked_at: checkedAt,
+    entries,
+  };
+}
+
+function proxyPoolValidationError(pool) {
+  if (!pool || typeof pool !== 'object' || Array.isArray(pool)) {
+    return 'Proxy pool must be an object';
+  }
+  if (!Array.isArray(pool.entries)) {
+    return 'Proxy pool entries must be an array';
+  }
+  return '';
+}
+
+function formatProxyHost(host) {
+  const text = String(host || '').trim();
+  if (!text) return '';
+  if (text.includes(':') && !text.startsWith('[')) {
+    return `[${text}]`;
+  }
+  return text;
+}
+
+function proxyEntryUrl(entry, protocolOverride = '') {
+  if (!entry || typeof entry !== 'object') return '';
+  const protocol = String(protocolOverride || entry.protocol || 'http').trim().toLowerCase() || 'http';
+  const auth = entry.username
+    ? `${encodeURIComponent(entry.username)}${entry.password ? `:${encodeURIComponent(entry.password)}` : ''}@`
+    : '';
+  const host = formatProxyHost(entry.host);
+  return `${protocol}://${auth}${host}:${entry.port}`;
+}
+
+function proxyEntryCopyText(entry) {
+  const url = proxyEntryUrl(entry);
+  const lines = [
+    `proxy_url=${url}`,
+    `proxy_protocol=${String(entry?.protocol || 'http')}`,
+    `proxy_host=${String(entry?.host || '')}`,
+    `proxy_port=${String(entry?.port || '')}`,
+    `proxy_username=${String(entry?.username || '')}`,
+    `proxy_password=${String(entry?.password || '')}`,
+  ];
+  return lines.join('\n');
+}
+
+function testProxyEntry(entry) {
+  if (!entry || typeof entry !== 'object') {
+    return { ok: false, error: 'Proxy entry is missing' };
+  }
+  const protocols = entry.protocol && entry.protocol !== 'auto'
+    ? [entry.protocol]
+    : ['http', 'https', 'socks5', 'socks4'];
+  let lastError = 'Proxy check failed';
+  for (const protocol of protocols) {
+    const proxyUrl = proxyEntryUrl(entry, protocol);
+    if (!proxyUrl) continue;
+    const result = spawnSync(
+      'curl',
+      [
+        '-fsS',
+        '--proxy', proxyUrl,
+        '--proxy-connect-timeout', '5',
+        '--max-time', '12',
+        'https://example.com',
+      ],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    if (result.status === 0) {
+      return {
+        ok: true,
+        protocol,
+        proxyUrl,
+        checked_at: new Date().toISOString(),
+        output: String(result.stdout || '').trim(),
+      };
+    }
+    lastError = String(result.stderr || result.error?.message || `curl exited ${result.status ?? 'unknown'}`).trim() || lastError;
+  }
+  return {
+    ok: false,
+    error: lastError,
+    checked_at: new Date().toISOString(),
+  };
+}
+
+function cloneProxyPoolEntries(entries = []) {
+  return entries.map((entry, index) => normalizeProxyPoolEntry(entry, index));
+}
+
 function normalizeProxyConfig(input = {}) {
   const authInput = input.auth && typeof input.auth === 'object' && !Array.isArray(input.auth) ? input.auth : {};
   const allowInput = Array.isArray(input.allow) ? input.allow : [];
   const connectPortsInput = Array.isArray(input.connect_ports) ? input.connect_ports : [];
+  const poolInput = input.proxy_pool && typeof input.proxy_pool === 'object' && !Array.isArray(input.proxy_pool) ? input.proxy_pool : {};
+  const poolEntries = Array.isArray(poolInput.entries) ? poolInput.entries : [];
   const allow = allowInput.map((item) => String(item).trim()).filter(Boolean);
   const connectPorts = [];
   for (const item of connectPortsInput) {
@@ -1193,6 +1351,14 @@ function normalizeProxyConfig(input = {}) {
     max_clients: Number.parseInt(String(input.max_clients || DEFAULT_PROXY_CONFIG.max_clients), 10) || DEFAULT_PROXY_CONFIG.max_clients,
     log_level: String(input.log_level || DEFAULT_PROXY_CONFIG.log_level).trim() || DEFAULT_PROXY_CONFIG.log_level,
     disable_via_header: input.disable_via_header !== undefined ? Boolean(input.disable_via_header) : DEFAULT_PROXY_CONFIG.disable_via_header,
+    proxy_pool: normalizeProxyPool({
+      proxy_pool: {
+        ...DEFAULT_PROXY_CONFIG.proxy_pool,
+        ...poolInput,
+        entries: cloneProxyPoolEntries(poolEntries),
+      },
+      selected_proxy_id: poolInput.selected_id || '',
+    }),
   };
   const validationError = proxyConfigValidationError(config);
   if (validationError) throw new Error(validationError);
@@ -1246,11 +1412,18 @@ function getServiceStatus(unit) {
 function readProxyServiceStatus() {
   const config = readProxyServiceConfig();
   const status = getServiceStatus(TINYPROXY_SERVICE);
+  const pool = config.proxy_pool || normalizeProxyPool({});
+  const selected = pool.entries.find((entry) => entry.id === pool.selected_id) || pool.entries.find((entry) => entry.working) || pool.entries[0] || null;
   return {
     ...config,
     status,
     sourcePath: getProxyConfigPath(),
     confPath: TINYPROXY_CONF_FILE,
+    proxy_pool: {
+      ...pool,
+      entries: pool.entries.map((entry) => ({ ...entry })),
+    },
+    selected_proxy: selected ? { ...selected, copy_text: proxyEntryCopyText(selected), url: proxyEntryUrl(selected) } : null,
   };
 }
 
@@ -1272,6 +1445,45 @@ function saveProxyServiceConfig(configInput) {
     spawnSync('systemctl', ['disable', '--now', TINYPROXY_SERVICE], { stdio: 'ignore' });
   }
   return readProxyServiceStatus();
+}
+
+function updateProxyPoolEntry(pool, entryId, updates = {}) {
+  const entries = Array.isArray(pool.entries) ? pool.entries.map((entry) => ({ ...entry })) : [];
+  const index = entries.findIndex((entry) => String(entry.id) === String(entryId));
+  if (index === -1) throw new Error('Selected proxy not found');
+  const current = entries[index];
+  const next = normalizeProxyPoolEntry({ ...current, ...updates, id: current.id }, index);
+  entries[index] = next;
+  return {
+    ...pool,
+    entries,
+  };
+}
+
+function markProxyPoolEntryResult(entry, result) {
+  return {
+    ...entry,
+    protocol: result?.ok && result.protocol ? result.protocol : entry.protocol,
+    working: Boolean(result?.ok),
+    status: result?.ok ? 'working' : 'failed',
+    checked_at: result?.checked_at || new Date().toISOString(),
+    last_error: result?.ok ? '' : String(result?.error || 'Proxy check failed').trim(),
+  };
+}
+
+function setProxyPoolSelection(pool, entryId) {
+  const entries = Array.isArray(pool.entries) ? pool.entries.map((entry) => ({ ...entry })) : [];
+  const selected = entries.find((entry) => String(entry.id) === String(entryId));
+  if (!selected) throw new Error('Selected proxy not found');
+  return {
+    ...pool,
+    selected_id: selected.id,
+  };
+}
+
+function saveProxyPool(configInput) {
+  const next = normalizeProxyConfig(configInput);
+  return saveProxyServiceConfig(next);
 }
 
 function getSystemDomain() {
@@ -2474,7 +2686,7 @@ function renderDbMachinesPage() {
     }
 
     async function api(path, options = {}) {
-      const res = await fetch(\`\${API}\${path}\`, {
+      const res = await fetch(API + path, {
         headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
         credentials: 'same-origin',
         ...options,
@@ -2484,7 +2696,7 @@ function renderDbMachinesPage() {
       try { data = text ? JSON.parse(text) : null; } catch { data = text; }
       if (!res.ok) {
         const message = data && typeof data === 'object' ? (data.error || data.message || text) : text;
-        throw new Error(message || \`Request failed: \${res.status}\`);
+        throw new Error(message || 'Request failed: ' + res.status);
       }
       return data;
     }
@@ -3607,6 +3819,60 @@ function renderProxyPage() {
         </div>
       </div>
     </section>
+
+    <section class="panel">
+      <h2>Proxy pool</h2>
+      <div class="grid two" style="margin-top:14px;">
+        <div class="stack">
+          <label>Upload proxy JSON
+            <input id="proxyPoolFile" type="file" accept=".json,application/json">
+          </label>
+          <div class="actions">
+            <button id="proxyImportBtn" type="button">Import and check</button>
+            <button id="proxyCheckBtn" class="secondary" type="button">Check selected proxy</button>
+          </div>
+          <div class="kv-item">
+            <div class="small">Pool summary</div>
+            <div id="proxyPoolSummary">No proxy list imported yet.</div>
+          </div>
+          <div id="proxyPoolFlash" class="flash" hidden></div>
+        </div>
+        <div class="stack">
+          <label>Selected proxy
+            <select id="proxyPoolSelected"></select>
+          </label>
+          <label>Protocol
+            <select id="proxyPoolProtocol">
+              <option value="http">HTTP</option>
+              <option value="https">HTTPS</option>
+              <option value="socks5">SOCKS5</option>
+              <option value="socks4">SOCKS4</option>
+              <option value="auto">Auto</option>
+            </select>
+          </label>
+          <label>Host
+            <input id="proxyPoolHost" placeholder="1.2.3.4">
+          </label>
+          <label>Port
+            <input id="proxyPoolPort" type="number" min="1" max="65535" step="1" placeholder="8080">
+          </label>
+          <label>Username
+            <input id="proxyPoolUsername" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          </label>
+          <label>Password
+            <input id="proxyPoolPassword" type="password" autocomplete="new-password">
+          </label>
+          <label>Notes
+            <textarea id="proxyPoolNotes" placeholder="Optional copy-paste notes or source"></textarea>
+          </label>
+          <div class="actions">
+            <button id="proxySaveSelectedBtn" type="button">Save selected</button>
+            <button id="proxyCopyUrlBtn" class="secondary" type="button">Copy URL</button>
+            <button id="proxyCopyCredsBtn" class="secondary" type="button">Copy credentials</button>
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
   <script>
     const API = '/manage/api';
@@ -3634,6 +3900,21 @@ function renderProxyPage() {
     const refreshBtn = document.getElementById('refreshBtn');
     const saveBtn = document.getElementById('saveBtn');
     const disableBtn = document.getElementById('disableBtn');
+    const proxyPoolFile = document.getElementById('proxyPoolFile');
+    const proxyImportBtn = document.getElementById('proxyImportBtn');
+    const proxyCheckBtn = document.getElementById('proxyCheckBtn');
+    const proxyPoolSummary = document.getElementById('proxyPoolSummary');
+    const proxyPoolFlash = document.getElementById('proxyPoolFlash');
+    const proxyPoolSelected = document.getElementById('proxyPoolSelected');
+    const proxyPoolProtocol = document.getElementById('proxyPoolProtocol');
+    const proxyPoolHost = document.getElementById('proxyPoolHost');
+    const proxyPoolPort = document.getElementById('proxyPoolPort');
+    const proxyPoolUsername = document.getElementById('proxyPoolUsername');
+    const proxyPoolPassword = document.getElementById('proxyPoolPassword');
+    const proxyPoolNotes = document.getElementById('proxyPoolNotes');
+    const proxySaveSelectedBtn = document.getElementById('proxySaveSelectedBtn');
+    const proxyCopyUrlBtn = document.getElementById('proxyCopyUrlBtn');
+    const proxyCopyCredsBtn = document.getElementById('proxyCopyCredsBtn');
 
     function escapeHtml(value) {
       return String(value ?? '')
@@ -3660,6 +3941,98 @@ function renderProxyPage() {
       return Array.isArray(values) && values.length ? values.join('\n') : '';
     }
 
+    let currentProxyPool = initialProxy.proxy_pool || { entries: [], selected_id: '' };
+
+    function showPoolMessage(value, ok = true) {
+      proxyPoolFlash.hidden = false;
+      proxyPoolFlash.style.borderColor = ok ? '#1d4ed8' : '#7f1d1d';
+      proxyPoolFlash.textContent = value;
+    }
+
+    function copyText(value) {
+      return navigator.clipboard.writeText(String(value || ''));
+    }
+
+    function poolEntryUrl(entry) {
+      if (!entry) return '';
+      const protocol = String(entry.protocol || 'http').trim().toLowerCase() || 'http';
+      const auth = entry.username
+        ? encodeURIComponent(entry.username) + (entry.password ? ':' + encodeURIComponent(entry.password) : '') + '@'
+        : '';
+      const host = String(entry.host || '').includes(':') && !String(entry.host || '').startsWith('[')
+        ? '[' + String(entry.host || '').trim() + ']'
+        : String(entry.host || '').trim();
+      return protocol + '://' + auth + host + ':' + entry.port;
+    }
+
+    function poolEntryCopyText(entry) {
+      if (!entry) return '';
+      return [
+        'proxy_url=' + poolEntryUrl(entry),
+        'proxy_protocol=' + (entry.protocol || 'http'),
+        'proxy_host=' + (entry.host || ''),
+        'proxy_port=' + (entry.port || ''),
+        'proxy_username=' + (entry.username || ''),
+        'proxy_password=' + (entry.password || ''),
+      ].join('\n');
+    }
+
+    function getSelectedPoolEntry() {
+      const pool = currentProxyPool || {};
+      const entries = Array.isArray(pool.entries) ? pool.entries : [];
+      const selectedId = String(pool.selected_id || '');
+      return entries.find((entry) => String(entry.id) === selectedId) || entries.find((entry) => entry.working) || entries[0] || null;
+    }
+
+    function renderProxyPoolOptions(entries, selectedId = '') {
+      const list = Array.isArray(entries) ? entries : [];
+      if (!list.length) {
+        proxyPoolSelected.innerHTML = '<option value="">No proxies imported</option>';
+        return;
+      }
+      proxyPoolSelected.innerHTML = list.map((entry, index) => {
+        const label = (entry.label || entry.host || ('proxy-' + (index + 1))) + ' · ' + (entry.host || '') + ':' + (entry.port || '');
+        return '<option value="' + escapeHtml(String(entry.id || '')) + '"' + (String(entry.id || '') === String(selectedId || '') ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+      }).join('');
+    }
+
+    function renderProxyPoolSummary(pool) {
+      const entries = Array.isArray(pool?.entries) ? pool.entries : [];
+      const selected = getSelectedPoolEntry();
+      const workingCount = entries.filter((entry) => entry.working).length;
+      const selectedLabel = selected
+        ? (selected.label || selected.host || 'Selected proxy') + ' · ' + poolEntryUrl(selected)
+        : 'No proxy selected';
+      proxyPoolSummary.innerHTML =
+        '<div><strong>' + escapeHtml(String(entries.length)) + '</strong> proxies imported, <strong>' + escapeHtml(String(workingCount)) + '</strong> marked working</div>' +
+        '<div class="small">' + escapeHtml(selectedLabel) + '</div>' +
+        '<div class="small">' + escapeHtml(selected?.checked_at || pool?.checked_at || 'Not checked yet') + '</div>' +
+        '<div class="small">' + escapeHtml(selected?.last_error || '') + '</div>';
+    }
+
+    function applyProxyPool(data) {
+      const pool = data?.proxy_pool || data || { entries: [], selected_id: '' };
+      currentProxyPool = {
+        source_file: pool.source_file || '',
+        selected_id: pool.selected_id || '',
+        checked_at: pool.checked_at || '',
+        entries: Array.isArray(pool.entries) ? pool.entries : [],
+      };
+      renderProxyPoolOptions(currentProxyPool.entries, currentProxyPool.selected_id);
+      renderProxyPoolSummary(currentProxyPool);
+      const selected = getSelectedPoolEntry();
+      proxyPoolProtocol.value = selected?.protocol || 'http';
+      proxyPoolHost.value = selected?.host || '';
+      proxyPoolPort.value = selected?.port || 8080;
+      proxyPoolUsername.value = selected?.username || '';
+      proxyPoolPassword.value = selected?.password || '';
+      proxyPoolNotes.value = selected?.notes || '';
+      proxyCheckBtn.disabled = !selected;
+      proxySaveSelectedBtn.disabled = !selected;
+      proxyCopyUrlBtn.disabled = !selected;
+      proxyCopyCredsBtn.disabled = !selected;
+    }
+
     function applyProxy(data) {
       const proxy = data?.proxy || data || {};
       const status = proxy.status || {};
@@ -3683,6 +4056,7 @@ function renderProxyPage() {
       configPathText.textContent = proxy.sourcePath || '${escapeHtml(VPS_PROXY_CONFIG_FILE)}';
       confPathText.textContent = proxy.confPath || '${escapeHtml(TINYPROXY_CONF_FILE)}';
       serviceNameText.textContent = proxy.service || '${escapeHtml(TINYPROXY_SERVICE)}';
+      applyProxyPool(proxy);
     }
 
     async function api(path, options = {}) {
@@ -3731,6 +4105,81 @@ function renderProxyPage() {
       showMessage(data.message || 'Proxy service saved and applied');
     }
 
+    async function importProxyPool() {
+      const file = proxyPoolFile.files && proxyPoolFile.files[0];
+      if (!file) {
+        throw new Error('Choose a proxy JSON file first');
+      }
+      const text = await file.text();
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch (error) {
+        throw new Error('Invalid JSON file: ' + error.message);
+      }
+      const payload = {
+        proxies: Array.isArray(parsed) ? parsed : (parsed.proxies || parsed.entries || parsed.proxy_pool || parsed),
+        source_file: file.name || 'uploaded.json',
+      };
+      const data = await api('/proxy/pool/import', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      applyProxy(data);
+      showPoolMessage(data.message || 'Proxy pool imported');
+      proxyPoolFile.value = '';
+    }
+
+    async function checkSelectedProxy() {
+      const selected = getSelectedPoolEntry();
+      if (!selected) {
+        throw new Error('No proxy is selected');
+      }
+      const data = await api('/proxy/pool/check', {
+        method: 'POST',
+        body: JSON.stringify({ id: selected.id }),
+      });
+      applyProxy(data);
+      showPoolMessage(data.message || 'Selected proxy checked');
+      return data;
+    }
+
+    async function saveSelectedProxy() {
+      const selected = getSelectedPoolEntry();
+      if (!selected) {
+        throw new Error('No proxy is selected');
+      }
+      const payload = {
+        id: selected.id,
+        protocol: proxyPoolProtocol.value,
+        host: proxyPoolHost.value.trim(),
+        port: Number.parseInt(proxyPoolPort.value, 10) || 80,
+        username: proxyPoolUsername.value.trim(),
+        password: proxyPoolPassword.value,
+        notes: proxyPoolNotes.value.trim(),
+      };
+      const data = await api('/proxy/pool/selected', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      applyProxy(data);
+      showPoolMessage(data.message || 'Selected proxy saved');
+    }
+
+    async function copySelectedProxyUrl() {
+      const selected = getSelectedPoolEntry();
+      if (!selected) return;
+      await copyText(poolEntryUrl(selected));
+      showPoolMessage('Proxy URL copied');
+    }
+
+    async function copySelectedProxyCreds() {
+      const selected = getSelectedPoolEntry();
+      if (!selected) return;
+      await copyText(poolEntryCopyText(selected));
+      showPoolMessage('Proxy credentials copied');
+    }
+
     refreshBtn.addEventListener('click', async () => {
       refreshBtn.disabled = true;
       try {
@@ -3753,6 +4202,70 @@ function renderProxyPage() {
       } finally {
         saveBtn.disabled = false;
         disableBtn.disabled = false;
+      }
+    });
+
+    proxyPoolSelected.addEventListener('change', () => {
+      const selected = (currentProxyPool.entries || []).find((entry) => String(entry.id) === String(proxyPoolSelected.value));
+      if (!selected) return;
+      currentProxyPool = { ...currentProxyPool, selected_id: selected.id };
+      proxyPoolProtocol.value = selected.protocol || 'http';
+      proxyPoolHost.value = selected.host || '';
+      proxyPoolPort.value = selected.port || 8080;
+      proxyPoolUsername.value = selected.username || '';
+      proxyPoolPassword.value = selected.password || '';
+      proxyPoolNotes.value = selected.notes || '';
+      renderProxyPoolSummary(currentProxyPool);
+    });
+
+    proxyImportBtn.addEventListener('click', async () => {
+      proxyImportBtn.disabled = true;
+      proxyCheckBtn.disabled = true;
+      try {
+        await importProxyPool();
+      } catch (error) {
+        showPoolMessage(error.message, false);
+      } finally {
+        proxyImportBtn.disabled = false;
+        proxyCheckBtn.disabled = !getSelectedPoolEntry();
+      }
+    });
+
+    proxyCheckBtn.addEventListener('click', async () => {
+      proxyCheckBtn.disabled = true;
+      try {
+        await checkSelectedProxy();
+      } catch (error) {
+        showPoolMessage(error.message, false);
+      } finally {
+        proxyCheckBtn.disabled = !getSelectedPoolEntry();
+      }
+    });
+
+    proxySaveSelectedBtn.addEventListener('click', async () => {
+      proxySaveSelectedBtn.disabled = true;
+      try {
+        await saveSelectedProxy();
+      } catch (error) {
+        showPoolMessage(error.message, false);
+      } finally {
+        proxySaveSelectedBtn.disabled = !getSelectedPoolEntry();
+      }
+    });
+
+    proxyCopyUrlBtn.addEventListener('click', async () => {
+      try {
+        await copySelectedProxyUrl();
+      } catch (error) {
+        showPoolMessage(error.message, false);
+      }
+    });
+
+    proxyCopyCredsBtn.addEventListener('click', async () => {
+      try {
+        await copySelectedProxyCreds();
+      } catch (error) {
+        showPoolMessage(error.message, false);
       }
     });
 
@@ -7502,6 +8015,127 @@ async function handleRequest(req, res) {
     if (req.method === 'GET' && routePath === '/api/proxy') {
       sendJson(res, 200, {
         proxy: readProxyServiceStatus(),
+      });
+      return;
+    }
+
+    if (req.method === 'GET' && routePath === '/api/proxy/pool') {
+      const proxy = readProxyServiceStatus();
+      sendJson(res, 200, {
+        proxy,
+        proxy_pool: proxy.proxy_pool,
+        selected_proxy: proxy.selected_proxy,
+      });
+      return;
+    }
+
+    if (routePath === '/api/proxy/pool/import' && req.method === 'POST') {
+      const body = await readBody(req);
+      const rawEntries = Array.isArray(body)
+        ? body
+        : Array.isArray(body.proxies)
+          ? body.proxies
+          : Array.isArray(body.entries)
+            ? body.entries
+            : Array.isArray(body.proxy_pool?.entries)
+              ? body.proxy_pool.entries
+              : [];
+      if (!rawEntries.length) {
+        throw new Error('No proxies found in the uploaded JSON');
+      }
+      const normalizedEntries = rawEntries.map((entry, index) => normalizeProxyPoolEntry(entry, index));
+      const testedEntries = [];
+      let selectedId = '';
+      let poolCheckedAt = new Date().toISOString();
+      for (const entry of normalizedEntries) {
+        const result = testProxyEntry(entry);
+        const checkedEntry = markProxyPoolEntryResult(entry, result);
+        testedEntries.push(checkedEntry);
+        poolCheckedAt = checkedEntry.checked_at;
+        if (result.ok) {
+          selectedId = checkedEntry.id;
+          break;
+        }
+      }
+      if (testedEntries.length < normalizedEntries.length) {
+        testedEntries.push(...normalizedEntries.slice(testedEntries.length).map((entry) => ({ ...entry })));
+      }
+      const saved = saveProxyPool({
+        ...readProxyServiceConfig(),
+        proxy_pool: {
+          source_file: String(body.source_file || body.file_name || body.fileName || 'uploaded.json').trim() || 'uploaded.json',
+          selected_id: selectedId || testedEntries[0]?.id || '',
+          checked_at: poolCheckedAt,
+          entries: testedEntries,
+        },
+      });
+      sendJson(res, 200, {
+        ok: true,
+        message: selectedId ? 'Proxy list imported and first working proxy selected' : 'Proxy list imported, but no working proxy was found',
+        proxy: saved,
+        proxy_pool: saved.proxy_pool,
+        selected_proxy: saved.selected_proxy,
+      });
+      return;
+    }
+
+    if (routePath === '/api/proxy/pool/check' && req.method === 'POST') {
+      const body = await readBody(req);
+      const config = readProxyServiceConfig();
+      const pool = config.proxy_pool || normalizeProxyPool({});
+      const entryId = String(body.id || pool.selected_id || '').trim();
+      const target = pool.entries.find((entry) => String(entry.id) === entryId);
+      if (!target) throw new Error('Selected proxy not found');
+      const result = testProxyEntry(target);
+      const nextPool = {
+        ...pool,
+        selected_id: target.id,
+        checked_at: result.checked_at,
+        entries: pool.entries.map((entry) => (String(entry.id) === String(target.id) ? markProxyPoolEntryResult(entry, result) : entry)),
+      };
+      const saved = saveProxyPool({ ...config, proxy_pool: nextPool });
+      sendJson(res, 200, {
+        ok: result.ok,
+        message: result.ok ? 'Selected proxy is working' : `Selected proxy check failed: ${result.error}`,
+        proxy: saved,
+        proxy_pool: saved.proxy_pool,
+        selected_proxy: saved.selected_proxy,
+      });
+      return;
+    }
+
+    if (routePath === '/api/proxy/pool/selected' && req.method === 'POST') {
+      const body = await readBody(req);
+      const config = readProxyServiceConfig();
+      const pool = config.proxy_pool || normalizeProxyPool({});
+      const entryId = String(body.id || pool.selected_id || '').trim();
+      if (!entryId) throw new Error('Selected proxy not found');
+      const target = pool.entries.find((entry) => String(entry.id) === entryId);
+      if (!target) throw new Error('Selected proxy not found');
+      const updatedEntry = normalizeProxyPoolEntry({
+        ...target,
+        protocol: body.protocol ?? target.protocol,
+        host: body.host ?? target.host,
+        port: body.port ?? target.port,
+        username: body.username ?? target.username,
+        password: body.password ?? target.password,
+        notes: body.notes ?? target.notes,
+        id: target.id,
+      }, pool.entries.findIndex((entry) => String(entry.id) === String(target.id)));
+      const result = testProxyEntry(updatedEntry);
+      const nextPool = {
+        ...pool,
+        selected_id: updatedEntry.id,
+        checked_at: result.checked_at,
+        entries: pool.entries.map((entry) => (String(entry.id) === String(updatedEntry.id) ? markProxyPoolEntryResult(updatedEntry, result) : entry)),
+      };
+      const saved = saveProxyPool({ ...config, proxy_pool: nextPool });
+      sendJson(res, 200, {
+        ok: result.ok,
+        message: result.ok ? 'Selected proxy saved and working' : `Selected proxy saved, but check failed: ${result.error}`,
+        proxy: saved,
+        proxy_pool: saved.proxy_pool,
+        selected_proxy: saved.selected_proxy,
       });
       return;
     }
