@@ -574,7 +574,7 @@ function projectFallbackDomain(domain) {
 }
 
 function normalizeDomainBinding(binding, fallback = {}) {
-  const domain = String(binding?.domain || '').trim();
+  const domain = String(binding?.domain || '').trim().toLowerCase();
   if (!domain) return null;
   return {
     domain,
@@ -6580,6 +6580,18 @@ function renderPage() {
     }
     updateInstallRepoWarning();
 
+    const domainInput = document.getElementById('domain');
+    if (domainInput) {
+      const normalizeDomainInput = () => {
+        const value = String(domainInput.value || '').trim().toLowerCase();
+        if (domainInput.value !== value) {
+          domainInput.value = value;
+        }
+      };
+      domainInput.addEventListener('blur', normalizeDomainInput);
+      domainInput.addEventListener('change', normalizeDomainInput);
+    }
+
     window.addEventListener('pageshow', () => {
       resetInstallForm();
     });
@@ -6995,8 +7007,9 @@ async function handleRequest(req, res) {
     if (req.method === 'POST' && routePath === '/api/projects') {
       const body = await readBody(req);
       const repo = repoRefFromArg(body.repo || '');
+      const domain = String(body.domain || '').trim().toLowerCase();
       const args = ['install'];
-      if (body.domain) args.push('--domain', String(body.domain).trim());
+      if (domain) args.push('--domain', domain);
       if (body.branch) args.push('--branch', String(body.branch).trim());
       if (body.pm2Name) args.push('--pm2-name', String(body.pm2Name).trim());
       if (body.port) args.push('--port', String(body.port).trim());

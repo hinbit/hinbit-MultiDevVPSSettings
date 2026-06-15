@@ -35,7 +35,7 @@ append_project_domains() {
   [[ -d "${PROJECT_META_DIR}" ]] || return 0
   for meta in "${PROJECT_META_DIR}"/*.env; do
     [[ -e "${meta}" ]] || continue
-    domain="$(meta_env_value "${meta}" APP_DOMAIN)"
+    domain="$(meta_env_value "${meta}" APP_DOMAIN | tr '[:upper:]' '[:lower:]')"
     port="$(meta_env_value "${meta}" APP_PORT)"
     type="$(meta_env_value "${meta}" APP_TYPE)"
     https="$(meta_env_value "${meta}" APP_HTTPS)"
@@ -44,6 +44,7 @@ append_project_domains() {
     proxy_routes_by_domain["${domain}"]="${proxy_routes_json}"
     printf '%s,%s,%s,%s\n' "${domain}" "${port}" "${type:-node}" "${https:-yes}"
     while IFS=$'\t' read -r extra_domain extra_port extra_type extra_https; do
+      extra_domain="$(printf '%s' "${extra_domain}" | tr '[:upper:]' '[:lower:]')"
       [[ -n "${extra_domain:-}" && -n "${extra_port:-}" ]] || continue
       proxy_routes_by_domain["${extra_domain}"]="${proxy_routes_json}"
       printf '%s,%s,%s,%s\n' "${extra_domain}" "${extra_port}" "${extra_type:-${type:-node}}" "${extra_https:-${https:-yes}}"
@@ -79,10 +80,11 @@ except Exception:
     raise SystemExit(0)
 
 primary_domain = os.environ.get("APP_DOMAIN", "")
+primary_domain = primary_domain.strip().lower()
 for item in data if isinstance(data, list) else []:
     if not isinstance(item, dict):
         continue
-    dom = str(item.get("domain", "")).strip()
+    dom = str(item.get("domain", "")).strip().lower()
     if not dom or dom == primary_domain:
         continue
     port = str(item.get("port", "")).strip() or os.environ.get("APP_PORT", "")
@@ -287,10 +289,11 @@ awk -F, -v OFS=, '
     gsub(/\r/, "", $2);
     gsub(/\r/, "", $3);
     gsub(/\r/, "", $4);
-    if (!seen[$1]++) {
-      order[++count] = $1;
+    domain = tolower($1);
+    if (!seen[domain]++) {
+      order[++count] = domain;
     }
-    rows[$1] = $1 OFS $2 OFS $3 OFS $4;
+    rows[domain] = domain OFS $2 OFS $3 OFS $4;
   }
   END {
     print "domain,port,type,https";

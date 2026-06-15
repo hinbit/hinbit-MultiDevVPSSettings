@@ -154,9 +154,19 @@ branch_from_repo() {
   printf 'main'
 }
 
-validate_domain() {
+normalize_domain() {
   local domain="$1"
-  [[ "${domain}" =~ ^[A-Za-z0-9.-]+$ ]] || die "Invalid domain: ${domain}"
+  domain="${domain//$'\r'/}"
+  domain="${domain//[[:space:]]/}"
+  domain="$(printf '%s' "${domain}" | tr '[:upper:]' '[:lower:]')"
+  printf '%s' "${domain}"
+}
+
+validate_domain() {
+  local domain
+  domain="$(normalize_domain "$1")"
+  [[ "${domain}" =~ ^[a-z0-9.-]+$ ]] || die "Invalid domain: ${1}"
+  printf '%s' "${domain}"
 }
 
 meta_path_for_slug() {
@@ -3124,7 +3134,7 @@ do_install() {
   BRANCH="$(branch_from_repo "${REPO_REF}" "${branch}")"
   PM2_NAME="${pm2_name:-${PROJECT_SLUG}}"
   APP_PORT="${forced_port:-$(pick_port)}"
-  APP_DOMAIN="${domain:-}"
+  APP_DOMAIN="$(normalize_domain "${domain:-}")"
   APP_HTTPS="${https:-yes}"
   APP_TYPE="project"
   DEPLOY_RUNTIME="$(normalize_deploy_runtime "${deploy_runtime}")"
@@ -3142,7 +3152,7 @@ do_install() {
   ensure_meta_dir
   ensure_app_map
   if [[ -n "${APP_DOMAIN}" ]]; then
-    validate_domain "${APP_DOMAIN}"
+    APP_DOMAIN="$(validate_domain "${APP_DOMAIN}")"
   fi
 
   MYSQL_ALLOWED_IPS="$(project_env_value MYSQL_ALLOWED_IPS)"
@@ -3289,6 +3299,9 @@ do_update() {
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
   DEPLOY_RUNTIME="$(normalize_deploy_runtime "${DEPLOY_RUNTIME:-auto}")"
+  if [[ -n "${APP_DOMAIN:-}" ]]; then
+    APP_DOMAIN="$(normalize_domain "${APP_DOMAIN}")"
+  fi
   if [[ -z "${DB_MACHINE_ID:-}" ]]; then
     DB_MACHINE_ID="$(project_db_machine_id)"
   fi

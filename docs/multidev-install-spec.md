@@ -174,6 +174,7 @@ Minimum root contract:
 - root scripts proxy into `server/`, `client/`, or `dashboard/` when that is where the real code lives
 - env templates exist before the first install
 - route special cases are documented in root `VPS-INSTALL.MD`
+- hostnames should be treated case-insensitively, but Multidev normalizes them to lowercase before writing cert paths, nginx filenames, and app-map entries
 
 Good pattern:
 - Multidev installs the root app first

@@ -50,6 +50,8 @@ projectctl install --domain example.com --branch main --pm2-name example-app --e
 projectctl install --domain example.com --branch main --pm2-name example-app --runtime docker owner/repo
 ```
 
+Domains are normalized to lowercase before Multidev writes cert paths, nginx filenames, and app-map entries, so mixed-case hostnames should not be used as-is in templates or install notes.
+
 If the repo is private under a separate GitHub account, configure the SSH key in `/manage/ssh-keys/` with its GitHub user. The manage panel writes root's SSH config for you and `projectctl` will clone through the matching host alias (`github.com` for `shaykid`, `github-hinbit` for `hinbit`). `projectctl` clones as root, so uploading a key into the VPS is not enough by itself.
 
 Project SFTP upload users are now generated from the repo name part, not the full `owner/repo` string, and are capped at 12 characters total. That keeps the login name short enough for Linux user limits even when the owner name is long.
