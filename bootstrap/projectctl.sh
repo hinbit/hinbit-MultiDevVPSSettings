@@ -36,6 +36,7 @@ ENV_CANDIDATES=(
   .env.machine
   .env.production.local
   .env.development
+  .env.duplicate
 )
 
 die() {
@@ -49,6 +50,7 @@ Usage:
   projectctl install [--domain example.com] [--https yes|no] [--branch main] [--pm2-name name] [--port N] [--db-machine id] [--runtime auto|node|docker] [--env-file path] [--entrypoint path] owner/repo
   projectctl update owner/repo
   projectctl build [--all] owner/repo
+  projectctl duplicate [--domain example.com] [--env-mode share|copy] [--db-mode same|separate] [--pm2-name name] [--port N] owner/repo
   projectctl restart owner/repo
   projectctl stop owner/repo
   projectctl status owner/repo
@@ -94,6 +96,27 @@ repo_ref_from_arg() {
   printf '%s' "${ref}"
 }
 
+project_ref_from_arg() {
+  local ref="$1"
+  ref="${ref#git@github.com:}"
+  ref="${ref#git@github-developseach:}"
+  ref="${ref#git@github-hinbit:}"
+  ref="${ref#https://github.com/}"
+  ref="${ref#https://github-developseach/}"
+  ref="${ref#https://github-hinbit/}"
+  ref="${ref#github.com:}"
+  ref="${ref#github-developseach:}"
+  ref="${ref#github-hinbit:}"
+  ref="${ref%.git}"
+  printf '%s' "${ref}"
+}
+
+repo_ref_base() {
+  local ref="$1"
+  ref="${ref%%::dup:*}"
+  printf '%s' "${ref}"
+}
+
 slug_from_ref() {
   local ref="$1"
   printf '%s' "${ref//\//-}" | sed 's/[^A-Za-z0-9._-]/-/g'
@@ -122,27 +145,43 @@ github_ssh_host_from_owner() {
   printf 'github-%s' "${owner}"
 }
 
+project_duplicate_slug_from_domain() {
+  local domain="$1"
+  local slug=""
+
+  domain="$(normalize_domain "${domain}")"
+  slug="$(printf '%s' "${domain}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g; s/-\{2,\}/-/g; s/^-//; s/-$//')"
+  [[ -n "${slug}" ]] || die "Unable to derive duplicate project slug from domain: ${domain}"
+  truncate_identifier_with_hash "${slug}" 48 6
+}
+
 repo_url_from_ref() {
   local ref="$1"
+  local base_ref=""
   local owner="${ref%%/*}"
   local host=""
 
+  base_ref="$(repo_ref_base "$(repo_ref_from_arg "${ref}")")"
+  owner="${base_ref%%/*}"
   host="$(github_ssh_host_from_owner "${owner}")"
-  printf 'git@%s:%s.git' "${host}" "$1"
+  printf 'git@%s:%s.git' "${host}" "${base_ref}"
 }
 
 branch_from_repo() {
   local ref="$1"
   local branch="${2:-}"
   local resolved=""
+  local base_ref=""
 
   if [[ -n "${branch}" ]]; then
     printf '%s' "${branch}"
     return
   fi
 
+  base_ref="$(repo_ref_base "$(repo_ref_from_arg "${ref}")")"
+
   resolved="$(
-    git ls-remote --symref "$(repo_url_from_ref "${ref}")" HEAD 2>/dev/null \
+    git ls-remote --symref "$(repo_url_from_ref "${base_ref}")" HEAD 2>/dev/null \
       | awk '/^ref:/ { sub("refs/heads/", "", $2); print $2; exit }'
   )"
 
@@ -435,6 +474,341 @@ project_db_env_paths() {
       printf '%s\n' "${project_dir}/dashboard/${candidate}"
     done
   fi
+}
+
+project_env_tree_paths() {
+  local project_dir="${1:-${APP_DIR}}"
+  local candidate=""
+  local base=""
+
+  [[ -d "${project_dir}" ]] || return 0
+  for base in "${project_dir}" "${project_dir}/server" "${project_dir}/client" "${project_dir}/dashboard"; do
+    [[ -d "${base}" ]] || continue
+    for candidate in "${ENV_CANDIDATES[@]}"; do
+      [[ -f "${base}/${candidate}" ]] || continue
+      printf '%s\n' "${base}/${candidate}"
+    done
+  done
+}
+
+project_duplicate_overlay_paths() {
+  local project_dir="${1:-${APP_DIR}}"
+  local base=""
+
+  [[ -d "${project_dir}" ]] || return 0
+  for base in "${project_dir}" "${project_dir}/server" "${project_dir}/client" "${project_dir}/dashboard"; do
+    [[ -d "${base}" ]] || continue
+    printf '%s\n' "${base}/.env.duplicate"
+  done
+}
+
+copy_project_tree_from_source() {
+  local source_dir="$1"
+  local target_dir="$2"
+  local sync_env_base="${3:-yes}"
+  local -a rsync_args=(
+    -a
+    --delete
+    --delete-excluded
+    --exclude='.git'
+    --exclude='node_modules'
+    --exclude='.env.duplicate'
+    --exclude='server/.env.duplicate'
+    --exclude='client/.env.duplicate'
+    --exclude='dashboard/.env.duplicate'
+  )
+
+  [[ -d "${source_dir}" ]] || die "Missing source directory: ${source_dir}"
+  mkdir -p "${target_dir}"
+
+  if [[ "${sync_env_base}" != "yes" ]]; then
+    rsync_args+=(
+      --exclude='.env'
+      --exclude='.env.local'
+      --exclude='.env.production'
+      --exclude='.env.credentials'
+      --exclude='.env.machine'
+      --exclude='.env.production.local'
+      --exclude='.env.development'
+      --exclude='server/.env'
+      --exclude='server/.env.local'
+      --exclude='server/.env.production'
+      --exclude='server/.env.credentials'
+      --exclude='server/.env.machine'
+      --exclude='server/.env.production.local'
+      --exclude='server/.env.development'
+      --exclude='client/.env'
+      --exclude='client/.env.local'
+      --exclude='client/.env.production'
+      --exclude='client/.env.credentials'
+      --exclude='client/.env.machine'
+      --exclude='client/.env.production.local'
+      --exclude='client/.env.development'
+      --exclude='dashboard/.env'
+      --exclude='dashboard/.env.local'
+      --exclude='dashboard/.env.production'
+      --exclude='dashboard/.env.credentials'
+      --exclude='dashboard/.env.machine'
+      --exclude='dashboard/.env.production.local'
+      --exclude='dashboard/.env.development'
+    )
+  fi
+
+  rsync "${rsync_args[@]}" "${source_dir}/" "${target_dir}/"
+}
+
+sync_duplicate_project_from_source() {
+  local source_ref="$1"
+  local target_ref="$2"
+  local target_domain="$3"
+  local env_mode="${4:-copy}"
+  local db_mode="${5:-same}"
+  local target_port="${6:-}"
+  local pm2_name="${7:-}"
+  local sync_env_base="${8:-yes}"
+  local clone_db="${9:-no}"
+  local source_meta=""
+  local source_dir=""
+  local source_branch=""
+  local source_https=""
+  local source_app_type=""
+  local source_deploy_runtime=""
+  local source_package_manager=""
+  local source_db_machine_id=""
+  local source_db_machine_name=""
+  local source_db_machine_host=""
+  local source_db_machine_port=""
+  local source_db_machine_root_user=""
+  local source_db_machine_root_password=""
+  local source_db_machine_notes=""
+  local source_db_name=""
+  local source_db_user=""
+  local source_db_password=""
+  local source_db_type=""
+  local target_dir=""
+  local meta=""
+  local db_name=""
+  local db_user=""
+  local db_password=""
+  local db_type=""
+  local target_slug=""
+  local source_repo_ref=""
+  local source_slug=""
+  local target_machine_id=""
+  local target_machine_name=""
+  local target_machine_host=""
+  local target_machine_port=""
+  local target_machine_root_user=""
+  local target_machine_root_password=""
+  local target_machine_notes=""
+  local target_existing_db_name=""
+  local target_existing_db_user=""
+  local target_existing_db_password=""
+  local target_existing_db_type=""
+  local target_existing_port=""
+  local target_existing_pm2_name=""
+  local target_existing_deploy_runtime=""
+  local target_existing_app_type=""
+  local target_existing_https=""
+  local target_existing_ssh_user=""
+  local target_existing_ssh_password=""
+  local build_failed="no"
+  local db_bootstrap_ready="no"
+  local build_mode="${PROJECTCTL_BUILD_MODE:-all}"
+  local effective_db_host=""
+
+  [[ -n "${source_ref}" ]] || die "Missing source project for duplicate"
+  [[ -n "${target_ref}" ]] || die "Missing duplicate project ref"
+  [[ -n "${target_domain}" ]] || die "Missing duplicate domain"
+
+  source_meta="$(meta_path_for_slug "$(slug_from_ref "$(project_ref_from_arg "${source_ref}")")")"
+  load_meta "${source_meta}"
+  source_dir="${APP_DIR}"
+  source_repo_ref="${REPO_REF}"
+  source_slug="${PROJECT_SLUG}"
+  source_branch="${BRANCH:-main}"
+  source_https="${APP_HTTPS:-yes}"
+  source_app_type="${APP_TYPE:-project}"
+  source_deploy_runtime="${DEPLOY_RUNTIME:-auto}"
+  source_package_manager="${PACKAGE_MANAGER:-}"
+  source_db_machine_id="${DB_MACHINE_ID:-${LOCAL_DB_MACHINE_ID}}"
+  source_db_machine_name="${DB_MACHINE_NAME:-}"
+  source_db_machine_host="${DB_MACHINE_HOST:-127.0.0.1}"
+  source_db_machine_port="${DB_MACHINE_PORT:-3306}"
+  source_db_machine_root_user="${DB_MACHINE_ROOT_USER:-root}"
+  source_db_machine_root_password="${DB_MACHINE_ROOT_PASSWORD:-}"
+  source_db_machine_notes="${DB_MACHINE_NOTES:-}"
+  source_db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
+  source_db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
+  source_db_password="$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)"
+  source_db_type="$(project_db_value DB_TYPE VITE_DB_TYPE)"
+  target_slug="$(slug_from_ref "$(project_ref_from_arg "${target_ref}")")"
+  [[ -n "${target_slug}" ]] || target_slug="$(project_duplicate_slug_from_domain "${target_domain}")"
+  target_dir="${APP_ROOT}/${target_slug}"
+  target_dir="${target_dir%/}"
+
+  if [[ -d "${target_dir}" ]]; then
+    APP_DIR="${target_dir}"
+    target_existing_db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
+    target_existing_db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
+    target_existing_db_password="$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)"
+    target_existing_db_type="$(project_db_value DB_TYPE VITE_DB_TYPE)"
+    target_existing_port="$(project_db_value APP_PORT PORT)"
+    target_existing_pm2_name="$(project_db_value PM2_NAME)"
+    target_existing_deploy_runtime="$(project_db_value DEPLOY_RUNTIME)"
+    target_existing_app_type="$(project_db_value APP_TYPE)"
+    target_existing_https="$(project_db_value APP_HTTPS)"
+    target_existing_ssh_user="$(project_db_value SSH_UPLOAD_USER)"
+    target_existing_ssh_password="$(project_db_value SSH_UPLOAD_PASSWORD)"
+  fi
+
+  copy_project_tree_from_source "${source_dir}" "${target_dir}" "${sync_env_base}"
+
+  APP_DIR="${target_dir}"
+  REPO_REF="${target_slug}"
+  SOURCE_REPO_REF="${source_repo_ref}"
+  DUPLICATE_SOURCE_REPO_REF="${source_repo_ref}"
+  DUPLICATE_ENV_MODE="${env_mode}"
+  DUPLICATE_DB_MODE="${db_mode}"
+  DUPLICATE_SOURCE_APP_DIR="${source_dir}"
+  REPO_URL="$(repo_url_from_ref "${source_repo_ref}")"
+  PROJECT_SLUG="${target_slug}"
+  BRANCH="${source_branch}"
+  PM2_NAME="${pm2_name:-${target_existing_pm2_name:-${PROJECT_SLUG}}}"
+  APP_PORT="${target_port:-${target_existing_port:-$(pick_port)}}"
+  APP_DOMAIN="$(normalize_domain "${target_domain}")"
+  APP_HTTPS="${target_existing_https:-${source_https}}"
+  APP_TYPE="${target_existing_app_type:-${source_app_type}}"
+  DEPLOY_RUNTIME="${target_existing_deploy_runtime:-${source_deploy_runtime}}"
+  PACKAGE_MANAGER="$(cd "${APP_DIR}" && detect_package_manager)"
+  GIT_REMOTE="origin"
+  SSH_UPLOAD_USER="${target_existing_ssh_user:-$(ssh_upload_user_from_slug "${PROJECT_SLUG}")}"
+  SSH_UPLOAD_PASSWORD="${target_existing_ssh_password:-$(generate_secret)}"
+  APP_PROXY_ROUTES_JSON="$(project_vps_install_proxy_routes_json "${APP_DIR}")"
+  meta="$(meta_path_for_slug "${PROJECT_SLUG}")"
+
+  if [[ "${clone_db}" == "yes" && "${db_mode}" == "separate" ]]; then
+    db_name="$(project_default_db_identifier "${REPO_REF}")"
+    db_user="$(project_default_db_user_identifier "${REPO_REF}")"
+    db_password="$(generate_secret)"
+    db_type="${source_db_type:-mysql}"
+    sync_project_db_env "${APP_DIR}" "${db_name}" "${db_user}" "${db_password}" "${db_type}"
+  elif [[ "${clone_db}" == "yes" && -n "${source_db_name}" && -n "${source_db_user}" && -n "${source_db_password}" ]]; then
+    sync_project_db_env "${APP_DIR}" "${source_db_name}" "${source_db_user}" "${source_db_password}" "${source_db_type}"
+  elif [[ "${db_mode}" == "separate" ]]; then
+    db_name="${target_existing_db_name:-$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)}"
+    db_user="${target_existing_db_user:-$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)}"
+    db_password="${target_existing_db_password:-$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)}"
+    db_type="${target_existing_db_type:-$(project_db_value DB_TYPE VITE_DB_TYPE)}"
+  else
+    db_name="${target_existing_db_name:-$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)}"
+    db_user="${target_existing_db_user:-$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)}"
+    db_password="${target_existing_db_password:-$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)}"
+    db_type="${target_existing_db_type:-$(project_db_value DB_TYPE VITE_DB_TYPE)}"
+  fi
+
+  if [[ "${clone_db}" != "yes" && "${db_mode}" == "separate" ]]; then
+    sync_project_db_env "${APP_DIR}" "${db_name}" "${db_user}" "${db_password}" "${db_type}"
+  fi
+
+  if [[ "${clone_db}" == "yes" && "${db_mode}" == "separate" ]]; then
+    target_machine_id="${source_db_machine_id}"
+    target_machine_name="${source_db_machine_name}"
+    target_machine_host="${source_db_machine_host}"
+    target_machine_port="${source_db_machine_port}"
+    target_machine_root_user="${source_db_machine_root_user}"
+    target_machine_root_password="${source_db_machine_root_password}"
+    target_machine_notes="${source_db_machine_notes}"
+  else
+    target_machine_id="${source_db_machine_id}"
+    target_machine_name="${source_db_machine_name}"
+    target_machine_host="${source_db_machine_host}"
+    target_machine_port="${source_db_machine_port}"
+    target_machine_root_user="${source_db_machine_root_user}"
+    target_machine_root_password="${source_db_machine_root_password}"
+    target_machine_notes="${source_db_machine_notes}"
+  fi
+
+  write_meta "${meta}"
+  chmod 0644 "${meta}"
+  if [[ "${clone_db}" == "yes" || "${sync_env_base}" == "yes" ]]; then
+    sync_project_db_machine_env "${target_machine_id}" "${target_machine_host}" "${target_machine_port}" "${target_machine_root_user}" "${target_machine_root_password}" "${target_machine_name}" "${target_machine_notes}"
+  fi
+  apply_duplicate_project_overrides "${source_dir}" "${APP_DIR}" "${APP_DOMAIN}" "${db_mode}" "${db_name}" "${db_user}" "${db_password}" "${db_type}" "${APP_HTTPS}" "${clone_db}"
+
+  if [[ "${clone_db}" == "yes" && "${db_mode}" == "separate" ]]; then
+    clone_mysql_database "${source_db_machine_host}" "${source_db_machine_port}" "${source_db_machine_root_user}" "${source_db_machine_root_password}" "${source_db_name}" "${target_machine_host}" "${target_machine_port}" "${target_machine_root_user}" "${target_machine_root_password}" "${db_name}" "${source_repo_ref}" "${PROJECT_SLUG}"
+  fi
+
+  effective_db_host="$(project_db_effective_host)"
+  if [[ -n "${db_name}" && -n "${db_user}" && -n "${db_password}" ]]; then
+    db_bootstrap_ready="yes"
+  fi
+
+  if [[ "${db_bootstrap_ready}" == "yes" && "${db_mode}" == "separate" ]]; then
+    sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "${MYSQL_ALLOWED_IPS:-}" "${target_machine_id}"
+  fi
+
+  if [[ "${db_mode}" == "same" ]]; then
+    normalize_project_deployment_env_file "${APP_DIR}/.env"
+    normalize_project_deployment_env_file "${APP_DIR}/server/.env"
+    normalize_project_deployment_env_file "${APP_DIR}/client/.env"
+    normalize_project_deployment_env_file "${APP_DIR}/dashboard/.env"
+  fi
+
+  (
+    cd "${APP_DIR}"
+    install_deps
+    if ! maybe_build "${meta}" "${build_mode}"; then
+      build_failed="yes"
+    fi
+  )
+
+  if [[ "${build_failed}" == "yes" ]]; then
+    die "Build failed for ${PROJECT_SLUG}"
+  fi
+
+  ensure_project_ssh_user "${SSH_UPLOAD_USER}" "${SSH_UPLOAD_PASSWORD}" "${APP_DIR}"
+  refresh_project_ssh_config
+  sync_app_map
+  verify_project_mapping "${PROJECT_SLUG}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
+  verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
+  restart_pm2
+  sync_app_map
+  verify_project_mapping "${PROJECT_SLUG}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
+  verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
+  verify_project_install "${PROJECT_SLUG}"
+  verify_project_http_smoke "${PROJECT_SLUG}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
+  touch_meta_file "${meta}"
+}
+
+sync_duplicate_projects_from_source() {
+  local source_ref="$1"
+  local source_repo_ref=""
+  local meta_file=""
+  local duplicate_ref=""
+  local duplicate_domain=""
+  local duplicate_env_mode=""
+  local duplicate_db_mode=""
+  local duplicate_port=""
+  local duplicate_sync_env_base="yes"
+
+  [[ -n "${source_ref}" ]] || return 0
+  source_repo_ref="$(project_ref_from_arg "${source_ref}")"
+
+  for meta_file in "${META_DIR}"/*.env; do
+    [[ -e "${meta_file}" ]] || continue
+    load_meta "${meta_file}"
+    [[ "${DUPLICATE_SOURCE_REPO_REF:-}" == "${source_repo_ref}" ]] || continue
+    duplicate_ref="${PROJECT_SLUG:-${REPO_REF:-}}"
+    duplicate_domain="${APP_DOMAIN:-}"
+    duplicate_env_mode="${DUPLICATE_ENV_MODE:-copy}"
+    duplicate_db_mode="${DUPLICATE_DB_MODE:-same}"
+    duplicate_port="${APP_PORT:-}"
+    duplicate_sync_env_base="no"
+    [[ "${duplicate_env_mode}" == "share" ]] && duplicate_sync_env_base="yes"
+    sync_duplicate_project_from_source "${source_repo_ref}" "${duplicate_ref}" "${duplicate_domain}" "${duplicate_env_mode}" "${duplicate_db_mode}" "${duplicate_port}" "" "${duplicate_sync_env_base}" "no"
+  done
 }
 
 normalize_env_file_shell_safe() {
@@ -1268,6 +1642,42 @@ migrate_mysql_database() {
   trap - RETURN
 }
 
+clone_mysql_database() {
+  local source_host="$1"
+  local source_port="$2"
+  local source_user="$3"
+  local source_password="$4"
+  local source_db_name="$5"
+  local target_host="$6"
+  local target_port="$7"
+  local target_user="$8"
+  local target_password="$9"
+  local target_db_name="${10:-}"
+  local source_label="${11:-source}"
+  local target_label="${12:-target}"
+  local dump_file=""
+  local source_marker=""
+  local target_marker=""
+
+  [[ -n "${source_db_name}" ]] || die "Missing source database name for clone"
+  [[ -n "${target_db_name}" ]] || die "Missing target database name for clone"
+  [[ -n "${source_host}" ]] || die "Missing source MySQL host for clone"
+  [[ -n "${target_host}" ]] || die "Missing target MySQL host for clone"
+
+  source_marker="${source_host}:${source_port:-3306}/${source_db_name} (${source_label})"
+  target_marker="${target_host}:${target_port:-3306}/${target_db_name} (${target_label})"
+  printf '[projectctl] cloning database %s from %s to %s\n' "${source_db_name}" "${source_marker}" "${target_marker}"
+
+  dump_file="$(mktemp)"
+  trap 'rm -f "'"${dump_file}"'"' RETURN
+
+  mysql_dump_with_details "${source_host}" "${source_port:-3306}" "${source_user}" "${source_password}" "${source_db_name}" "${dump_file}"
+  mysql_exec_with_details "${target_host}" "${target_port:-3306}" "${target_user}" "${target_password}" "CREATE DATABASE IF NOT EXISTS $(sql_ident "${target_db_name}") CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+  mysql_import_with_details "${target_host}" "${target_port:-3306}" "${target_user}" "${target_password}" "${target_db_name}" "${dump_file}"
+  rm -f "${dump_file}"
+  trap - RETURN
+}
+
 project_db_machine_id() {
   local machine_id=""
   machine_id="$(project_db_value DB_MACHINE_ID)"
@@ -1287,6 +1697,8 @@ project_db_host_is_local() {
 
 project_sidecar_ports() {
   local -a keys=(
+    PORT
+    APP_PORT
     MYSQL_API_PORT
     VITE_REACT_PORT
     VITE_DEV_PORT
@@ -1316,6 +1728,115 @@ project_sidecar_ports() {
   done
 
   printf '%s\n' "${ports[@]}"
+}
+
+duplicate_port_keys() {
+  printf '%s\n' \
+    PORT \
+    APP_PORT \
+    MYSQL_API_PORT \
+    VITE_REACT_PORT \
+    VITE_DEV_PORT \
+    API_PORT \
+    GUI_PORT \
+    FRONTEND_PORT \
+    BACKEND_PORT \
+    SERVER_PORT \
+    WEB_PORT \
+    ADMIN_PORT \
+    CONNECTOR_PORT
+}
+
+pick_unique_port() {
+  local -n reserved_ref="$1"
+  local start="${2:-${PORT_MIN}}"
+  local end="${3:-${PORT_MAX}}"
+  local port
+  local used
+  used="$(used_ports)"
+
+  for port in $(seq "${start}" "${end}"); do
+    if is_common_reserved_port "${port}"; then
+      continue
+    fi
+    if printf '%s\n' "${used}" | grep -qx "${port}"; then
+      continue
+    fi
+    if [[ " ${reserved_ref[*]} " == *" ${port} "* ]]; then
+      continue
+    fi
+    reserved_ref+=("${port}")
+    printf '%s' "${port}"
+    return 0
+  done
+
+  die "No free duplicate port found in range ${start}-${end}"
+}
+
+write_duplicate_port_overrides() {
+  local source_project_dir="${1:-${APP_DIR}}"
+  local target_project_dir="${2:-${APP_DIR}}"
+  local -A port_map=()
+  local -a reserved_ports=()
+  local saved_app_dir="${APP_DIR:-}"
+  local key=""
+  local current=""
+  local target_port=""
+
+  [[ -d "${source_project_dir}" ]] || return 0
+  [[ -d "${target_project_dir}" ]] || return 0
+
+  APP_DIR="${source_project_dir}"
+  while IFS= read -r key; do
+    [[ -n "${key}" ]] || continue
+    current="$(project_db_value "${key}")"
+    [[ "${current}" =~ ^[0-9]+$ ]] || continue
+    if [[ -z "${port_map[$current]:-}" ]]; then
+      port_map["$current"]="$(pick_unique_port reserved_ports)"
+    fi
+    target_port="${port_map[$current]}"
+    for overlay_file in "${target_project_dir}/.env" "${target_project_dir}/server/.env" "${target_project_dir}/client/.env" "${target_project_dir}/dashboard/.env"; do
+      [[ -f "${overlay_file}" ]] || continue
+      update_meta_value "${overlay_file}" "${key}" "${target_port}"
+      normalize_env_file_shell_safe "${overlay_file}"
+    done
+  done < <(duplicate_port_keys)
+  APP_DIR="${saved_app_dir}"
+}
+
+apply_duplicate_project_overrides() {
+  local source_project_dir="$1"
+  local target_project_dir="$2"
+  local target_domain="$3"
+  local target_db_mode="${4:-same}"
+  local target_db_name="${5:-}"
+  local target_db_user="${6:-}"
+  local target_db_password="${7:-}"
+  local db_type="${8:-mysql}"
+  local target_https="${9:-yes}"
+  local apply_db_overrides="${10:-yes}"
+  local env_file=""
+
+  [[ -d "${source_project_dir}" ]] || return 0
+  [[ -d "${target_project_dir}" ]] || return 0
+
+  for env_file in "${target_project_dir}/.env" "${target_project_dir}/server/.env" "${target_project_dir}/client/.env" "${target_project_dir}/dashboard/.env"; do
+    [[ -f "${env_file}" ]] || continue
+    update_meta_value "${env_file}" "APP_DOMAIN" "${target_domain}"
+    update_meta_value "${env_file}" "APP_HTTPS" "${target_https}"
+    update_meta_value "${env_file}" "APP_DOMAIN_BINDINGS_JSON" '[]'
+  done
+
+  write_duplicate_port_overrides "${source_project_dir}" "${target_project_dir}"
+
+  for env_file in "${target_project_dir}/.env" "${target_project_dir}/server/.env" "${target_project_dir}/client/.env" "${target_project_dir}/dashboard/.env"; do
+    [[ -f "${env_file}" ]] || continue
+    normalize_project_deployment_env_file "${env_file}"
+  done
+
+  if [[ "${apply_db_overrides}" == "yes" && "${target_db_mode}" == "separate" ]]; then
+    sync_project_db_env "${target_project_dir}" "${target_db_name}" "${target_db_user}" "${target_db_password}" "${db_type}"
+  fi
 }
 
 kill_listening_pids_on_port() {
@@ -2104,7 +2625,7 @@ docker_package_runner_command() {
 
 docker_runtime_command() {
   local runtime_cmd=""
-  local env_prefix="set -a; [ -f .env ] && . ./.env; [ -f .env.machine ] && . ./.env.machine; [ -f server/.env ] && . ./server/.env; [ -f client/.env ] && . ./client/.env; [ -f dashboard/.env ] && . ./dashboard/.env; set +a;"
+  local env_prefix="set -a; [ -f .env ] && . ./.env; [ -f .env.machine ] && . ./.env.machine; [ -f .env.duplicate ] && . ./.env.duplicate; [ -f server/.env ] && . ./server/.env; [ -f server/.env.duplicate ] && . ./server/.env.duplicate; [ -f client/.env ] && . ./client/.env; [ -f client/.env.duplicate ] && . ./client/.env.duplicate; [ -f dashboard/.env ] && . ./dashboard/.env; [ -f dashboard/.env.duplicate ] && . ./dashboard/.env.duplicate; set +a;"
 
   case "${START_KIND}" in
     npm-start)
@@ -2497,8 +3018,14 @@ PY
 
 write_meta() {
   local meta="$1"
+  local repo_for_url="${REPO_REF:-}"
   if [[ -n "${REPO_REF:-}" ]]; then
-    REPO_URL="$(repo_url_from_ref "${REPO_REF}")"
+    if [[ -z "${repo_for_url}" || "${repo_for_url}" != */* ]]; then
+      repo_for_url="${SOURCE_REPO_REF:-${DUPLICATE_SOURCE_REPO_REF:-${REPO_REF}}}"
+    fi
+    if [[ -n "${repo_for_url}" && "${repo_for_url}" == */* ]]; then
+      REPO_URL="$(repo_url_from_ref "${repo_for_url}")"
+    fi
     PROJECT_SLUG="$(slug_from_ref "${REPO_REF}")"
   fi
   cat > "${meta}" <<EOF
@@ -2519,6 +3046,11 @@ GIT_REMOTE=${GIT_REMOTE}
 START_KIND=${START_KIND}
 START_TARGET=${START_TARGET}
 DEPLOY_RUNTIME=${DEPLOY_RUNTIME:-auto}
+SOURCE_REPO_REF=${SOURCE_REPO_REF:-}
+DUPLICATE_SOURCE_REPO_REF=${DUPLICATE_SOURCE_REPO_REF:-}
+DUPLICATE_ENV_MODE=${DUPLICATE_ENV_MODE:-}
+DUPLICATE_DB_MODE=${DUPLICATE_DB_MODE:-}
+DUPLICATE_SOURCE_APP_DIR=${DUPLICATE_SOURCE_APP_DIR:-}
 DB_MACHINE_ID=${DB_MACHINE_ID:-${LOCAL_DB_MACHINE_ID}}
 MYSQL_ALLOWED_IPS=${MYSQL_ALLOWED_IPS:-}
 SSH_UPLOAD_USER=${SSH_UPLOAD_USER:-}
@@ -2889,7 +3421,7 @@ show_project_ssh_details() {
   local ssh_password
   local ssh_host=""
 
-  slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
+  slug="$(slug_from_ref "$(project_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
   ssh_user="${SSH_UPLOAD_USER:-}"
@@ -2951,7 +3483,7 @@ run_package_script_in_dir() {
   (
     cd "${project_dir}"
     PACKAGE_MANAGER="$(detect_package_manager)"
-    /bin/bash -lc 'set -a; [ -f .env ] && . ./.env; [ -f .env.machine ] && . ./.env.machine; set +a; '"$(package_script_runner "${script}")"
+    /bin/bash -lc 'set -a; [ -f .env ] && . ./.env; [ -f .env.machine ] && . ./.env.machine; [ -f .env.duplicate ] && . ./.env.duplicate; set +a; '"$(package_script_runner "${script}")"
   )
 }
 
@@ -3294,10 +3826,28 @@ do_update() {
   local effective_db_host=""
   local bootstrap_db_machine_id=""
   local bootstrap_db_ready="no"
+  local duplicate_source_ref=""
+  local duplicate_env_mode=""
+  local duplicate_db_mode=""
+  local duplicate_sync_env_base="yes"
 
-  slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
+  slug="$(slug_from_ref "$(project_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
+
+  if [[ -n "${DUPLICATE_SOURCE_REPO_REF:-}" ]]; then
+    duplicate_source_ref="${DUPLICATE_SOURCE_REPO_REF}"
+    duplicate_env_mode="${DUPLICATE_ENV_MODE:-copy}"
+    duplicate_db_mode="${DUPLICATE_DB_MODE:-same}"
+    duplicate_sync_env_base="no"
+    [[ "${duplicate_env_mode}" == "share" ]] && duplicate_sync_env_base="yes"
+    printf '[projectctl] refreshing duplicate %s from source %s\n' "${PROJECT_SLUG}" "${duplicate_source_ref}"
+    sync_duplicate_project_from_source "${duplicate_source_ref}" "${PROJECT_SLUG}" "${APP_DOMAIN:-}" "${duplicate_env_mode}" "${duplicate_db_mode}" "${APP_PORT:-}" "" "${duplicate_sync_env_base}" "no"
+    touch_meta_file "${meta}"
+    printf '[projectctl] updated duplicate %s from source %s\n' "${PROJECT_SLUG}" "${duplicate_source_ref}"
+    return
+  fi
+
   DEPLOY_RUNTIME="$(normalize_deploy_runtime "${DEPLOY_RUNTIME:-auto}")"
   if [[ -n "${APP_DOMAIN:-}" ]]; then
     APP_DOMAIN="$(normalize_domain "${APP_DOMAIN}")"
@@ -3384,7 +3934,41 @@ do_update() {
   verify_project_install "${REPO_REF}"
   verify_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   touch_meta_file "${meta}"
+  sync_duplicate_projects_from_source "${REPO_REF}"
   printf '[projectctl] updated %s\n' "${REPO_REF}"
+}
+
+do_duplicate() {
+  local ref="$1"
+  local domain="$2"
+  local env_mode="${3:-copy}"
+  local db_mode="${4:-same}"
+  local target_port="${5:-}"
+  local pm2_name="${6:-}"
+  local slug
+  local meta
+  local target_slug=""
+
+  slug="$(slug_from_ref "$(project_ref_from_arg "${ref}")")"
+  meta="$(meta_path_for_slug "${slug}")"
+  load_meta "${meta}"
+
+  [[ -n "${domain}" ]] || die "Missing duplicate domain"
+  domain="$(validate_domain "${domain}")"
+  case "${env_mode,,}" in
+    share|copy) ;;
+    *) die "Invalid duplicate env mode: ${env_mode}. Use share or copy." ;;
+  esac
+  case "${db_mode,,}" in
+    same|separate) ;;
+    *) die "Invalid duplicate DB mode: ${db_mode}. Use same or separate." ;;
+  esac
+
+  target_slug="$(project_duplicate_slug_from_domain "${domain}")"
+  [[ ! -e "${APP_ROOT}/${target_slug}" ]] || die "Duplicate target already exists: ${APP_ROOT}/${target_slug}"
+  sync_duplicate_project_from_source "${REPO_REF}" "${target_slug}" "${domain}" "${env_mode,,}" "${db_mode,,}" "${target_port}" "${pm2_name}" "yes" "yes"
+  touch_meta_file "${meta}"
+  printf '[projectctl] duplicated %s to %s (%s, db:%s, env:%s)\n' "${REPO_REF}" "${target_slug}" "${domain}" "${db_mode,,}" "${env_mode,,}"
 }
 
 do_build() {
@@ -3394,7 +3978,7 @@ do_build() {
   local meta
   local build_failed="no"
 
-  slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
+  slug="$(slug_from_ref "$(project_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
 
@@ -3423,7 +4007,7 @@ do_restart() {
   local slug
   local meta
 
-  slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
+  slug="$(slug_from_ref "$(project_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
   restart_pm2
@@ -3439,7 +4023,7 @@ do_stop() {
   local slug
   local meta
 
-  slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
+  slug="$(slug_from_ref "$(project_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
 
@@ -3459,7 +4043,7 @@ do_status() {
   local db_name
   local db_user
 
-  slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
+  slug="$(slug_from_ref "$(project_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
   db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
@@ -3486,7 +4070,7 @@ do_ssh() {
   local slug
   local meta
 
-  slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
+  slug="$(slug_from_ref "$(project_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
 
@@ -3521,7 +4105,7 @@ do_script() {
   local pm2_script_suffix="${script}"
   local script_path=""
 
-  slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
+  slug="$(slug_from_ref "$(project_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
 
@@ -3552,7 +4136,7 @@ do_script() {
     (
       cd "${script_path}"
       pm2 delete "${pm2_script_name}" >/dev/null 2>&1 || true
-      env TZ=Asia/Jerusalem PORT="${APP_PORT}" pm2 start /bin/bash --name "${pm2_script_name}" --no-autorestart --time -- -lc 'set -a; [ -f .env ] && . ./.env; [ -f .env.machine ] && . ./.env.machine; set +a; '"${runner}"'; exit $?'
+      env TZ=Asia/Jerusalem PORT="${APP_PORT}" pm2 start /bin/bash --name "${pm2_script_name}" --no-autorestart --time -- -lc 'set -a; [ -f .env ] && . ./.env; [ -f .env.machine ] && . ./.env.machine; [ -f .env.duplicate ] && . ./.env.duplicate; set +a; '"${runner}"'; exit $?'
     )
     pm2 save
     touch_meta_file "${meta}"
@@ -3562,7 +4146,7 @@ do_script() {
 
   (
     cd "${script_path}"
-    /bin/bash -lc 'set -a; [ -f .env ] && . ./.env; [ -f .env.machine ] && . ./.env.machine; set +a; '"${runner}"'; exit $?'
+    /bin/bash -lc 'set -a; [ -f .env ] && . ./.env; [ -f .env.machine ] && . ./.env.machine; [ -f .env.duplicate ] && . ./.env.duplicate; set +a; '"${runner}"'; exit $?'
   )
   touch_meta_file "${meta}"
   printf '[projectctl] ran %s script %s\n' "${REPO_REF}" "${script}"
@@ -3576,7 +4160,7 @@ do_password() {
   local meta
   local auth_file
 
-  slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
+  slug="$(slug_from_ref "$(project_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
 
@@ -4009,7 +4593,7 @@ do_uninstall_preview() {
   local all_domains_json
   local db_summary_json
 
-  slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
+  slug="$(slug_from_ref "$(project_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
 
@@ -4066,7 +4650,7 @@ do_uninstall() {
   local domain
   local current_domains
 
-  slug="$(slug_from_ref "$(repo_ref_from_arg "${ref}")")"
+  slug="$(slug_from_ref "$(project_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
   db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
@@ -4182,6 +4766,46 @@ main() {
       done
       [[ $# -eq 1 ]] || { usage; exit 1; }
       do_install "$1" "${domain}" "${https}" "${branch}" "${pm2_name}" "${port}" "${db_machine_id}" "${deploy_runtime}" "${env_file}" "${entrypoint}"
+      ;;
+    duplicate)
+      local duplicate_domain=""
+      local duplicate_env_mode="copy"
+      local duplicate_db_mode="same"
+      local duplicate_pm2_name=""
+      local duplicate_port=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --domain)
+            duplicate_domain="${2:-}"
+            shift 2
+            ;;
+          --env-mode)
+            duplicate_env_mode="${2:-copy}"
+            shift 2
+            ;;
+          --db-mode)
+            duplicate_db_mode="${2:-same}"
+            shift 2
+            ;;
+          --pm2-name)
+            duplicate_pm2_name="${2:-}"
+            shift 2
+            ;;
+          --port)
+            duplicate_port="${2:-}"
+            shift 2
+            ;;
+          --help|-h)
+            usage
+            exit 0
+            ;;
+          *)
+            break
+            ;;
+        esac
+      done
+      [[ $# -eq 1 ]] || { usage; exit 1; }
+      do_duplicate "$1" "${duplicate_domain}" "${duplicate_env_mode}" "${duplicate_db_mode}" "${duplicate_port}" "${duplicate_pm2_name}"
       ;;
     update)
       [[ $# -eq 1 ]] || { usage; exit 1; }

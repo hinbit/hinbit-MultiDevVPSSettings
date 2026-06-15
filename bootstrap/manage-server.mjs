@@ -761,7 +761,13 @@ function readProjects() {
       PROJECT_SLUG: meta.PROJECT_SLUG || name.replace(/\.env$/, ''),
       protected: protectedAccess,
       auth_file: authFile,
-      repo: meta.REPO_REF || '',
+      repo: meta.SOURCE_REPO_REF || meta.REPO_REF || '',
+      ref: meta.PROJECT_SLUG || name.replace(/\.env$/, ''),
+      sourceRepoRef: meta.SOURCE_REPO_REF || meta.REPO_REF || '',
+      duplicate: Boolean(meta.DUPLICATE_SOURCE_REPO_REF),
+      duplicateSourceRepoRef: meta.DUPLICATE_SOURCE_REPO_REF || '',
+      duplicateEnvMode: meta.DUPLICATE_ENV_MODE || '',
+      duplicateDbMode: meta.DUPLICATE_DB_MODE || '',
       scripts: readPackageScripts(meta.APP_DIR || ''),
     };
   });
@@ -1733,7 +1739,8 @@ function projectView() {
     const lastBuildStatus = String(project.LAST_BUILD_STATUS || '').trim();
     const lastBuildAt = String(project.LAST_BUILD_AT || '').trim();
     return {
-      repo: project.REPO_REF || '',
+      ref: project.ref || project.PROJECT_SLUG || '',
+      repo: project.repo || project.REPO_REF || '',
       slug: project.PROJECT_SLUG || '',
       path: project.APP_DIR || '',
       pm2: project.PM2_NAME || '',
@@ -1748,6 +1755,10 @@ function projectView() {
       runtime: project.DEPLOY_RUNTIME || 'auto',
       type: project.APP_TYPE || '',
       packageManager: project.PACKAGE_MANAGER || '',
+      duplicate: Boolean(project.duplicate),
+      duplicateSourceRepoRef: project.duplicateSourceRepoRef || '',
+      duplicateEnvMode: project.duplicateEnvMode || '',
+      duplicateDbMode: project.duplicateDbMode || '',
       mysqlAllowedIps: project.MYSQL_ALLOWED_IPS || '',
       dbMachineId: project.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID,
       dbMachineLabel: projectMachineLabel,
@@ -2885,12 +2896,13 @@ function projectStatusClass(status) {
 }
 
 function renderProjectActions(project) {
-  const ref = encodeURIComponent(project.repo || project.slug || '');
+  const ref = encodeURIComponent(project.ref || project.slug || project.repo || '');
   const passwordRef = escapeHtml(ref);
   return `
         <div class="actions">
           ${project.domain ? '<a class="btn ghost" href="https://' + escapeHtml(project.domain) + '/" target="_blank" rel="noreferrer">Open</a>' : ''}
           <a class="btn ghost" href="/manage/tls/?ref=${escapeHtml(ref)}">SSL</a>
+          <button class="secondary" data-action="duplicate" data-ref="${escapeHtml(ref)}">Duplicate</button>
           <button class="secondary" data-action="update" data-ref="${escapeHtml(ref)}">Pull</button>
           <button class="secondary" data-action="restart" data-ref="${escapeHtml(ref)}">Restart</button>
           <button class="secondary" data-action="stop" data-ref="${escapeHtml(ref)}">Stop</button>
@@ -2923,9 +2935,10 @@ function renderProjectRows(projects) {
   return projects.map((project) => `
         <tr>
           <td>
-            <div><strong>${escapeHtml(project.repo || project.slug || '')}</strong></div>
+            <div><strong>${escapeHtml(project.repo || project.slug || '')}</strong>${project.duplicate ? ' <span class="pill warn">duplicate</span>' : ''}</div>
             <div class="small">${escapeHtml(project.path || '')}</div>
             <div class="small">version: ${escapeHtml(project.gitCommitShort || 'n/a')} · ${escapeHtml(project.gitCommitDate ? new Date(project.gitCommitDate).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }) : 'n/a')}</div>
+            ${project.duplicateSourceRepoRef ? '<div class="small">source: <code>' + escapeHtml(project.duplicateSourceRepoRef) + '</code></div>' : ''}
             <div class="small">build: ${escapeHtml(project.lastBuildMode ? `${project.lastBuildMode} · ${project.lastBuildStatus || 'unknown'} · ${project.lastBuildDate || 'n/a'}` : 'n/a')}</div>
           </td>
           <td>
@@ -4291,6 +4304,52 @@ function renderPage() {
       </div>
     </div>
   </div>
+  <div id="duplicatePanel" class="scripts-panel modal-panel" hidden>
+    <header>
+      <div>
+        <h2 id="duplicateTitle">Duplicate Project</h2>
+        <div id="duplicateSubtitle" class="muted"></div>
+      </div>
+      <div class="actions">
+        <button id="duplicateCancelBtn" class="ghost" type="button">Cancel</button>
+        <button id="duplicateCreateBtn" class="secondary" type="button">Duplicate</button>
+      </div>
+    </header>
+    <div class="body">
+      <div id="duplicateFlash" class="flash" hidden></div>
+      <div class="kv-item">
+        <div class="small">Create a copy of this project under a new domain. The duplicate will stay tied to the original source and can be refreshed from it instead of pulling Git directly.</div>
+      </div>
+      <div class="grid two">
+        <label>New domain
+          <input id="duplicateDomainInput" type="text" placeholder="copy.example.com">
+        </label>
+        <label>PM2 config
+          <select id="duplicatePm2ModeSelect">
+            <option value="auto">Auto / generated name</option>
+            <option value="custom">Custom PM2 name</option>
+          </select>
+        </label>
+        <label id="duplicatePm2InputLabel">PM2 name <span class="muted">(optional)</span>
+          <input id="duplicatePm2Input" type="text" placeholder="copy-example">
+        </label>
+        <label>Env mode
+          <select id="duplicateEnvModeSelect">
+            <option value="copy">Copy env and allow edits</option>
+            <option value="share">Share env with original</option>
+          </select>
+        </label>
+        <label>DB mode
+          <select id="duplicateDbModeSelect">
+            <option value="same">Use same DB</option>
+            <option value="separate">Create separate DB</option>
+          </select>
+        </label>
+      </div>
+      <div class="small muted">PM2 config is copied from the original app by default. Use a custom PM2 name only when you need a separate process label for the duplicate.</div>
+      <div class="small muted">When you pull a duplicate, Multidev recopies it from the original source project. When the original is pulled, all duplicates are recopied and restarted automatically.</div>
+    </div>
+  </div>
   <div id="progressPanel" class="scripts-panel modal-panel" hidden>
     <header>
       <div>
@@ -4423,6 +4482,7 @@ function renderPage() {
     let currentDomainsRef = '';
     let currentDomainBindings = [];
     let currentDomainEnvFiles = [];
+    let currentDuplicateRef = '';
     const envPanel = document.getElementById('envPanel');
     const envTitle = document.getElementById('envTitle');
     const envSubtitle = document.getElementById('envSubtitle');
@@ -4460,6 +4520,17 @@ function renderPage() {
     const domainsAddBtn = document.getElementById('domainsAddBtn');
     const domainsSaveBtn = document.getElementById('domainsSaveBtn');
     const closeDomainsBtn = document.getElementById('closeDomainsBtn');
+    const duplicatePanel = document.getElementById('duplicatePanel');
+    const duplicateTitle = document.getElementById('duplicateTitle');
+    const duplicateSubtitle = document.getElementById('duplicateSubtitle');
+    const duplicateFlash = document.getElementById('duplicateFlash');
+    const duplicateCancelBtn = document.getElementById('duplicateCancelBtn');
+    const duplicateCreateBtn = document.getElementById('duplicateCreateBtn');
+    const duplicateDomainInput = document.getElementById('duplicateDomainInput');
+    const duplicatePm2Input = document.getElementById('duplicatePm2Input');
+    const duplicatePm2ModeSelect = document.getElementById('duplicatePm2ModeSelect');
+    const duplicateEnvModeSelect = document.getElementById('duplicateEnvModeSelect');
+    const duplicateDbModeSelect = document.getElementById('duplicateDbModeSelect');
     const progressPanel = document.getElementById('progressPanel');
     const progressTitle = document.getElementById('progressTitle');
     const progressSubtitle = document.getElementById('progressSubtitle');
@@ -4734,12 +4805,13 @@ function renderPage() {
     }
 
     function rowActions(project) {
-      const ref = encodeURIComponent(project.repo || project.slug || '');
+      const ref = encodeURIComponent(project.ref || project.slug || project.repo || '');
       return \`
         <div class="actions">
           \${project.domain ? '<a class="btn ghost" href="https://' + escapeHtml(project.domain) + '/" target="_blank" rel="noreferrer">Open</a>' : ''}
           <a class="btn ghost" href="/manage/tls/?ref=\${ref}">SSL</a>
           <button class="secondary" data-action="domains" data-ref="\${ref}">Domains</button>
+          <button class="secondary" data-action="duplicate" data-ref="\${ref}">Duplicate</button>
           <button class="secondary" data-action="update" data-ref="\${ref}">Pull</button>
           <button class="secondary" data-action="restart" data-ref="\${ref}">Restart</button>
           <button class="secondary" data-action="stop" data-ref="\${ref}">Stop</button>
@@ -4773,8 +4845,9 @@ function renderPage() {
       projectsBody.innerHTML = projects.map((project) => \`
         <tr>
           <td>
-            <div><strong>\${escapeHtml(project.repo || project.slug || '')}</strong></div>
+            <div><strong>\${escapeHtml(project.repo || project.slug || '')}</strong>\${project.duplicate ? ' <span class="pill warn">duplicate</span>' : ''}</div>
             <div class="small">\${escapeHtml(project.path || '')}</div>
+            \${project.duplicateSourceRepoRef ? '<div class="small">source: <code>' + escapeHtml(project.duplicateSourceRepoRef) + '</code></div>' : ''}
           </td>
           <td>
             <div>\${project.domain ? \`<a href="https://\${escapeHtml(project.domain)}/" target="_blank" rel="noreferrer">\${escapeHtml(project.domain)}</a>\` : '<span class="muted">n/a</span>'}</div>
@@ -5231,6 +5304,58 @@ function renderPage() {
       setModalLocked(false);
     }
 
+    function findProjectByRef(ref) {
+      const needle = String(ref || '').trim();
+      if (!needle) return null;
+      return (currentProjects || []).find((project) => String(project.ref || project.slug || project.repo || '') === needle) || null;
+    }
+
+    function openDuplicatePanel(ref, details, subtitle) {
+      closeScriptsModal();
+      closeDbPanel();
+      closeMysqlPanel();
+      closeDomainsPanel();
+      closeEnvPanel();
+      closeProgressPanel();
+      closeLogPanel();
+      currentDuplicateRef = ref;
+      duplicateTitle.textContent = 'Duplicate Project';
+      duplicateSubtitle.textContent = subtitle || '';
+      duplicateFlash.hidden = true;
+      duplicateDomainInput.value = '';
+      duplicatePm2ModeSelect.value = 'auto';
+      duplicatePm2Input.value = details?.pm2 || '';
+      duplicateEnvModeSelect.value = 'copy';
+      duplicateDbModeSelect.value = 'same';
+      duplicatePm2Input.disabled = true;
+      duplicatePm2Input.placeholder = details?.pm2 || 'auto-generated';
+      if (details && details.domain) {
+        const base = String(details.domain).replace(/^[^.]+\./, '');
+        const left = String(details.domain).split('.')[0] || '';
+        duplicateDomainInput.placeholder = left ? left + '-copy.' + base : 'copy.example.com';
+      } else {
+        duplicateDomainInput.placeholder = 'copy.example.com';
+      }
+      syncDuplicatePm2Ui();
+      duplicatePanel.hidden = false;
+      setModalLocked(true);
+      duplicateDomainInput.focus();
+    }
+
+    function closeDuplicatePanel() {
+      duplicatePanel.hidden = true;
+      currentDuplicateRef = '';
+      duplicateFlash.hidden = true;
+      duplicateDomainInput.value = '';
+      duplicatePm2ModeSelect.value = 'auto';
+      duplicatePm2Input.value = '';
+      duplicateEnvModeSelect.value = 'copy';
+      duplicateDbModeSelect.value = 'same';
+      duplicatePm2Input.disabled = true;
+      duplicatePm2Input.placeholder = 'auto-generated';
+      setModalLocked(false);
+    }
+
     function openEnvPanel(ref, details, subtitle, options = {}) {
       closeScriptsModal();
       closeDbPanel();
@@ -5459,6 +5584,26 @@ function renderPage() {
       });
       showMessage(listResult, res.message || 'Project removed');
       closeUninstallPanel();
+      await refresh();
+    }
+
+    function syncDuplicatePm2Ui() {
+      if (!duplicatePm2ModeSelect || !duplicatePm2Input) return;
+      const custom = duplicatePm2ModeSelect.value === 'custom';
+      duplicatePm2Input.disabled = !custom;
+      duplicatePm2Input.placeholder = custom ? 'copy-example' : 'auto-generated';
+      if (!custom && !duplicatePm2Input.value.trim()) {
+        duplicatePm2Input.value = '';
+      }
+    }
+
+    async function runDuplicate(ref, payload) {
+      const res = await api('/projects/' + ref + '/duplicate', {
+        method: 'POST',
+        body: JSON.stringify(payload || {}),
+      });
+      showMessage(listResult, res.message || 'Project duplicated');
+      closeDuplicatePanel();
       await refresh();
     }
 
@@ -5843,6 +5988,18 @@ function renderPage() {
         }
         return;
       }
+      if (action === 'duplicate') {
+        btn.disabled = true;
+        try {
+          const project = findProjectByRef(decodeURIComponent(ref));
+          openDuplicatePanel(ref, project || {}, project ? (project.repo || project.slug || decodeURIComponent(ref)) : decodeURIComponent(ref));
+        } catch (error) {
+          showMessage(listResult, error.message, false);
+        } finally {
+          btn.disabled = false;
+        }
+        return;
+      }
       if (action === 'uninstall') {
         btn.disabled = true;
         try {
@@ -6170,6 +6327,40 @@ function renderPage() {
       if (!binding) return;
       await loadEnv(currentDomainsRef, { selectedFile: binding.envFile || '.env' });
     });
+
+    if (duplicatePm2ModeSelect) {
+      duplicatePm2ModeSelect.addEventListener('change', syncDuplicatePm2Ui);
+    }
+    if (duplicateCancelBtn) {
+      duplicateCancelBtn.addEventListener('click', closeDuplicatePanel);
+    }
+    if (duplicateCreateBtn) {
+      duplicateCreateBtn.addEventListener('click', async () => {
+        if (!currentDuplicateRef) return;
+        const domain = String(duplicateDomainInput?.value || '').trim().toLowerCase();
+        if (!domain) {
+          showMessage(duplicateFlash, 'New domain is required', false);
+          return;
+        }
+        const envMode = String(duplicateEnvModeSelect?.value || 'copy').trim().toLowerCase();
+        const dbMode = String(duplicateDbModeSelect?.value || 'same').trim().toLowerCase();
+        const pm2Mode = String(duplicatePm2ModeSelect?.value || 'auto').trim().toLowerCase();
+        const pm2Name = pm2Mode === 'custom' ? String(duplicatePm2Input?.value || '').trim() : '';
+        if (pm2Mode === 'custom' && !pm2Name) {
+          showMessage(duplicateFlash, 'Custom PM2 name is required when PM2 config is custom', false);
+          return;
+        }
+        duplicateCreateBtn.disabled = true;
+        try {
+          await runDuplicate(currentDuplicateRef, { domain, envMode, dbMode, pm2Name });
+        } catch (error) {
+          showMessage(duplicateFlash, error.message, false);
+          duplicatePanel.hidden = false;
+        } finally {
+          duplicateCreateBtn.disabled = false;
+        }
+      });
+    }
 
     if (closeDomainsBtn) {
       closeDomainsBtn.addEventListener('click', closeDomainsPanel);
@@ -7494,6 +7685,35 @@ async function handleRequest(req, res) {
       const buildArgs = buildMode === 'all' ? ['build', '--all', ref] : ['build', ref];
       touchProjectMeta(ref);
       streamProjectCtl(res, buildArgs, { PROJECTCTL_BUILD_MODE: buildMode });
+      return;
+    }
+
+    const duplicateMatch = routePath.match(/^\/api\/projects\/(.+?)\/duplicate$/);
+    if (duplicateMatch) {
+      const ref = decodeURIComponent(duplicateMatch[1]);
+      if (req.method !== 'POST') {
+        res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Method not allowed');
+        return;
+      }
+      const body = await readBody(req);
+      const domain = String(body.domain || '').trim();
+      const envMode = String(body.envMode || 'copy').trim().toLowerCase();
+      const dbMode = String(body.dbMode || 'same').trim().toLowerCase();
+      const pm2Name = String(body.pm2Name || '').trim();
+      const port = String(body.port || '').trim();
+      const args = ['duplicate', '--domain', domain];
+      if (envMode) args.push('--env-mode', envMode);
+      if (dbMode) args.push('--db-mode', dbMode);
+      if (pm2Name) args.push('--pm2-name', pm2Name);
+      if (port) args.push('--port', port);
+      args.push(ref);
+      const output = runProjectCtl(args);
+      touchProjectMeta(ref);
+      sendJson(res, 200, {
+        ok: true,
+        message: output || `Duplicated ${ref}`,
+      });
       return;
     }
 

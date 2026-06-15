@@ -129,6 +129,27 @@ The app should not require a human to create the DB user manually after install.
 
 If the app has extra HTTP routes that must land on a non-default upstream port, document them in `VPS-INSTALL.MD` so Multidev can wire them automatically during install/update.
 
+## 6.5 Project duplication behavior
+
+Multidev supports duplicating an installed project into a new domain-bound copy.
+
+Rules for duplicate-ready repos and installs:
+- the duplicate is a copy of the source project, not a new Git remote pull target
+- duplicate projects may keep their own env files or share the source env mode chosen at creation time
+- duplicate projects may keep the same DB or get a separate DB depending on the creation choice
+- duplicate projects can keep a custom PM2 process name, but the name should not collide with the original project
+- when the original project is pulled, Multidev should recopies and restart all duplicates that point back to it
+- when a duplicate is pulled, Multidev should ignore Git pull and recopy from the original source project instead
+- duplicate metadata should keep the original source repo reference so refreshes remain tied to the parent project
+
+The install UI should expose:
+- new domain name
+- env mode: copy or share
+- DB mode: same or separate
+- PM2 config / PM2 name choice
+
+The duplicate flow must still preserve the standard install checks: mapping, nginx, PM2, build, DB bootstrap, and smoke tests.
+
 If the app has a demo login or required admin user:
 - seed it in `db:seed`
 - document the credentials in `README.md`
