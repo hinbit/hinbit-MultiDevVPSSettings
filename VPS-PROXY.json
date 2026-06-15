@@ -1,0 +1,26 @@
+{
+  "enabled": true,
+  "service": "tinyproxy",
+  "listen_host": "127.0.0.1",
+  "listen_port": 3128,
+  "allow": [
+    "127.0.0.1",
+    "::1"
+  ],
+  "auth": {
+    "enabled": false,
+    "username": "",
+    "password": ""
+  },
+  "connect_ports": [
+    80,
+    443,
+    8443,
+    9443,
+    2053
+  ],
+  "timeout": 600,
+  "max_clients": 100,
+  "log_level": "Info",
+  "disable_via_header": true
+}

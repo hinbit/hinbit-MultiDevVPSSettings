@@ -72,6 +72,7 @@ ingress:
 
 In the current UI layout, `/` is the portal landing page and `/manage/` is the project dashboard.
 Use `/manage/tls/` to paste a server-default certificate for the manage host domain, or a per-project certificate for an app domain. Custom certs are stored under `/etc/vps-custom-certs/` and are preferred over Let’s Encrypt when nginx is regenerated.
+Use `/manage/proxy/` when you want the VPS to provide a Tinyproxy-based browser proxy. The page lets you edit `Proxy bypass list`, `Proxy username`, and `Proxy password`, then saves the config to `/etc/vps-proxy-service.json`.
 
 ## 2. Prepare the DB machine
 

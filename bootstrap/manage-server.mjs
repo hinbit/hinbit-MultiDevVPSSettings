@@ -40,6 +40,7 @@ const LOCAL_DB_MACHINE = {
 };
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const REPO_ROOT = path.resolve(__dirname, '..');
 const ENV_CANDIDATES = [
   '.env',
   '.env.local',
@@ -50,6 +51,26 @@ const ENV_CANDIDATES = [
   '.env.development',
 ];
 const MAX_ENV_FILE_BYTES = 1024 * 1024;
+const VPS_PROXY_CONFIG_FILE = '/etc/vps-proxy-service.json';
+const TINYPROXY_CONF_FILE = '/etc/tinyproxy/tinyproxy.conf';
+const TINYPROXY_SERVICE = 'tinyproxy';
+const DEFAULT_PROXY_CONFIG = {
+  enabled: true,
+  service: 'tinyproxy',
+  listen_host: '127.0.0.1',
+  listen_port: 3128,
+  allow: ['127.0.0.1', '::1'],
+  auth: {
+    enabled: false,
+    username: '',
+    password: '',
+  },
+  connect_ports: [80, 443, 8443, 9443, 2053],
+  timeout: 600,
+  max_clients: 100,
+  log_level: 'Info',
+  disable_via_header: true,
+};
 
 function loadSystemEnv() {
   if (!fs.existsSync(SYSTEM_ENV_FILE)) return;
@@ -1081,6 +1102,176 @@ function deleteTlsEntry(scope, key) {
   if (!dir || !fs.existsSync(dir)) return false;
   fs.rmSync(dir, { recursive: true, force: true });
   return true;
+}
+
+function getProxyConfigPath() {
+  if (fs.existsSync(VPS_PROXY_CONFIG_FILE)) return VPS_PROXY_CONFIG_FILE;
+  const repoDefault = path.join(REPO_ROOT, 'VPS-PROXY.json');
+  if (fs.existsSync(repoDefault)) return repoDefault;
+  return VPS_PROXY_CONFIG_FILE;
+}
+
+function readProxyServiceConfig() {
+  const sourcePath = getProxyConfigPath();
+  let data = {};
+  try {
+    if (fs.existsSync(sourcePath)) {
+      data = JSON.parse(fs.readFileSync(sourcePath, 'utf8'));
+    }
+  } catch {
+    data = {};
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) data = {};
+  const auth = data.auth && typeof data.auth === 'object' && !Array.isArray(data.auth) ? data.auth : {};
+  const allow = Array.isArray(data.allow) ? data.allow : [];
+  const connectPorts = Array.isArray(data.connect_ports) ? data.connect_ports : [];
+  return {
+    ...DEFAULT_PROXY_CONFIG,
+    ...data,
+    enabled: data.enabled !== undefined ? Boolean(data.enabled) : DEFAULT_PROXY_CONFIG.enabled,
+    listen_host: String(data.listen_host || DEFAULT_PROXY_CONFIG.listen_host).trim() || DEFAULT_PROXY_CONFIG.listen_host,
+    listen_port: Number.parseInt(String(data.listen_port || DEFAULT_PROXY_CONFIG.listen_port), 10) || DEFAULT_PROXY_CONFIG.listen_port,
+    allow: allow.map((item) => String(item).trim()).filter(Boolean),
+    auth: {
+      ...DEFAULT_PROXY_CONFIG.auth,
+      ...auth,
+      enabled: Boolean(auth.enabled),
+      username: String(auth.username || '').trim(),
+      password: String(auth.password || ''),
+    },
+    connect_ports: connectPorts
+      .map((item) => Number.parseInt(String(item), 10))
+      .filter((item) => Number.isInteger(item) && item >= 1 && item <= 65535),
+    timeout: Number.parseInt(String(data.timeout || DEFAULT_PROXY_CONFIG.timeout), 10) || DEFAULT_PROXY_CONFIG.timeout,
+    max_clients: Number.parseInt(String(data.max_clients || DEFAULT_PROXY_CONFIG.max_clients), 10) || DEFAULT_PROXY_CONFIG.max_clients,
+    log_level: String(data.log_level || DEFAULT_PROXY_CONFIG.log_level).trim() || DEFAULT_PROXY_CONFIG.log_level,
+    disable_via_header: data.disable_via_header !== undefined ? Boolean(data.disable_via_header) : DEFAULT_PROXY_CONFIG.disable_via_header,
+  };
+}
+
+function proxyConfigValidationError(config) {
+  if (!config.listen_host) return 'Proxy listen host is required';
+  if (!Number.isInteger(config.listen_port) || config.listen_port < 1 || config.listen_port > 65535) {
+    return 'Proxy listen port must be between 1 and 65535';
+  }
+  if (config.auth.enabled) {
+    if (!config.auth.username) return 'Proxy auth username is required when auth is enabled';
+    if (!config.auth.password) return 'Proxy auth password is required when auth is enabled';
+  }
+  return '';
+}
+
+function normalizeProxyConfig(input = {}) {
+  const authInput = input.auth && typeof input.auth === 'object' && !Array.isArray(input.auth) ? input.auth : {};
+  const allowInput = Array.isArray(input.allow) ? input.allow : [];
+  const connectPortsInput = Array.isArray(input.connect_ports) ? input.connect_ports : [];
+  const allow = allowInput.map((item) => String(item).trim()).filter(Boolean);
+  const connectPorts = [];
+  for (const item of connectPortsInput) {
+    const port = Number.parseInt(String(item), 10);
+    if (Number.isInteger(port) && port >= 1 && port <= 65535 && !connectPorts.includes(port)) {
+      connectPorts.push(port);
+    }
+  }
+  const config = {
+    ...DEFAULT_PROXY_CONFIG,
+    ...input,
+    enabled: input.enabled !== undefined ? Boolean(input.enabled) : DEFAULT_PROXY_CONFIG.enabled,
+    service: 'tinyproxy',
+    listen_host: String(input.listen_host || DEFAULT_PROXY_CONFIG.listen_host).trim() || DEFAULT_PROXY_CONFIG.listen_host,
+    listen_port: Number.parseInt(String(input.listen_port || DEFAULT_PROXY_CONFIG.listen_port), 10) || DEFAULT_PROXY_CONFIG.listen_port,
+    allow: allow.length ? allow : DEFAULT_PROXY_CONFIG.allow.slice(),
+    auth: {
+      ...DEFAULT_PROXY_CONFIG.auth,
+      ...authInput,
+      enabled: Boolean(authInput.enabled),
+      username: String(authInput.username || '').trim(),
+      password: String(authInput.password || ''),
+    },
+    connect_ports: connectPorts.length ? connectPorts : DEFAULT_PROXY_CONFIG.connect_ports.slice(),
+    timeout: Number.parseInt(String(input.timeout || DEFAULT_PROXY_CONFIG.timeout), 10) || DEFAULT_PROXY_CONFIG.timeout,
+    max_clients: Number.parseInt(String(input.max_clients || DEFAULT_PROXY_CONFIG.max_clients), 10) || DEFAULT_PROXY_CONFIG.max_clients,
+    log_level: String(input.log_level || DEFAULT_PROXY_CONFIG.log_level).trim() || DEFAULT_PROXY_CONFIG.log_level,
+    disable_via_header: input.disable_via_header !== undefined ? Boolean(input.disable_via_header) : DEFAULT_PROXY_CONFIG.disable_via_header,
+  };
+  const validationError = proxyConfigValidationError(config);
+  if (validationError) throw new Error(validationError);
+  return config;
+}
+
+function writeProxyServiceConfig(config) {
+  const next = normalizeProxyConfig(config);
+  fs.writeFileSync(VPS_PROXY_CONFIG_FILE, `${JSON.stringify(next, null, 2)}\n`);
+  fs.chmodSync(VPS_PROXY_CONFIG_FILE, 0o600);
+  return next;
+}
+
+function renderTinyproxyConf(config) {
+  const lines = [
+    'User tinyproxy',
+    'Group tinyproxy',
+    `Port ${config.listen_port}`,
+    `Listen ${config.listen_host}`,
+    `Timeout ${config.timeout}`,
+    'PidFile "/run/tinyproxy/tinyproxy.pid"',
+    'LogFile "/var/log/tinyproxy/tinyproxy.log"',
+    `LogLevel ${config.log_level}`,
+    `MaxClients ${config.max_clients}`,
+  ];
+  if (config.disable_via_header) {
+    lines.push('DisableViaHeader Yes');
+  }
+  for (const item of config.allow) {
+    lines.push(`Allow ${item}`);
+  }
+  if (config.auth.enabled && config.auth.username && config.auth.password) {
+    lines.push(`BasicAuth ${config.auth.username} ${config.auth.password}`);
+  }
+  for (const port of config.connect_ports) {
+    lines.push(`ConnectPort ${port}`);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+function getServiceStatus(unit) {
+  const active = spawnSync('systemctl', ['is-active', unit], { encoding: 'utf8' });
+  const enabled = spawnSync('systemctl', ['is-enabled', unit], { encoding: 'utf8' });
+  return {
+    unit,
+    active: active.status === 0 ? String(active.stdout || '').trim() : 'inactive',
+    enabled: enabled.status === 0 ? String(enabled.stdout || '').trim() : 'disabled',
+  };
+}
+
+function readProxyServiceStatus() {
+  const config = readProxyServiceConfig();
+  const status = getServiceStatus(TINYPROXY_SERVICE);
+  return {
+    ...config,
+    status,
+    sourcePath: getProxyConfigPath(),
+    confPath: TINYPROXY_CONF_FILE,
+  };
+}
+
+function saveProxyServiceConfig(configInput) {
+  const config = writeProxyServiceConfig(configInput);
+  fs.mkdirSync('/etc/tinyproxy', { recursive: true, mode: 0o755 });
+  fs.mkdirSync('/var/log/tinyproxy', { recursive: true, mode: 0o755 });
+  fs.mkdirSync('/run/tinyproxy', { recursive: true, mode: 0o755 });
+  fs.writeFileSync(TINYPROXY_CONF_FILE, renderTinyproxyConf(config), 'utf8');
+  fs.chmodSync(TINYPROXY_CONF_FILE, 0o644);
+
+  if (config.listen_host !== '127.0.0.1' && config.listen_host !== '::1' && config.listen_host !== 'localhost') {
+    spawnSync('ufw', ['allow', `${config.listen_port}/tcp`], { stdio: 'ignore' });
+  }
+
+  if (config.enabled) {
+    spawnSync('systemctl', ['enable', '--now', TINYPROXY_SERVICE], { stdio: 'ignore' });
+  } else {
+    spawnSync('systemctl', ['disable', '--now', TINYPROXY_SERVICE], { stdio: 'ignore' });
+  }
+  return readProxyServiceStatus();
 }
 
 function getSystemDomain() {
@@ -3191,6 +3382,7 @@ function renderPortalPage() {
     <div class="top-actions">
       <a class="btn ghost" href="/manage/">Projects</a>
       <a class="btn ghost" href="/manage/tls/">Manage SSL</a>
+      <a class="btn ghost" href="/manage/proxy/">Proxy Service</a>
       <a class="btn ghost" href="/manage/ssh-keys/">SSH Keys</a>
       <a class="btn ghost" href="/manage/vault/">DB Vault</a>
       <a class="btn ghost" href="/manage/db-machines/">DB Machines</a>
@@ -3218,6 +3410,11 @@ function renderPortalPage() {
       <h2 class="card-title">DB Machines</h2>
       <div class="card-desc">Register and edit local or remote DB machines, root credentials, and allowed IPs.</div>
     </a>
+    <a class="card" href="/manage/proxy/">
+      <div class="card-meta">Proxy</div>
+      <h2 class="card-title">Proxy Service</h2>
+      <div class="card-desc">Edit the VPS forward proxy settings, local bind address, auth, and CONNECT port allowlist.</div>
+    </a>
     <a class="card" href="/manage/tls/">
       <div class="card-meta">Security</div>
       <h2 class="card-title">TLS / Certificates</h2>
@@ -3234,6 +3431,346 @@ function renderPortalPage() {
       <div class="card-desc">Jump to the full project list and PM2 management screen.</div>
     </a>
   </main>
+</body>
+</html>`;
+}
+
+function renderProxyPage() {
+  const proxy = readProxyServiceStatus();
+  const initialProxy = JSON.stringify(proxy).replace(/</g, '\\u003c');
+  const statusClass = proxy.enabled ? (proxy.status?.active === 'active' ? 'good' : 'warn') : 'neutral';
+  const statusLabel = proxy.enabled
+    ? (proxy.status?.active === 'active' ? 'Proxy active' : 'Proxy enabled, not running')
+    : 'Proxy disabled';
+  const bypassList = Array.isArray(proxy.allow) && proxy.allow.length ? proxy.allow.join('\n') : '127.0.0.1\n::1';
+  const connectPorts = Array.isArray(proxy.connect_ports) && proxy.connect_ports.length ? proxy.connect_ports.join('\n') : '80\n443\n8443\n9443\n2053';
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Proxy Service</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font-family: Inter, system-ui, sans-serif; background: radial-gradient(circle at top, #11213d 0, #08111f 50%, #05070c 100%); color: #e5eef8; padding-top: 84px; }
+    header, main { max-width: 1200px; margin: 0 auto; padding: 24px; }
+    header { display: flex; justify-content: space-between; align-items: end; gap: 16px; }
+    h1, h2 { margin: 0 0 12px; }
+    .muted { color: #94a3b8; }
+    .small { font-size: 12px; color: #94a3b8; }
+    .grid { display: grid; gap: 16px; }
+    .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .panel { background: rgba(8, 15, 29, 0.88); border: 1px solid rgba(148,163,184,0.2); border-radius: 18px; padding: 20px; box-shadow: 0 12px 40px rgba(0,0,0,0.35); }
+    .stack { display: grid; gap: 12px; }
+    label { display: grid; gap: 6px; font-size: 13px; color: #cbd5e1; }
+    input, textarea, select { width: 100%; box-sizing: border-box; background: #0b1220; color: #e5eef8; border: 1px solid #22304a; border-radius: 10px; padding: 10px 12px; }
+    textarea { min-height: 100px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    button, .btn { background: linear-gradient(180deg, #38bdf8, #0ea5e9); color: #00111d; border: 0; border-radius: 999px; padding: 10px 14px; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+    button.secondary, .btn.secondary { background: #162033; color: #dbeafe; border: 1px solid #2a3b59; }
+    button.danger, .btn.danger { background: linear-gradient(180deg, #f87171, #ef4444); color: #1c0202; }
+    button.ghost, .btn.ghost { background: transparent; color: #dbeafe; border: 1px solid #2a3b59; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .pill { display: inline-flex; padding: 3px 8px; border-radius: 999px; background: #102338; border: 1px solid #23405f; font-size: 12px; }
+    .pill.good { background: #0f3a24; border-color: #14532d; color: #86efac; }
+    .pill.warn { background: #3f2d0c; border-color: #7c2d12; color: #fde68a; }
+    .pill.neutral { background: #1f2937; border-color: #334155; color: #cbd5e1; }
+    .flash { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #0b1220; border: 1px solid #22304a; white-space: pre-wrap; }
+    .hinbit-brand {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      z-index: 80;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(8, 15, 29, 0.82);
+      border: 1px solid rgba(148,163,184,0.22);
+      box-shadow: 0 12px 32px rgba(0,0,0,0.25);
+      text-decoration: none;
+      color: #e5eef8;
+      backdrop-filter: blur(12px);
+    }
+    .hinbit-brand img { width: 22px; height: 22px; display: block; object-fit: contain; }
+    .hinbit-brand span { font-size: 12px; font-weight: 700; letter-spacing: 0.02em; white-space: nowrap; }
+    @media (max-width: 860px) {
+      .two { grid-template-columns: 1fr; }
+      header { align-items: start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <a class="hinbit-brand" href="https://hinbit.com" target="_blank" rel="noreferrer">
+    <img src="https://hinbit.com/hebrew_site/hinbit-logo-symbol.png" alt="Hinbit">
+    <span>Powered by Hinbit Development</span>
+  </a>
+  <header>
+    <div>
+      <h1>Proxy Service</h1>
+      <div class="muted">Tinyproxy runs as a local forward proxy for browsers, curl, and SSH-tunneled clients.</div>
+      <div class="small">Config: <code id="configPathText">${escapeHtml(proxy.sourcePath || VPS_PROXY_CONFIG_FILE)}</code> · Conf: <code id="confPathText">${escapeHtml(proxy.confPath || TINYPROXY_CONF_FILE)}</code></div>
+    </div>
+    <div class="actions">
+      <a class="btn ghost" href="/">Portal</a>
+      <a class="btn ghost" href="/manage/">Projects</a>
+      <a class="btn ghost" href="/manage/tls/">TLS / Certificates</a>
+      <a class="btn ghost" href="/manage/ssh-keys/">SSH Keys</a>
+      <a class="btn ghost" href="/manage/vault/">DB Vault</a>
+      <a class="btn ghost" href="/manage/db-machines/">DB Machines</a>
+      <button id="refreshBtn" class="secondary" type="button">Refresh</button>
+    </div>
+  </header>
+  <main class="grid" style="gap:20px">
+    <section class="panel">
+      <h2>Current status</h2>
+      <div class="grid two" style="margin-top:14px;">
+        <div class="stack">
+          <div class="pill ${statusClass}" id="statusPill">${escapeHtml(statusLabel)}</div>
+          <div class="small">Service: <code id="serviceNameText">${escapeHtml(proxy.service || TINYPROXY_SERVICE)}</code></div>
+          <div class="small">systemd active: <code id="systemdActiveText">${escapeHtml(proxy.status?.active || 'inactive')}</code></div>
+          <div class="small">systemd enabled: <code id="systemdEnabledText">${escapeHtml(proxy.status?.enabled || 'disabled')}</code></div>
+          <div class="small">The safe default is localhost only. Keep the listen host at <code>127.0.0.1</code> if you only need browser access on the VPS itself.</div>
+        </div>
+        <div class="stack">
+          <div class="kv-item">
+            <div class="small">Browser proxy URL</div>
+            <div><code id="proxyUrlText">http://${escapeHtml(proxy.listen_host || '127.0.0.1')}:${escapeHtml(String(proxy.listen_port || 3128))}</code></div>
+            <div class="small">Use this in the browser or curl proxy settings.</div>
+          </div>
+          <div class="kv-item">
+            <div class="small">About the bypass list</div>
+            <div class="small">The bypass list below is used as Tinyproxy’s <code>Allow</code> list. Keep <code>127.0.0.1</code> and <code>::1</code> if the proxy stays local.</div>
+          </div>
+        </div>
+      </div>
+      <div id="proxyFlash" class="flash" hidden></div>
+    </section>
+
+    <section class="panel">
+      <h2>Proxy settings</h2>
+      <div class="grid two" style="margin-top:14px;">
+        <div class="stack">
+          <label><input id="proxyEnabled" type="checkbox" checked> Enable proxy service</label>
+          <label>Listen host
+            <input id="proxyListenHost" placeholder="127.0.0.1">
+          </label>
+          <label>Listen port
+            <input id="proxyListenPort" type="number" min="1" max="65535" step="1" placeholder="3128">
+          </label>
+          <label>Proxy bypass list
+            <textarea id="proxyBypassList" placeholder="127.0.0.1&#10;::1"></textarea>
+          </label>
+        </div>
+        <div class="stack">
+          <label><input id="proxyAuthEnabled" type="checkbox"> Require username/password</label>
+          <label>Proxy username
+            <input id="proxyUsername" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          </label>
+          <label>Proxy password
+            <input id="proxyPassword" type="password" autocomplete="new-password">
+          </label>
+          <label>CONNECT port allowlist
+            <textarea id="proxyConnectPorts" placeholder="80&#10;443&#10;8443&#10;9443&#10;2053"></textarea>
+          </label>
+          <label>Log level
+            <select id="proxyLogLevel">
+              <option>Critical</option>
+              <option>Error</option>
+              <option>Warning</option>
+              <option>Notice</option>
+              <option>Connect</option>
+              <option selected>Info</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div class="grid two" style="margin-top:14px;">
+        <div class="stack">
+          <label>Timeout
+            <input id="proxyTimeout" type="number" min="1" max="86400" step="1" placeholder="600">
+          </label>
+          <label>Max clients
+            <input id="proxyMaxClients" type="number" min="1" max="10000" step="1" placeholder="100">
+          </label>
+        </div>
+        <div class="stack">
+          <label><input id="proxyDisableViaHeader" type="checkbox" checked> Disable Via header</label>
+          <div class="kv-item">
+            <div class="small">Usage hint</div>
+            <div class="small">For a local-only browser proxy, keep the listen host at <code>127.0.0.1</code> and use the browser proxy URL shown above.</div>
+          </div>
+          <div class="actions">
+            <button id="saveBtn" type="button">Save and apply</button>
+            <button id="disableBtn" class="secondary" type="button">Disable service</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const API = '/manage/api';
+    const initialProxy = ${initialProxy};
+    const proxyEnabled = document.getElementById('proxyEnabled');
+    const proxyListenHost = document.getElementById('proxyListenHost');
+    const proxyListenPort = document.getElementById('proxyListenPort');
+    const proxyBypassList = document.getElementById('proxyBypassList');
+    const proxyAuthEnabled = document.getElementById('proxyAuthEnabled');
+    const proxyUsername = document.getElementById('proxyUsername');
+    const proxyPassword = document.getElementById('proxyPassword');
+    const proxyConnectPorts = document.getElementById('proxyConnectPorts');
+    const proxyTimeout = document.getElementById('proxyTimeout');
+    const proxyMaxClients = document.getElementById('proxyMaxClients');
+    const proxyLogLevel = document.getElementById('proxyLogLevel');
+    const proxyDisableViaHeader = document.getElementById('proxyDisableViaHeader');
+    const proxyFlash = document.getElementById('proxyFlash');
+    const statusPill = document.getElementById('statusPill');
+    const systemdActiveText = document.getElementById('systemdActiveText');
+    const systemdEnabledText = document.getElementById('systemdEnabledText');
+    const proxyUrlText = document.getElementById('proxyUrlText');
+    const configPathText = document.getElementById('configPathText');
+    const confPathText = document.getElementById('confPathText');
+    const serviceNameText = document.getElementById('serviceNameText');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const saveBtn = document.getElementById('saveBtn');
+    const disableBtn = document.getElementById('disableBtn');
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function showMessage(value, ok = true) {
+      proxyFlash.hidden = false;
+      proxyFlash.style.borderColor = ok ? '#1d4ed8' : '#7f1d1d';
+      proxyFlash.textContent = value;
+    }
+
+    function toList(text) {
+      return String(text || '')
+        .split(/[\n,]+/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+    }
+
+    function fromList(values) {
+      return Array.isArray(values) && values.length ? values.join('\n') : '';
+    }
+
+    function applyProxy(data) {
+      const proxy = data?.proxy || data || {};
+      const status = proxy.status || {};
+      proxyEnabled.checked = Boolean(proxy.enabled);
+      proxyListenHost.value = proxy.listen_host || '127.0.0.1';
+      proxyListenPort.value = proxy.listen_port || 3128;
+      proxyBypassList.value = fromList(proxy.allow || ['127.0.0.1', '::1']);
+      proxyAuthEnabled.checked = Boolean(proxy.auth?.enabled);
+      proxyUsername.value = proxy.auth?.username || '';
+      proxyPassword.value = proxy.auth?.password || '';
+      proxyConnectPorts.value = fromList(proxy.connect_ports || [80, 443, 8443, 9443, 2053]);
+      proxyTimeout.value = proxy.timeout || 600;
+      proxyMaxClients.value = proxy.max_clients || 100;
+      proxyLogLevel.value = proxy.log_level || 'Info';
+      proxyDisableViaHeader.checked = Boolean(proxy.disable_via_header);
+      statusPill.className = 'pill ' + (proxy.enabled ? (status.active === 'active' ? 'good' : 'warn') : 'neutral');
+      statusPill.textContent = proxy.enabled ? (status.active === 'active' ? 'Proxy active' : 'Proxy enabled, not running') : 'Proxy disabled';
+      systemdActiveText.textContent = status.active || 'inactive';
+      systemdEnabledText.textContent = status.enabled || 'disabled';
+      proxyUrlText.textContent = 'http://' + (proxy.listen_host || '127.0.0.1') + ':' + (proxy.listen_port || 3128);
+      configPathText.textContent = proxy.sourcePath || '${escapeHtml(VPS_PROXY_CONFIG_FILE)}';
+      confPathText.textContent = proxy.confPath || '${escapeHtml(TINYPROXY_CONF_FILE)}';
+      serviceNameText.textContent = proxy.service || '${escapeHtml(TINYPROXY_SERVICE)}';
+    }
+
+    async function api(path, options = {}) {
+      const res = await fetch(\`\${API}\${path}\`, {
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        credentials: 'same-origin',
+        ...options,
+      });
+      const text = await res.text();
+      let data;
+      try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+      if (!res.ok) {
+        const message = data && typeof data === 'object' ? (data.error || data.message || text) : text;
+        throw new Error(message || \`Request failed: \${res.status}\`);
+      }
+      return data;
+    }
+
+    async function refresh() {
+      const data = await api('/proxy');
+      applyProxy(data);
+    }
+
+    async function save(enabledOverride = null) {
+      const payload = {
+        enabled: enabledOverride === null ? proxyEnabled.checked : Boolean(enabledOverride),
+        listen_host: proxyListenHost.value.trim() || '127.0.0.1',
+        listen_port: Number.parseInt(proxyListenPort.value, 10) || 3128,
+        allow: toList(proxyBypassList.value),
+        auth: {
+          enabled: proxyAuthEnabled.checked,
+          username: proxyUsername.value.trim(),
+          password: proxyPassword.value,
+        },
+        connect_ports: toList(proxyConnectPorts.value).map((value) => Number.parseInt(value, 10)).filter((value) => Number.isInteger(value) && value > 0 && value < 65536),
+        timeout: Number.parseInt(proxyTimeout.value, 10) || 600,
+        max_clients: Number.parseInt(proxyMaxClients.value, 10) || 100,
+        log_level: proxyLogLevel.value,
+        disable_via_header: proxyDisableViaHeader.checked,
+      };
+      const data = await api('/proxy', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      applyProxy(data);
+      showMessage(data.message || 'Proxy service saved and applied');
+    }
+
+    refreshBtn.addEventListener('click', async () => {
+      refreshBtn.disabled = true;
+      try {
+        await refresh();
+        showMessage('Proxy status refreshed');
+      } catch (error) {
+        showMessage(error.message, false);
+      } finally {
+        refreshBtn.disabled = false;
+      }
+    });
+
+    saveBtn.addEventListener('click', async () => {
+      saveBtn.disabled = true;
+      disableBtn.disabled = true;
+      try {
+        await save();
+      } catch (error) {
+        showMessage(error.message, false);
+      } finally {
+        saveBtn.disabled = false;
+        disableBtn.disabled = false;
+      }
+    });
+
+    disableBtn.addEventListener('click', async () => {
+      disableBtn.disabled = true;
+      saveBtn.disabled = true;
+      try {
+        await save(false);
+      } catch (error) {
+        showMessage(error.message, false);
+      } finally {
+        disableBtn.disabled = false;
+        saveBtn.disabled = false;
+      }
+    });
+
+    applyProxy(initialProxy);
+  </script>
 </body>
 </html>`;
 }
@@ -3981,6 +4518,7 @@ function renderPage() {
       <a class="btn ghost" href="/">Portal</a>
       <a class="btn ghost" href="/manage/tls/">Manage SSL</a>
       <a class="btn ghost" href="/manage/tls/">TLS / Certificates</a>
+      <a class="btn ghost" href="/manage/proxy/">Proxy Service</a>
       <a class="btn ghost" href="/phpmyadmin/">phpMyAdmin</a>
       <button class="secondary" id="refreshBtn" type="button">Refresh</button>
     </div>
@@ -6915,6 +7453,15 @@ async function handleRequest(req, res) {
       return;
     }
 
+    if (req.method === 'GET' && routePath === '/proxy') {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(renderProxyPage());
+      return;
+    }
+
     if (req.method === 'GET' && routePath === '/') {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
@@ -6950,6 +7497,52 @@ async function handleRequest(req, res) {
         projects: projectView(),
       });
       return;
+    }
+
+    if (req.method === 'GET' && routePath === '/api/proxy') {
+      sendJson(res, 200, {
+        proxy: readProxyServiceStatus(),
+      });
+      return;
+    }
+
+    if (routePath === '/api/proxy') {
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        const payload = {
+          enabled: body.enabled !== undefined ? Boolean(body.enabled) : true,
+          listen_host: String(body.listen_host || body.listenHost || '').trim() || '127.0.0.1',
+          listen_port: body.listen_port !== undefined ? body.listen_port : body.listenPort,
+          allow: Array.isArray(body.allow) ? body.allow : [],
+          auth: {
+            enabled: Boolean(body.auth && body.auth.enabled),
+            username: String(body.auth && body.auth.username || body.proxy_username || body.proxyUsername || '').trim(),
+            password: String(body.auth && body.auth.password || body.proxy_password || body.proxyPassword || ''),
+          },
+          connect_ports: Array.isArray(body.connect_ports) ? body.connect_ports : [],
+          timeout: body.timeout,
+          max_clients: body.max_clients,
+          log_level: String(body.log_level || 'Info'),
+          disable_via_header: body.disable_via_header !== undefined ? Boolean(body.disable_via_header) : true,
+        };
+        const saved = saveProxyServiceConfig(payload);
+        sendJson(res, 200, {
+          ok: true,
+          message: saved.enabled ? 'Proxy service saved and applied' : 'Proxy service disabled',
+          proxy: readProxyServiceStatus(),
+        });
+        return;
+      }
+
+      if (req.method === 'DELETE') {
+        const saved = saveProxyServiceConfig({ ...readProxyServiceConfig(), enabled: false });
+        sendJson(res, 200, {
+          ok: true,
+          message: 'Proxy service disabled',
+          proxy: saved,
+        });
+        return;
+      }
     }
 
     if (routePath === '/api/tls/server') {
