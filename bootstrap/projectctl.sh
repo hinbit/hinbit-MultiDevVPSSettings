@@ -1943,6 +1943,15 @@ maybe_build() {
   [[ "${status}" == "success" ]]
 }
 
+normalize_deploy_runtime() {
+  local runtime="${1:-auto}"
+
+  case "${runtime,,}" in
+    auto|node|docker) printf '%s' "${runtime,,}" ;;
+    *) printf 'auto' ;;
+  esac
+}
+
 ecosystem_file_is_supported() {
   local ecosystem_file="$1"
 
