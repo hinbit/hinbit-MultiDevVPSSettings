@@ -81,6 +81,43 @@ const DEFAULT_PROXY_CONFIG = {
   },
 };
 
+const ENV_FILE_GROUP = process.env.VPS_ENV_GROUP || 'adm';
+const ENV_FILE_MODE = 0o640;
+
+function getGroupGid(groupName) {
+  try {
+    const out = execFileSync('getent', ['group', groupName], { encoding: 'utf8' }).trim();
+    if (!out) return null;
+    const parts = out.split(':');
+    const gid = Number(parts[2]);
+    return Number.isFinite(gid) ? gid : null;
+  } catch {
+    return null;
+  }
+}
+
+const ENV_FILE_GID = getGroupGid(ENV_FILE_GROUP);
+
+function ensureEnvFileReadable(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return;
+  try {
+    if (ENV_FILE_GID !== null) {
+      fs.chownSync(filePath, 0, ENV_FILE_GID);
+    }
+  } catch {
+    // Ignore ownership failures and fall back to a world-readable mode if needed.
+  }
+  try {
+    fs.chmodSync(filePath, ENV_FILE_MODE);
+  } catch {
+    try {
+      fs.chmodSync(filePath, 0o644);
+    } catch {
+      // ignore
+    }
+  }
+}
+
 function loadSystemEnv() {
   if (!fs.existsSync(SYSTEM_ENV_FILE)) return;
   const content = fs.readFileSync(SYSTEM_ENV_FILE, 'utf8');
@@ -302,6 +339,7 @@ function updateEnvFileValue(filePath, key, value) {
   const current = fs.existsSync(filePath) ? parseEnvFile(filePath) : {};
   current[key] = value;
   fs.writeFileSync(filePath, serializeEnvText(current), 'utf8');
+  ensureEnvFileReadable(filePath);
 }
 
 function readProjectEnv(projectPath) {
@@ -2186,7 +2224,7 @@ print(extract_dir)
     const source = path.join(extractDir, name);
     if (!fs.existsSync(source)) continue;
     fs.copyFileSync(source, path.join(projectPath, name));
-    fs.chmodSync(path.join(projectPath, name), 0o600);
+    ensureEnvFileReadable(path.join(projectPath, name));
   }
   for (const parent of ['server', 'client', 'dashboard']) {
     for (const name of ENV_CANDIDATES) {
@@ -2194,7 +2232,7 @@ print(extract_dir)
       if (!fs.existsSync(source)) continue;
       fs.mkdirSync(path.join(projectPath, parent), { recursive: true });
       fs.copyFileSync(source, path.join(projectPath, parent, name));
-      fs.chmodSync(path.join(projectPath, parent, name), 0o600);
+      ensureEnvFileReadable(path.join(projectPath, parent, name));
     }
   }
 
@@ -8987,7 +9025,7 @@ async function handleRequest(req, res) {
         const autoBackup = createProjectEnvBackup(ref, projectPath);
         fs.mkdirSync(path.dirname(targetPath), { recursive: true });
         fs.writeFileSync(targetPath, serializeEnvText(finalEnv), 'utf8');
-        fs.chmodSync(targetPath, 0o600);
+        ensureEnvFileReadable(targetPath);
         runProjectCtl(['restart', ref]);
         const refreshed = pickEnvDetails(projectPath);
         const refreshedBackups = listProjectEnvBackups(ref);

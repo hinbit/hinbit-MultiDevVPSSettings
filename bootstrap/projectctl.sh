@@ -2,6 +2,7 @@
 set -euo pipefail
 
 META_DIR="/etc/vps-projects"
+PROJECT_ENV_GROUP="${PROJECT_ENV_GROUP:-adm}"
 APP_ROOT="/var/www"
 APP_MAP="/etc/app-map.csv"
 AUTH_DIR="/etc/nginx/project-auth"
@@ -211,6 +212,56 @@ validate_domain() {
 
 meta_path_for_slug() {
   printf '%s/%s.env' "${META_DIR}" "$1"
+}
+
+trim_shell_whitespace() {
+  local value="${1:-}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "${value}"
+}
+
+unquote_shell_value() {
+  local value="${1:-}"
+  local quote=""
+
+  if [[ "${#value}" -ge 2 ]]; then
+    quote="${value:0:1}${value: -1}"
+    case "${quote}" in
+      "''")
+        printf '%s' "${value:1:${#value}-2}"
+        return 0
+        ;;
+      '""')
+        printf '%s' "${value:1:${#value}-2}"
+        return 0
+        ;;
+    esac
+  fi
+
+  printf '%s' "${value}"
+}
+
+ensure_env_file_accessible() {
+  local file="$1"
+
+  [[ -e "${file}" ]] || return 0
+  if chown root:"${PROJECT_ENV_GROUP}" "${file}" 2>/dev/null; then
+    chmod 0640 "${file}" 2>/dev/null || true
+  else
+    chmod 0644 "${file}" 2>/dev/null || true
+  fi
+}
+
+ensure_project_env_tree_accessible() {
+  local project_dir="${1:-${APP_DIR}}"
+  local file=""
+
+  [[ -d "${project_dir}" ]] || return 0
+  while IFS= read -r file; do
+    [[ -n "${file}" ]] || continue
+    ensure_env_file_accessible "${file}"
+  done < <(project_env_tree_paths "${project_dir}")
 }
 
 project_env_value() {
@@ -556,6 +607,7 @@ copy_project_tree_from_source() {
   fi
 
   rsync "${rsync_args[@]}" "${source_dir}/" "${target_dir}/"
+  ensure_project_env_tree_accessible "${target_dir}"
 }
 
 sync_duplicate_project_from_source() {
@@ -873,6 +925,7 @@ with open(target_path, 'w', encoding='utf-8', errors='surrogateescape') as handl
 PY
   cp -p "${tmp}" "${env_file}"
   rm -f "${tmp}" >/dev/null 2>&1 || true
+  ensure_env_file_accessible "${env_file}"
 }
 
 env_file_value_exact() {
@@ -1007,7 +1060,7 @@ sync_project_db_env() {
   while IFS= read -r env_file; do
     [[ -n "${env_file}" ]] || continue
     touch "${env_file}"
-    chmod 0600 "${env_file}"
+    ensure_env_file_accessible "${env_file}"
     update_meta_value "${env_file}" "DB_TYPE" "${db_type}"
     update_meta_value "${env_file}" "VITE_DB_TYPE" "${db_type}"
     update_meta_value "${env_file}" "DB_NAME" "${db_name}"
@@ -1907,7 +1960,7 @@ sync_project_db_machine_env() {
   local custom_mode="no"
 
   touch "${env_file}"
-  chmod 0600 "${env_file}"
+  ensure_env_file_accessible "${env_file}"
   if [[ "${machine_id}" == "custom" ]]; then
     custom_mode="yes"
   fi
@@ -2008,7 +2061,7 @@ sync_project_vpn_profile_env() {
   done
 
   touch "${env_file}"
-  chmod 0600 "${env_file}"
+  ensure_env_file_accessible "${env_file}"
   update_meta_value "${env_file}" "VPN_PROFILE" "${vpn_profile}"
   [[ -n "${vpn_notes}" ]] && update_meta_value "${env_file}" "VPN_PROFILE_NOTES" "${vpn_notes}"
   normalize_env_file_shell_safe "${env_file}"
@@ -2077,12 +2130,16 @@ update_meta_value() {
   if [[ "${meta}" == /var/www/* ]]; then
     normalize_env_file_shell_safe "${meta}"
   fi
+  if [[ "${meta}" == /var/www/* || "${meta}" == /etc/vps-projects/* ]]; then
+    ensure_env_file_accessible "${meta}"
+  fi
 }
 
 touch_meta_file() {
   local meta="$1"
   [[ -f "${meta}" ]] || return 0
   touch "${meta}" >/dev/null 2>&1 || true
+  ensure_env_file_accessible "${meta}"
 }
 
 merge_env_file_preserving_current_values() {
@@ -2148,6 +2205,7 @@ with open(out_path, 'w', encoding='utf-8', errors='surrogateescape') as handle:
 PY
   cp -p "${tmp}" "${dest_file}"
   rm -f "${tmp}" >/dev/null 2>&1 || true
+  ensure_env_file_accessible "${dest_file}"
 }
 
 seed_project_env_from_templates_for_dir() {
@@ -2183,6 +2241,7 @@ seed_project_env_from_templates_for_dir() {
       cp -p "${template}" "${project_dir}/${candidate}"
     fi
     normalize_env_file_shell_safe "${project_dir}/${candidate}"
+    ensure_env_file_accessible "${project_dir}/${candidate}"
   done
 }
 
@@ -2473,13 +2532,31 @@ EOF
 
 load_meta() {
   local meta="$1"
+  local line=""
+  local key=""
+  local value=""
   [[ -f "${meta}" ]] || die "Missing project metadata: ${meta}"
-  # shellcheck disable=SC1090
-  source "${meta}"
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line%$'\r'}"
+    line="$(trim_shell_whitespace "${line}")"
+    [[ -n "${line}" ]] || continue
+    [[ "${line}" == \#* ]] && continue
+    [[ "${line}" == export\ * ]] && line="${line#export }"
+    [[ "${line}" == *=* ]] || continue
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="$(trim_shell_whitespace "${key}")"
+    value="$(trim_shell_whitespace "${value}")"
+    [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    value="$(unquote_shell_value "${value}")"
+    printf -v "${key}" '%s' "${value}"
+    export "${key}"
+  done < "${meta}"
   if [[ -n "${REPO_REF:-}" ]]; then
     REPO_URL="$(repo_url_from_ref "${REPO_REF}")"
     PROJECT_SLUG="$(slug_from_ref "${REPO_REF}")"
   fi
+  ensure_env_file_accessible "${meta}"
 }
 
 package_has_script() {
@@ -3327,6 +3404,7 @@ MYSQL_ALLOWED_IPS=${MYSQL_ALLOWED_IPS:-}
 SSH_UPLOAD_USER=${SSH_UPLOAD_USER:-}
 SSH_UPLOAD_PASSWORD=${SSH_UPLOAD_PASSWORD:-}
 EOF
+  ensure_env_file_accessible "${meta}"
 }
 
 sync_project_runtime_ports() {
@@ -3345,7 +3423,7 @@ sync_project_runtime_ports() {
 
   env_file="${project_dir}/.env"
   touch "${env_file}"
-  chmod 0600 "${env_file}"
+  ensure_env_file_accessible "${env_file}"
   if [[ "${split_runtime}" -eq 0 ]]; then
     update_meta_value "${env_file}" "PORT" "${port}"
   fi
@@ -3973,7 +4051,8 @@ do_install() {
 
   if [[ -n "${env_file}" ]]; then
     [[ -f "${env_file}" ]] || die "Missing env file: ${env_file}"
-    install -m 0600 "${env_file}" "${APP_DIR}/.env"
+    install -m 0640 "${env_file}" "${APP_DIR}/.env"
+    ensure_env_file_accessible "${APP_DIR}/.env"
     git -C "${APP_DIR}" update-index --skip-worktree .env >/dev/null 2>&1 || true
   fi
 
