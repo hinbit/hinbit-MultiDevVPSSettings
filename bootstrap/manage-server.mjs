@@ -56,8 +56,8 @@ const VPS_PROXY_CONFIG_FILE = '/etc/vps-proxy-service.json';
 const TINYPROXY_CONF_FILE = '/etc/tinyproxy/tinyproxy.conf';
 const TINYPROXY_SERVICE = 'tinyproxy';
 const DEFAULT_PROXY_AUTH = {
-  username: 'local-proxy',
-  password: 'pargod-browsing-2026',
+  username: 'multidev.hinbit',
+  password: 'hinbit2026#@!',
 };
 const DEFAULT_PROXY_CONFIG = {
   enabled: true,
@@ -4054,7 +4054,23 @@ function renderProxyPage() {
     }
 
     function copyText(value) {
-      return navigator.clipboard.writeText(String(value || ''));
+      const text = String(value || '');
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        return navigator.clipboard.writeText(text);
+      }
+      const helper = document.createElement('textarea');
+      helper.value = text;
+      helper.setAttribute('readonly', 'readonly');
+      helper.style.position = 'fixed';
+      helper.style.left = '-9999px';
+      helper.style.top = '0';
+      document.body.appendChild(helper);
+      helper.focus();
+      helper.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(helper);
+      if (!ok) throw new Error('Copy to clipboard failed');
+      return Promise.resolve();
     }
 
     function serviceProxyCopyText() {
