@@ -55,6 +55,10 @@ const MAX_ENV_FILE_BYTES = 1024 * 1024;
 const VPS_PROXY_CONFIG_FILE = '/etc/vps-proxy-service.json';
 const TINYPROXY_CONF_FILE = '/etc/tinyproxy/tinyproxy.conf';
 const TINYPROXY_SERVICE = 'tinyproxy';
+const DEFAULT_PROXY_AUTH = {
+  username: 'local-proxy',
+  password: 'pargod-browsing-2026',
+};
 const DEFAULT_PROXY_CONFIG = {
   enabled: true,
   service: 'tinyproxy',
@@ -63,8 +67,7 @@ const DEFAULT_PROXY_CONFIG = {
   allow: ['127.0.0.1', '::1'],
   auth: {
     enabled: false,
-    username: '',
-    password: '',
+    ...DEFAULT_PROXY_AUTH,
   },
   connect_ports: [80, 443, 8443, 9443, 2053],
   timeout: 600,
@@ -1142,8 +1145,8 @@ function readProxyServiceConfig() {
       ...DEFAULT_PROXY_CONFIG.auth,
       ...auth,
       enabled: Boolean(auth.enabled),
-      username: String(auth.username || '').trim(),
-      password: String(auth.password || ''),
+      username: String(auth.username || DEFAULT_PROXY_AUTH.username).trim() || DEFAULT_PROXY_AUTH.username,
+      password: String(auth.password || DEFAULT_PROXY_AUTH.password),
     },
     connect_ports: connectPorts
       .map((item) => Number.parseInt(String(item), 10))
@@ -1202,6 +1205,13 @@ function normalizeProxyPoolEntry(input = {}, index = 0) {
     username,
     password,
     notes: String(input.notes || '').trim(),
+    exit_ip: String(input.exit_ip || input.proxy_exit_ip || '').trim(),
+    exit_location: String(input.exit_location || input.location_summary || input.location || '').trim(),
+    exit_city: String(input.exit_city || '').trim(),
+    exit_region: String(input.exit_region || '').trim(),
+    exit_country: String(input.exit_country || '').trim(),
+    exit_org: String(input.exit_org || '').trim(),
+    exit_timezone: String(input.exit_timezone || '').trim(),
     working: Boolean(input.working),
     status: String(input.status || (input.working ? 'working' : 'unchecked')).trim() || 'unchecked',
     checked_at: String(input.checked_at || input.checkedAt || '').trim(),
@@ -1273,6 +1283,74 @@ function proxyEntryCopyText(entry) {
   return lines.join('\n');
 }
 
+function proxyServiceUrl(config) {
+  if (!config || typeof config !== 'object') return '';
+  const host = formatProxyHost(config.listen_host || DEFAULT_PROXY_CONFIG.listen_host);
+  const port = Number.parseInt(String(config.listen_port || DEFAULT_PROXY_CONFIG.listen_port), 10) || DEFAULT_PROXY_CONFIG.listen_port;
+  const auth = config.auth?.enabled && config.auth?.username
+    ? `${encodeURIComponent(config.auth.username)}${config.auth.password ? `:${encodeURIComponent(config.auth.password)}` : ''}@`
+    : '';
+  return `http://${auth}${host}:${port}`;
+}
+
+function proxyLocationSummary(info = {}) {
+  const city = String(info.city || info.city_name || '').trim();
+  const region = String(info.region || info.region_name || '').trim();
+  const country = String(info.country_name || info.country || '').trim();
+  const parts = [city, region, country].filter(Boolean);
+  return parts.join(' · ');
+}
+
+function fetchProxyExitInfo(proxyUrl) {
+  const endpoints = ['https://ipapi.co/json/', 'https://ipinfo.io/json'];
+  let lastError = '';
+  for (const endpoint of endpoints) {
+    const result = spawnSync(
+      'curl',
+      [
+        '-fsS',
+        '--proxy', proxyUrl,
+        '--proxy-connect-timeout', '8',
+        '--max-time', '15',
+        endpoint,
+      ],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    if (result.status !== 0) {
+      lastError = String(result.stderr || result.error?.message || `curl exited ${result.status ?? 'unknown'}`).trim() || lastError;
+      continue;
+    }
+    const raw = String(result.stdout || '').trim();
+    if (!raw) {
+      lastError = 'Geo lookup returned empty response';
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      return {
+        ok: true,
+        checked_at: new Date().toISOString(),
+        endpoint,
+        raw,
+        exit_ip: String(parsed.ip || parsed.query || '').trim(),
+        exit_location: proxyLocationSummary(parsed),
+        exit_city: String(parsed.city || '').trim(),
+        exit_region: String(parsed.region || parsed.region_name || '').trim(),
+        exit_country: String(parsed.country_name || parsed.country || '').trim(),
+        exit_org: String(parsed.org || parsed.organization || parsed.asn?.org || '').trim(),
+        exit_timezone: String(parsed.timezone || '').trim(),
+      };
+    } catch (error) {
+      lastError = `Failed to parse geo response from ${endpoint}: ${error.message}`;
+    }
+  }
+  return {
+    ok: false,
+    checked_at: new Date().toISOString(),
+    error: lastError || 'Geo lookup failed',
+  };
+}
+
 function testProxyEntry(entry) {
   if (!entry || typeof entry !== 'object') {
     return { ok: false, error: 'Proxy entry is missing' };
@@ -1296,12 +1374,21 @@ function testProxyEntry(entry) {
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
     );
     if (result.status === 0) {
+      const geo = fetchProxyExitInfo(proxyUrl);
       return {
         ok: true,
         protocol,
         proxyUrl,
         checked_at: new Date().toISOString(),
         output: String(result.stdout || '').trim(),
+        exit_ip: geo.exit_ip || '',
+        exit_location: geo.exit_location || '',
+        exit_city: geo.exit_city || '',
+        exit_region: geo.exit_region || '',
+        exit_country: geo.exit_country || '',
+        exit_org: geo.exit_org || '',
+        exit_timezone: geo.exit_timezone || '',
+        geo_error: geo.ok ? '' : (geo.error || ''),
       };
     }
     lastError = String(result.stderr || result.error?.message || `curl exited ${result.status ?? 'unknown'}`).trim() || lastError;
@@ -1343,8 +1430,8 @@ function normalizeProxyConfig(input = {}) {
       ...DEFAULT_PROXY_CONFIG.auth,
       ...authInput,
       enabled: Boolean(authInput.enabled),
-      username: String(authInput.username || '').trim(),
-      password: String(authInput.password || ''),
+      username: String(authInput.username || DEFAULT_PROXY_AUTH.username).trim() || DEFAULT_PROXY_AUTH.username,
+      password: String(authInput.password || DEFAULT_PROXY_AUTH.password),
     },
     connect_ports: connectPorts.length ? connectPorts : DEFAULT_PROXY_CONFIG.connect_ports.slice(),
     timeout: Number.parseInt(String(input.timeout || DEFAULT_PROXY_CONFIG.timeout), 10) || DEFAULT_PROXY_CONFIG.timeout,
@@ -1424,6 +1511,7 @@ function readProxyServiceStatus() {
       entries: pool.entries.map((entry) => ({ ...entry })),
     },
     selected_proxy: selected ? { ...selected, copy_text: proxyEntryCopyText(selected), url: proxyEntryUrl(selected) } : null,
+    service_url: proxyServiceUrl(config),
   };
 }
 
@@ -1468,6 +1556,13 @@ function markProxyPoolEntryResult(entry, result) {
     status: result?.ok ? 'working' : 'failed',
     checked_at: result?.checked_at || new Date().toISOString(),
     last_error: result?.ok ? '' : String(result?.error || 'Proxy check failed').trim(),
+    exit_ip: result?.exit_ip || entry.exit_ip || '',
+    exit_location: result?.exit_location || entry.exit_location || '',
+    exit_city: result?.exit_city || entry.exit_city || '',
+    exit_region: result?.exit_region || entry.exit_region || '',
+    exit_country: result?.exit_country || entry.exit_country || '',
+    exit_org: result?.exit_org || entry.exit_org || '',
+    exit_timezone: result?.exit_timezone || entry.exit_timezone || '',
   };
 }
 
@@ -3747,8 +3842,12 @@ function renderProxyPage() {
         <div class="stack">
           <div class="kv-item">
             <div class="small">Browser proxy URL</div>
-            <div><code id="proxyUrlText">http://${escapeHtml(proxy.listen_host || '127.0.0.1')}:${escapeHtml(String(proxy.listen_port || 3128))}</code></div>
+            <div><code id="proxyUrlText">${escapeHtml(proxy.service_url || proxyServiceUrl(proxy) || `http://${proxy.listen_host || '127.0.0.1'}:${String(proxy.listen_port || 3128)}`)}</code></div>
             <div class="small">Use this in the browser or curl proxy settings.</div>
+          </div>
+          <div class="actions">
+            <button id="copyProxyUrlBtn" class="secondary" type="button">Copy URL</button>
+            <button id="copyProxyCredsBtn" class="secondary" type="button">Copy credentials</button>
           </div>
           <div class="kv-item">
             <div class="small">About the bypass list</div>
@@ -3814,6 +3913,7 @@ function renderProxyPage() {
           </div>
           <div class="actions">
             <button id="saveBtn" type="button">Save and apply</button>
+            <button id="activateBtn" class="secondary" type="button">Activate service</button>
             <button id="disableBtn" class="secondary" type="button">Disable service</button>
           </div>
         </div>
@@ -3877,6 +3977,7 @@ function renderProxyPage() {
   <script>
     const API = '/manage/api';
     const initialProxy = ${initialProxy};
+    const defaultProxyAuth = ${JSON.stringify(DEFAULT_PROXY_AUTH).replace(/</g, '\\u003c')};
     const proxyEnabled = document.getElementById('proxyEnabled');
     const proxyListenHost = document.getElementById('proxyListenHost');
     const proxyListenPort = document.getElementById('proxyListenPort');
@@ -3894,11 +3995,14 @@ function renderProxyPage() {
     const systemdActiveText = document.getElementById('systemdActiveText');
     const systemdEnabledText = document.getElementById('systemdEnabledText');
     const proxyUrlText = document.getElementById('proxyUrlText');
+    const copyProxyUrlBtn = document.getElementById('copyProxyUrlBtn');
+    const copyProxyCredsBtn = document.getElementById('copyProxyCredsBtn');
     const configPathText = document.getElementById('configPathText');
     const confPathText = document.getElementById('confPathText');
     const serviceNameText = document.getElementById('serviceNameText');
     const refreshBtn = document.getElementById('refreshBtn');
     const saveBtn = document.getElementById('saveBtn');
+    const activateBtn = document.getElementById('activateBtn');
     const disableBtn = document.getElementById('disableBtn');
     const proxyPoolFile = document.getElementById('proxyPoolFile');
     const proxyImportBtn = document.getElementById('proxyImportBtn');
@@ -3953,6 +4057,15 @@ function renderProxyPage() {
       return navigator.clipboard.writeText(String(value || ''));
     }
 
+    function serviceProxyCopyText() {
+      const url = proxyUrlText.textContent || '';
+      return [
+        'proxy_url=' + url,
+        'proxy_username=' + (proxyUsername.value.trim() || defaultProxyAuth.username),
+        'proxy_password=' + (proxyPassword.value || defaultProxyAuth.password),
+      ].join('\n');
+    }
+
     function poolEntryUrl(entry) {
       if (!entry) return '';
       const protocol = String(entry.protocol || 'http').trim().toLowerCase() || 'http';
@@ -4003,9 +4116,13 @@ function renderProxyPage() {
       const selectedLabel = selected
         ? (selected.label || selected.host || 'Selected proxy') + ' · ' + poolEntryUrl(selected)
         : 'No proxy selected';
+      const geoLabel = selected
+        ? [selected.exit_ip || '', selected.exit_location || ''].filter(Boolean).join(' · ')
+        : '';
       proxyPoolSummary.innerHTML =
         '<div><strong>' + escapeHtml(String(entries.length)) + '</strong> proxies imported, <strong>' + escapeHtml(String(workingCount)) + '</strong> marked working</div>' +
         '<div class="small">' + escapeHtml(selectedLabel) + '</div>' +
+        (geoLabel ? '<div class="small">Exit: ' + escapeHtml(geoLabel) + '</div>' : '') +
         '<div class="small">' + escapeHtml(selected?.checked_at || pool?.checked_at || 'Not checked yet') + '</div>' +
         '<div class="small">' + escapeHtml(selected?.last_error || '') + '</div>';
     }
@@ -4041,8 +4158,8 @@ function renderProxyPage() {
       proxyListenPort.value = proxy.listen_port || 3128;
       proxyBypassList.value = fromList(proxy.allow || ['127.0.0.1', '::1']);
       proxyAuthEnabled.checked = Boolean(proxy.auth?.enabled);
-      proxyUsername.value = proxy.auth?.username || '';
-      proxyPassword.value = proxy.auth?.password || '';
+      proxyUsername.value = proxy.auth?.username || defaultProxyAuth.username || '';
+      proxyPassword.value = proxy.auth?.password || defaultProxyAuth.password || '';
       proxyConnectPorts.value = fromList(proxy.connect_ports || [80, 443, 8443, 9443, 2053]);
       proxyTimeout.value = proxy.timeout || 600;
       proxyMaxClients.value = proxy.max_clients || 100;
@@ -4052,7 +4169,7 @@ function renderProxyPage() {
       statusPill.textContent = proxy.enabled ? (status.active === 'active' ? 'Proxy active' : 'Proxy enabled, not running') : 'Proxy disabled';
       systemdActiveText.textContent = status.active || 'inactive';
       systemdEnabledText.textContent = status.enabled || 'disabled';
-      proxyUrlText.textContent = 'http://' + (proxy.listen_host || '127.0.0.1') + ':' + (proxy.listen_port || 3128);
+      proxyUrlText.textContent = proxy.service_url || 'http://' + (proxy.listen_host || '127.0.0.1') + ':' + (proxy.listen_port || 3128);
       configPathText.textContent = proxy.sourcePath || '${escapeHtml(VPS_PROXY_CONFIG_FILE)}';
       confPathText.textContent = proxy.confPath || '${escapeHtml(TINYPROXY_CONF_FILE)}';
       serviceNameText.textContent = proxy.service || '${escapeHtml(TINYPROXY_SERVICE)}';
@@ -4081,15 +4198,19 @@ function renderProxyPage() {
     }
 
     async function save(enabledOverride = null) {
+      const forceEnabled = enabledOverride === true;
+      const authEnabled = forceEnabled ? true : proxyAuthEnabled.checked;
+      const username = proxyUsername.value.trim() || (forceEnabled ? defaultProxyAuth.username : '');
+      const password = proxyPassword.value || (forceEnabled ? defaultProxyAuth.password : '');
       const payload = {
         enabled: enabledOverride === null ? proxyEnabled.checked : Boolean(enabledOverride),
         listen_host: proxyListenHost.value.trim() || '127.0.0.1',
         listen_port: Number.parseInt(proxyListenPort.value, 10) || 3128,
         allow: toList(proxyBypassList.value),
         auth: {
-          enabled: proxyAuthEnabled.checked,
-          username: proxyUsername.value.trim(),
-          password: proxyPassword.value,
+          enabled: authEnabled,
+          username: username || defaultProxyAuth.username,
+          password: password || defaultProxyAuth.password,
         },
         connect_ports: toList(proxyConnectPorts.value).map((value) => Number.parseInt(value, 10)).filter((value) => Number.isInteger(value) && value > 0 && value < 65536),
         timeout: Number.parseInt(proxyTimeout.value, 10) || 600,
@@ -4103,6 +4224,16 @@ function renderProxyPage() {
       });
       applyProxy(data);
       showMessage(data.message || 'Proxy service saved and applied');
+    }
+
+    async function activateProxy() {
+      proxyEnabled.checked = true;
+      proxyAuthEnabled.checked = true;
+      if (!proxyUsername.value.trim()) proxyUsername.value = defaultProxyAuth.username;
+      if (!proxyPassword.value) proxyPassword.value = defaultProxyAuth.password;
+      const data = await save(true);
+      showMessage(data.message || 'Proxy service activated');
+      return data;
     }
 
     async function importProxyPool() {
@@ -4195,11 +4326,28 @@ function renderProxyPage() {
     saveBtn.addEventListener('click', async () => {
       saveBtn.disabled = true;
       disableBtn.disabled = true;
+      activateBtn.disabled = true;
       try {
         await save();
       } catch (error) {
         showMessage(error.message, false);
       } finally {
+        saveBtn.disabled = false;
+        disableBtn.disabled = false;
+        activateBtn.disabled = false;
+      }
+    });
+
+    activateBtn.addEventListener('click', async () => {
+      activateBtn.disabled = true;
+      saveBtn.disabled = true;
+      disableBtn.disabled = true;
+      try {
+        await activateProxy();
+      } catch (error) {
+        showMessage(error.message, false);
+      } finally {
+        activateBtn.disabled = false;
         saveBtn.disabled = false;
         disableBtn.disabled = false;
       }
@@ -4266,6 +4414,24 @@ function renderProxyPage() {
         await copySelectedProxyCreds();
       } catch (error) {
         showPoolMessage(error.message, false);
+      }
+    });
+
+    copyProxyUrlBtn.addEventListener('click', async () => {
+      try {
+        await copyText(proxyUrlText.textContent || '');
+        showMessage('Proxy URL copied');
+      } catch (error) {
+        showMessage(error.message, false);
+      }
+    });
+
+    copyProxyCredsBtn.addEventListener('click', async () => {
+      try {
+        await copyText(serviceProxyCopyText());
+        showMessage('Proxy credentials copied');
+      } catch (error) {
+        showMessage(error.message, false);
       }
     });
 
@@ -8057,6 +8223,10 @@ async function handleRequest(req, res) {
           break;
         }
       }
+      const selectedEntry = testedEntries.find((entry) => String(entry.id) === String(selectedId)) || null;
+      const selectedSummary = selectedEntry
+        ? [selectedEntry.exit_ip || '', selectedEntry.exit_location || ''].filter(Boolean).join(' · ')
+        : '';
       if (testedEntries.length < normalizedEntries.length) {
         testedEntries.push(...normalizedEntries.slice(testedEntries.length).map((entry) => ({ ...entry })));
       }
@@ -8071,7 +8241,9 @@ async function handleRequest(req, res) {
       });
       sendJson(res, 200, {
         ok: true,
-        message: selectedId ? 'Proxy list imported and first working proxy selected' : 'Proxy list imported, but no working proxy was found',
+        message: selectedId
+          ? `Proxy list imported and first working proxy selected${selectedSummary ? `: ${selectedSummary}` : ''}`
+          : 'Proxy list imported, but no working proxy was found',
         proxy: saved,
         proxy_pool: saved.proxy_pool,
         selected_proxy: saved.selected_proxy,
@@ -8087,6 +8259,7 @@ async function handleRequest(req, res) {
       const target = pool.entries.find((entry) => String(entry.id) === entryId);
       if (!target) throw new Error('Selected proxy not found');
       const result = testProxyEntry(target);
+      const resultSummary = result.ok ? [result.exit_ip || '', result.exit_location || ''].filter(Boolean).join(' · ') : '';
       const nextPool = {
         ...pool,
         selected_id: target.id,
@@ -8096,7 +8269,9 @@ async function handleRequest(req, res) {
       const saved = saveProxyPool({ ...config, proxy_pool: nextPool });
       sendJson(res, 200, {
         ok: result.ok,
-        message: result.ok ? 'Selected proxy is working' : `Selected proxy check failed: ${result.error}`,
+        message: result.ok
+          ? `Selected proxy is working${resultSummary ? `: ${resultSummary}` : ''}`
+          : `Selected proxy check failed: ${result.error}`,
         proxy: saved,
         proxy_pool: saved.proxy_pool,
         selected_proxy: saved.selected_proxy,
@@ -8123,6 +8298,7 @@ async function handleRequest(req, res) {
         id: target.id,
       }, pool.entries.findIndex((entry) => String(entry.id) === String(target.id)));
       const result = testProxyEntry(updatedEntry);
+      const resultSummary = result.ok ? [result.exit_ip || '', result.exit_location || ''].filter(Boolean).join(' · ') : '';
       const nextPool = {
         ...pool,
         selected_id: updatedEntry.id,
@@ -8132,7 +8308,9 @@ async function handleRequest(req, res) {
       const saved = saveProxyPool({ ...config, proxy_pool: nextPool });
       sendJson(res, 200, {
         ok: result.ok,
-        message: result.ok ? 'Selected proxy saved and working' : `Selected proxy saved, but check failed: ${result.error}`,
+        message: result.ok
+          ? `Selected proxy saved and working${resultSummary ? `: ${resultSummary}` : ''}`
+          : `Selected proxy saved, but check failed: ${result.error}`,
         proxy: saved,
         proxy_pool: saved.proxy_pool,
         selected_proxy: saved.selected_proxy,
