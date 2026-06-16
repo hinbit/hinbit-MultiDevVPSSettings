@@ -57,7 +57,7 @@ const TINYPROXY_CONF_FILE = '/etc/tinyproxy/tinyproxy.conf';
 const TINYPROXY_SERVICE = 'tinyproxy';
 const DEFAULT_PROXY_AUTH = {
   username: 'multidev.hinbit',
-  password: 'hinbit2026@!',
+  password: 'hinbit2026',
 };
 const DEFAULT_PROXY_CONFIG = {
   enabled: true,
