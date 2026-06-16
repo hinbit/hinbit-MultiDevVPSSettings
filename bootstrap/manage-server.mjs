@@ -3845,6 +3845,12 @@ function renderProxyPage() {
             <div><code id="proxyUrlText">${escapeHtml(proxy.service_url || proxyServiceUrl(proxy) || `http://${proxy.listen_host || '127.0.0.1'}:${String(proxy.listen_port || 3128)}`)}</code></div>
             <div class="small">Use this in the browser or curl proxy settings.</div>
           </div>
+          <div class="kv-item">
+            <div class="small">Proxy credentials</div>
+            <div class="small">Username: <code id="proxyAuthUsernameText">${escapeHtml(proxy.auth?.username || DEFAULT_PROXY_AUTH.username)}</code></div>
+            <div class="small">Password: <code id="proxyAuthPasswordText">${escapeHtml(proxy.auth?.password || DEFAULT_PROXY_AUTH.password)}</code></div>
+            <div class="small">Use these in browser or app proxy settings.</div>
+          </div>
           <div class="actions">
             <button id="copyProxyUrlBtn" class="secondary" type="button">Copy URL</button>
             <button id="copyProxyCredsBtn" class="secondary" type="button">Copy credentials</button>
@@ -3995,6 +4001,8 @@ function renderProxyPage() {
     const systemdActiveText = document.getElementById('systemdActiveText');
     const systemdEnabledText = document.getElementById('systemdEnabledText');
     const proxyUrlText = document.getElementById('proxyUrlText');
+    const proxyAuthUsernameText = document.getElementById('proxyAuthUsernameText');
+    const proxyAuthPasswordText = document.getElementById('proxyAuthPasswordText');
     const copyProxyUrlBtn = document.getElementById('copyProxyUrlBtn');
     const copyProxyCredsBtn = document.getElementById('copyProxyCredsBtn');
     const configPathText = document.getElementById('configPathText');
@@ -4073,12 +4081,20 @@ function renderProxyPage() {
       return Promise.resolve();
     }
 
+    function currentServiceProxyUsername() {
+      return String(proxyAuthUsernameText?.textContent || proxyUsername.value.trim() || defaultProxyAuth.username || '').trim();
+    }
+
+    function currentServiceProxyPassword() {
+      return String(proxyAuthPasswordText?.textContent || proxyPassword.value || defaultProxyAuth.password || '');
+    }
+
     function serviceProxyCopyText() {
       const url = proxyUrlText.textContent || '';
       return [
         'proxy_url=' + url,
-        'proxy_username=' + (proxyUsername.value.trim() || defaultProxyAuth.username),
-        'proxy_password=' + (proxyPassword.value || defaultProxyAuth.password),
+        'proxy_username=' + currentServiceProxyUsername(),
+        'proxy_password=' + currentServiceProxyPassword(),
       ].join('\n');
     }
 
@@ -4186,6 +4202,8 @@ function renderProxyPage() {
       systemdActiveText.textContent = status.active || 'inactive';
       systemdEnabledText.textContent = status.enabled || 'disabled';
       proxyUrlText.textContent = proxy.service_url || 'http://' + (proxy.listen_host || '127.0.0.1') + ':' + (proxy.listen_port || 3128);
+      if (proxyAuthUsernameText) proxyAuthUsernameText.textContent = proxy.auth?.username || defaultProxyAuth.username || '';
+      if (proxyAuthPasswordText) proxyAuthPasswordText.textContent = proxy.auth?.password || defaultProxyAuth.password || '';
       configPathText.textContent = proxy.sourcePath || '${escapeHtml(VPS_PROXY_CONFIG_FILE)}';
       confPathText.textContent = proxy.confPath || '${escapeHtml(TINYPROXY_CONF_FILE)}';
       serviceNameText.textContent = proxy.service || '${escapeHtml(TINYPROXY_SERVICE)}';
