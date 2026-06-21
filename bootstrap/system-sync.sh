@@ -20,7 +20,7 @@ fi
 mkdir -p "${SYSTEM_PORTAL_WEBROOT}"
 
 app_links="$(
-  awk -F, 'NR > 1 && $1 !~ /^#/ && $1 != "" { printf("<li><a href=\"https://%s/\">%s</a></li>\n", $1, $1) }' /etc/app-map.csv
+  awk -F, 'NR > 1 && $1 !~ /^#/ && $1 != "" && !seen[$1]++ { printf("<li><a href=\"https://%s/\">%s</a></li>\n", $1, $1) }' /etc/app-map.csv
 )"
 
 cat > "${SYSTEM_PORTAL_WEBROOT}/index.html" <<EOF

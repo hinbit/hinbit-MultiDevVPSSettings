@@ -3543,8 +3543,12 @@ app_map_port_for_domain() {
   awk -F, -v domain="${domain}" '
     NR > 1 && $1 == domain {
       gsub(/\r/, "", $2);
-      print $2;
-      exit
+      port = $2
+    }
+    END {
+      if (port != "") {
+        print port
+      }
     }
   ' "${APP_MAP}"
 }

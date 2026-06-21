@@ -26,21 +26,40 @@ meta_env_value() {
 
 append_project_domains() {
   local meta
+  local -a meta_files=()
   local domain
   local port
   local type
   local https
   local proxy_routes_json
+  local previous_meta
+  local -A domain_owner=()
 
   [[ -d "${PROJECT_META_DIR}" ]] || return 0
-  for meta in "${PROJECT_META_DIR}"/*.env; do
-    [[ -e "${meta}" ]] || continue
+  while IFS= read -r -d '' meta; do
+    meta_files+=("${meta}")
+  done < <(find "${PROJECT_META_DIR}" -maxdepth 1 -type f -name '*.env' -print0 2>/dev/null)
+
+  if [[ ${#meta_files[@]} -gt 1 ]]; then
+    mapfile -t meta_files < <(
+      for meta in "${meta_files[@]}"; do
+        printf '%s\t%s\n' "$(stat -c '%Y' "${meta}" 2>/dev/null || printf '0')" "${meta}"
+      done | sort -n -k1,1 -k2,2 | cut -f2-
+    )
+  fi
+
+  for meta in "${meta_files[@]}"; do
     domain="$(meta_env_value "${meta}" APP_DOMAIN | tr '[:upper:]' '[:lower:]')"
     port="$(meta_env_value "${meta}" APP_PORT)"
     type="$(meta_env_value "${meta}" APP_TYPE)"
     https="$(meta_env_value "${meta}" APP_HTTPS)"
     proxy_routes_json="$(meta_env_value "${meta}" APP_PROXY_ROUTES_JSON)"
     [[ -n "${domain}" && -n "${port}" ]] || continue
+    previous_meta="${domain_owner[$domain]:-}"
+    if [[ -n "${previous_meta}" && "${previous_meta}" != "${meta}" ]]; then
+      echo "[WARN] Domain ${domain} is claimed by multiple projects; using ${meta} because it was touched most recently" >&2
+    fi
+    domain_owner["${domain}"]="${meta}"
     proxy_routes_by_domain["${domain}"]="${proxy_routes_json}"
     printf '%s,%s,%s,%s\n' "${domain}" "${port}" "${type:-node}" "${https:-yes}"
     while IFS=$'\t' read -r extra_domain extra_port extra_type extra_https; do

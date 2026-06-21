@@ -100,6 +100,7 @@ If the project repo does not already define DB name, user, and password values, 
 The env seeding/merge step covers the repo root plus `server/`, `client/`, and `dashboard/` env files when they exist.
 In the Manage UI, the merged env list is read-only and source-aware; duplicates are highlighted in red, while edits happen in the selected file only.
 Projects can now keep additional domain aliases from the `Domains` panel. Each alias can point at its own env file for management, and `app-sync` will map all configured domains back to the same project.
+When two projects accidentally claim the same hostname, `app-sync` now resolves the conflict deterministically: it sorts project metadata by last touch time and lets the most recently updated project win. That keeps a newly installed or reconfigured app from being shadowed by an older mapping.
 After install or update, `projectctl` now verifies that PM2 is actually online, retries the restart once if it is not, and fails loudly if the project still does not come up.
 After install or update, `projectctl` also verifies that the domain maps to the installed port in `/etc/app-map.csv` and in the generated nginx vhost, then resyncs once if the mapping is stale.
 After PM2 is online, `projectctl` also runs a host-header HTTP smoke test against the installed domain, compares it against the local app response, and fails loudly if the domain serves different content.
