@@ -1159,8 +1159,9 @@ confirm_pull_mode_before_pull() {
 
 pull_repo_with_optional_stash() {
   local repo_dir="${1:-${APP_DIR}}"
-  local branch="${2:-${BRANCH}}"
+  local branch="${2:-${BRANCH:-main}}"
   local repo_url="${3:-${REPO_URL}}"
+  local remote_ref="origin/${branch}"
   local dirty_status=""
   local dirty_paths=()
   local did_stash=0
@@ -1214,12 +1215,9 @@ pull_repo_with_optional_stash() {
 
   set +e
   git -C "${repo_dir}" remote set-url origin "${repo_url}" >/dev/null 2>&1
-  git -C "${repo_dir}" fetch origin "${branch}" >/dev/null 2>&1
-  git -C "${repo_dir}" checkout "${branch}" >/dev/null 2>&1
-  if [[ $? -ne 0 ]]; then
-    git -C "${repo_dir}" checkout -B "${branch}" "origin/${branch}" >/dev/null 2>&1
-  fi
-  git -C "${repo_dir}" pull --ff-only origin "${branch}"
+  git -C "${repo_dir}" fetch --prune origin "${branch}" >/dev/null 2>&1
+  git -C "${repo_dir}" checkout -B "${branch}" "${remote_ref}" >/dev/null 2>&1
+  git -C "${repo_dir}" reset --hard "${remote_ref}" >/dev/null 2>&1
   pull_rc=$?
   set -e
 
@@ -3644,10 +3642,14 @@ verify_project_http_smoke() {
 
   local_code="$(curl -sS --max-time 15 --connect-timeout 5 -o "${local_body}" -w '%{http_code}' "http://127.0.0.1:${port}/" 2>/dev/null || printf '000')"
   if ! project_http_status_ok "${local_code}"; then
-    die "Project ${label} local health check failed on http://127.0.0.1:${port}/ (HTTP ${local_code})"
+    printf '[projectctl] Warning: Project %s local health check failed on http://127.0.0.1:%s/ (HTTP %s)\n' "${label}" "${port}" "${local_code}" >&2
+    return 1
   fi
   local_token="$(project_http_response_token "${local_body}" || true)"
-  [[ -n "${local_token}" ]] || die "Project ${label} local health check returned an empty response token"
+  if [[ -z "${local_token}" ]]; then
+    printf '[projectctl] Warning: Project %s local health check returned an empty response token\n' "${label}" >&2
+    return 1
+  fi
 
   if [[ "${https,,}" == "yes" ]]; then
     schemes=(https http)
@@ -3669,7 +3671,8 @@ verify_project_http_smoke() {
     fi
   done
 
-  die "Project ${label} domain ${domain} did not serve the same app content as the local port ${port} during the HTTP smoke test"
+  printf '[projectctl] Warning: Project %s domain %s did not serve the same app content as the local port %s during the HTTP smoke test\n' "${label}" "${domain}" "${port}" >&2
+  return 1
 }
 
 auth_file_for_domain() {
@@ -4163,7 +4166,9 @@ do_install() {
   verify_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
   verify_project_install "${REPO_REF}"
-  verify_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
+  if ! verify_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"; then
+    printf '[projectctl] Warning: continuing after smoke test failure for %s so other projects are not blocked\n' "${REPO_REF}" >&2
+  fi
   touch_meta_file "${meta}"
   if [[ -n "${APP_DOMAIN}" ]]; then
     printf '[projectctl] installed %s in %s on port %s for %s\n' "${REPO_REF}" "${APP_DIR}" "${APP_PORT}" "${APP_DOMAIN}"
@@ -4300,7 +4305,9 @@ do_update() {
   verify_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
   verify_project_install "${REPO_REF}"
-  verify_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
+  if ! verify_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"; then
+    printf '[projectctl] Warning: continuing after smoke test failure for %s so other projects are not blocked\n' "${REPO_REF}" >&2
+  fi
   touch_meta_file "${meta}"
   sync_duplicate_projects_from_source "${REPO_REF}"
   printf '[projectctl] updated %s\n' "${REPO_REF}"
