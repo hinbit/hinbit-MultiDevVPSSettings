@@ -728,12 +728,7 @@ sync_duplicate_project_from_source() {
   PROJECT_SLUG="${target_slug}"
   BRANCH="${source_branch}"
   PM2_NAME="${pm2_name:-${target_existing_pm2_name:-${PROJECT_SLUG}}}"
-  APP_PORT="${target_port:-${target_existing_port:-$(pick_port)}}"
-  if [[ -n "${target_port}" && ! -d "${target_dir}" ]] && ! is_port_available_for_multidev "${APP_PORT}"; then
-    printf '[projectctl] requested duplicate port %s is already in use in Multidev; picking a free port instead\n' "${APP_PORT}" >&2
-    APP_PORT="$(pick_port)"
-    printf '[projectctl] using port %s instead\n' "${APP_PORT}" >&2
-  fi
+  APP_PORT="$(resolve_multidev_port "${target_port:-${target_existing_port:-}}")"
   APP_DOMAIN="$(normalize_domain "${target_domain}")"
   APP_HTTPS="${target_existing_https:-${source_https}}"
   APP_TYPE="${target_existing_app_type:-${source_app_type}}"
@@ -3125,6 +3120,26 @@ is_port_available_for_multidev() {
   return 0
 }
 
+resolve_multidev_port() {
+  local requested="${1:-}"
+  local start="${2:-${PORT_MIN}}"
+  local end="${3:-${PORT_MAX}}"
+  local port="${requested}"
+
+  if [[ -z "${port}" ]]; then
+    pick_port "${start}" "${end}"
+    return 0
+  fi
+
+  if ! is_port_available_for_multidev "${port}"; then
+    printf '[projectctl] requested port %s is already in use in Multidev; picking a free port instead\n' "${port}" >&2
+    port="$(pick_port "${start}" "${end}")"
+    printf '[projectctl] using port %s instead\n' "${port}" >&2
+  fi
+
+  printf '%s' "${port}"
+}
+
 pick_port() {
   local start="${1:-${PORT_MIN}}"
   local end="${2:-${PORT_MAX}}"
@@ -4022,12 +4037,7 @@ do_install() {
   meta="$(meta_path_for_slug "${PROJECT_SLUG}")"
   BRANCH="$(branch_from_repo "${REPO_REF}" "${branch}")"
   PM2_NAME="${pm2_name:-${PROJECT_SLUG}}"
-  APP_PORT="${forced_port:-$(pick_port)}"
-  if [[ -n "${forced_port}" ]] && ! is_port_available_for_multidev "${APP_PORT}"; then
-    printf '[projectctl] requested port %s is already in use in Multidev; picking a free port instead\n' "${APP_PORT}" >&2
-    APP_PORT="$(pick_port)"
-    printf '[projectctl] using port %s instead\n' "${APP_PORT}" >&2
-  fi
+  APP_PORT="$(resolve_multidev_port "${forced_port:-}")"
   APP_DOMAIN="$(normalize_domain "${domain:-}")"
   APP_HTTPS="${https:-yes}"
   APP_TYPE="project"
