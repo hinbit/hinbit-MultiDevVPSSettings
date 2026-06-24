@@ -1118,21 +1118,61 @@ verify_project_db_schema() {
   fi
 }
 
-project_db_schema_ready() {
+project_db_bootstrap_signature() {
   local db_name=""
   local db_user=""
   local db_type=""
   local machine_id=""
-  local table_count="0"
 
   db_name="$(normalize_db_identifier "$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)")"
   db_user="$(normalize_db_identifier "$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)")"
   db_type="$(normalize_db_identifier "$(project_db_value DB_TYPE VITE_DB_TYPE)")"
   machine_id="$(project_db_machine_id)"
 
+  resolve_db_machine "${machine_id}"
+  printf '%s|%s|%s|%s|%s|%s' \
+    "${machine_id}" \
+    "${DB_MACHINE_HOST:-}" \
+    "${DB_MACHINE_PORT:-}" \
+    "${db_name}" \
+    "${db_user}" \
+    "${db_type}"
+}
+
+mark_project_db_bootstrap_ready() {
+  local meta="$1"
+  local signature=""
+
+  [[ -n "${meta}" ]] || return 0
+  [[ -f "${meta}" ]] || return 0
+
+  signature="$(project_db_bootstrap_signature)"
+  update_meta_value "${meta}" "DB_BOOTSTRAP_SIGNATURE" "${signature}"
+  update_meta_value "${meta}" "DB_BOOTSTRAP_READY" "yes"
+  update_meta_value "${meta}" "DB_BOOTSTRAP_READY_AT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
+project_db_schema_ready() {
+  local db_name=""
+  local db_user=""
+  local db_type=""
+  local machine_id=""
+  local table_count="0"
+  local signature=""
+
+  db_name="$(normalize_db_identifier "$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)")"
+  db_user="$(normalize_db_identifier "$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)")"
+  db_type="$(normalize_db_identifier "$(project_db_value DB_TYPE VITE_DB_TYPE)")"
+  machine_id="$(project_db_machine_id)"
+  signature="$(project_db_bootstrap_signature)"
+
   [[ "${db_type,,}" == "mysql" ]] || return 1
   [[ -n "${db_name}" ]] || return 1
   [[ -n "${db_user}" ]] || return 1
+
+  if [[ "${DB_BOOTSTRAP_READY:-}" == "yes" && "${DB_BOOTSTRAP_SIGNATURE:-}" == "${signature}" ]]; then
+    return 0
+  fi
 
   resolve_db_machine "${machine_id}"
   table_count="$(mysql_exec_machine "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=$(sql_quote "${db_name}")" 2>/dev/null || printf '0')"
@@ -3931,8 +3971,13 @@ run_install_db_scripts() {
   local script
   local script_dir
   declare -A seen_scripts=()
+  local meta=""
 
   [[ -d "${project_dir}" ]] || return 0
+  if [[ -n "${REPO_REF:-}" ]]; then
+    meta="$(meta_path_for_slug "$(slug_from_ref "$(project_ref_from_arg "${REPO_REF}")")")"
+    [[ -f "${meta}" ]] && load_meta "${meta}"
+  fi
 
   if project_db_schema_ready; then
     printf '[projectctl] skipping db:init/db:seed for %s; schema already exists on the selected DB machine\n' "${REPO_REF}" >&2
@@ -4236,6 +4281,7 @@ do_install() {
     sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "" "${bootstrap_db_machine_id}"
     run_install_db_scripts "${APP_DIR}"
     verify_project_db_schema
+    mark_project_db_bootstrap_ready "${meta}"
   else
     if [[ "${custom_db_machine}" -eq 1 ]]; then
       printf '[projectctl] custom DB machine selected for %s; skipping automatic DB bootstrap until MySQL Access is filled in.\n' "${REPO_REF}"
@@ -4372,6 +4418,7 @@ do_update() {
     fi
     sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "${MYSQL_ALLOWED_IPS:-}" "${bootstrap_db_machine_id}"
     verify_project_db_schema
+    mark_project_db_bootstrap_ready "${meta}"
   fi
   run_project_vpn_hook "update" "${vpn_profile}"
   refresh_project_start_kind "${meta}"
