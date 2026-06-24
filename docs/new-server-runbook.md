@@ -159,6 +159,7 @@ What the installer does:
 - the SSH upload user name should be generated from the repo name part only, not the full owner/repo slug, and should be capped at 12 characters total so long owner names do not exceed Linux username limits
 - if a repo name is too long for a MySQL username, shorten the generated DB user to stay within MySQL's 32-character limit while keeping the repo name as the base
 - creates or wires the project DB on the selected DB machine
+- validates that the target schema exists and has tables before the install is treated as healthy
 - exports the correct domain-related env values for the runtime
 
 ## 5. Verify the project

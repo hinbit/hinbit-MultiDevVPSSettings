@@ -398,6 +398,19 @@ project_db_value_exact() {
   printf '%s' ""
 }
 
+normalize_db_identifier() {
+  local value="${1:-}"
+
+  value="$(printf '%s' "${value}" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  if [[ "${#value}" -ge 2 && "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+    value="${value:1:${#value}-2}"
+  elif [[ "${#value}" -ge 2 && "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
+    value="${value:1:${#value}-2}"
+  fi
+
+  printf '%s' "${value}"
+}
+
 project_custom_db_machine_details() {
   local machine_name=""
   local machine_host=""
@@ -1034,6 +1047,10 @@ sync_project_db_env() {
   [[ -n "${db_password}" ]] || db_password="$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)"
   [[ -n "${db_type}" ]] || db_type="$(project_db_value DB_TYPE VITE_DB_TYPE)"
 
+  db_name="$(normalize_db_identifier "${db_name}")"
+  db_user="$(normalize_db_identifier "${db_user}")"
+  db_type="$(normalize_db_identifier "${db_type}")"
+
   [[ -n "${db_name}" ]] || db_name="${default_db_name}"
   [[ -n "${db_user}" ]] || db_user="${default_db_user}"
   if [[ -z "${db_password}" ]]; then
@@ -1069,6 +1086,36 @@ sync_project_db_env() {
   done < <(project_db_env_paths "${project_dir}")
 
   printf '%s\t%s\t%s\t%s\n' "${db_name}" "${db_user}" "${db_password}" "${db_type}"
+}
+
+verify_project_db_schema() {
+  local db_name=""
+  local db_user=""
+  local db_type=""
+  local machine_id=""
+  local schema_count="0"
+  local table_count="0"
+
+  db_name="$(normalize_db_identifier "$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)")"
+  db_user="$(normalize_db_identifier "$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)")"
+  db_type="$(normalize_db_identifier "$(project_db_value DB_TYPE VITE_DB_TYPE)")"
+  machine_id="$(project_db_machine_id)"
+
+  [[ "${db_type,,}" == "mysql" ]] || return 0
+  [[ -n "${db_name}" ]] || return 0
+  [[ -n "${db_user}" ]] || return 0
+
+  resolve_db_machine "${machine_id}"
+
+  schema_count="$(mysql_exec_machine "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=$(sql_quote "${db_name}")" 2>/dev/null || printf '0')"
+  if [[ "${schema_count}" != "1" ]]; then
+    die "Database schema ${db_name} is missing on ${DB_MACHINE_NAME:-${machine_id}}"
+  fi
+
+  table_count="$(mysql_exec_machine "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=$(sql_quote "${db_name}")" 2>/dev/null || printf '0')"
+  if [[ "${table_count}" -lt 1 ]]; then
+    die "Database schema ${db_name} on ${DB_MACHINE_NAME:-${machine_id}} has no tables"
+  fi
 }
 
 generate_secret() {
@@ -4161,6 +4208,7 @@ do_install() {
     fi
     sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "" "${bootstrap_db_machine_id}"
     run_install_db_scripts "${APP_DIR}"
+    verify_project_db_schema
   else
     if [[ "${custom_db_machine}" -eq 1 ]]; then
       printf '[projectctl] custom DB machine selected for %s; skipping automatic DB bootstrap until MySQL Access is filled in.\n' "${REPO_REF}"
@@ -4296,6 +4344,7 @@ do_update() {
       printf '[projectctl] custom DB machine points to local host for %s; bootstrapping through the local DB machine\n' "${REPO_REF}"
     fi
     sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "${MYSQL_ALLOWED_IPS:-}" "${bootstrap_db_machine_id}"
+    verify_project_db_schema
   fi
   run_project_vpn_hook "update" "${vpn_profile}"
   refresh_project_start_kind "${meta}"
