@@ -1118,6 +1118,27 @@ verify_project_db_schema() {
   fi
 }
 
+project_db_schema_ready() {
+  local db_name=""
+  local db_user=""
+  local db_type=""
+  local machine_id=""
+  local table_count="0"
+
+  db_name="$(normalize_db_identifier "$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)")"
+  db_user="$(normalize_db_identifier "$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)")"
+  db_type="$(normalize_db_identifier "$(project_db_value DB_TYPE VITE_DB_TYPE)")"
+  machine_id="$(project_db_machine_id)"
+
+  [[ "${db_type,,}" == "mysql" ]] || return 1
+  [[ -n "${db_name}" ]] || return 1
+  [[ -n "${db_user}" ]] || return 1
+
+  resolve_db_machine "${machine_id}"
+  table_count="$(mysql_exec_machine "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=$(sql_quote "${db_name}")" 2>/dev/null || printf '0')"
+  [[ "${table_count}" -gt 0 ]]
+}
+
 generate_secret() {
   local secret=""
   secret="$(openssl rand -base64 18 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 18 || true)"
@@ -3912,6 +3933,12 @@ run_install_db_scripts() {
   declare -A seen_scripts=()
 
   [[ -d "${project_dir}" ]] || return 0
+
+  if project_db_schema_ready; then
+    printf '[projectctl] skipping db:init/db:seed for %s; schema already exists on the selected DB machine\n' "${REPO_REF}" >&2
+    return 0
+  fi
+
   for script in db:init db:seed; do
     for script_dir in "" "server" "client"; do
       [[ -z "${seen_scripts[$script]:-}" ]] || break

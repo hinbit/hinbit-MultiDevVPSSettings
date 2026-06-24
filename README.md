@@ -103,6 +103,7 @@ Projects can now keep additional domain aliases from the `Domains` panel. Each a
 When two projects accidentally claim the same hostname, `app-sync` now resolves the conflict deterministically: it sorts project metadata by last touch time and lets the most recently updated project win. That keeps a newly installed or reconfigured app from being shadowed by an older mapping.
 After install or update, `projectctl` now verifies that PM2 is actually online, retries the restart once if it is not, and fails loudly if the project still does not come up.
 After install, `projectctl` also verifies that the target MySQL schema exists and contains tables before the project is treated as healthy.
+On later install/update runs, `projectctl` skips `db:init` and `db:seed` when that schema is already present, which avoids unnecessary remote MySQL work.
 After install or update, `projectctl` also verifies that the domain maps to the installed port in `/etc/app-map.csv` and in the generated nginx vhost, then resyncs once if the mapping is stale.
 After PM2 is online, `projectctl` also runs a host-header HTTP smoke test against the installed domain, compares it against the local app response, and fails loudly if the domain serves different content.
 The install form clears the default entrypoint and project access password after a successful install so the next install starts clean.
