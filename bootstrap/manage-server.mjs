@@ -9278,7 +9278,7 @@ async function handleRequest(req, res) {
       }
     }
 
-    const actionMatch = routePath.match(/^\/api\/projects\/(.+?)\/(restart|update|stop|uninstall|password|logs)$/);
+    const actionMatch = routePath.match(/^\/api\/projects\/(.+?)\/(restart|update|stop|uninstall|password|protect|clear-password|logs)$/);
     if (actionMatch) {
       const ref = decodeURIComponent(actionMatch[1]);
       const action = actionMatch[2];
@@ -9302,8 +9302,8 @@ async function handleRequest(req, res) {
       }
 
       const body = req.method === 'POST' ? await readBody(req) : {};
-      if (action === 'password') {
-        if (body.clear) {
+      if (action === 'password' || action === 'protect' || action === 'clear-password') {
+        if (body.clear || action === 'clear-password') {
           runProjectCtl(['password', '--clear', ref]);
         } else {
           runProjectCtl(['password', '--password', String(body.password || '').trim(), ref]);
