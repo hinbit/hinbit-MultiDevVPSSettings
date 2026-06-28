@@ -4228,7 +4228,7 @@ do_update() {
   verify_project_install "${REPO_REF}"
   verify_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   touch_meta_file "${meta}"
-  sync_duplicate_projects_from_source "${REPO_REF}"
+  sync_duplicate_projects_from_source "${REPO_REF}" || true
   printf '[projectctl] updated %s\n' "${REPO_REF}"
 }
 
