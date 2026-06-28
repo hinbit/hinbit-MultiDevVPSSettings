@@ -3309,6 +3309,7 @@ APP_DOMAIN_BINDINGS_JSON=$(shell_quote "$(project_domain_bindings_json)")
 APP_PROXY_ROUTES_JSON=$(shell_quote "${APP_PROXY_ROUTES_JSON:-}")
 APP_HTTPS=${APP_HTTPS}
 APP_TYPE=${APP_TYPE}
+PM2_AUTOSTART=${PM2_AUTOSTART:-yes}
 PACKAGE_MANAGER=${PACKAGE_MANAGER:-}
 BRANCH=${BRANCH}
 GIT_REMOTE=${GIT_REMOTE}
@@ -4320,6 +4321,8 @@ do_stop() {
     pm2 stop "${PM2_NAME}" >/dev/null 2>&1 || true
     pm2 save || true
   fi
+  PM2_AUTOSTART="no"
+  update_meta_value "${meta}" "PM2_AUTOSTART" "${PM2_AUTOSTART}"
   touch_meta_file "${meta}"
 
   printf '[projectctl] stopped %s\n' "${REPO_REF}"

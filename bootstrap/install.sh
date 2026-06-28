@@ -735,8 +735,28 @@ EOF
 set -euo pipefail
 
 CSV="/etc/app-watch.csv"
+META_DIR="/etc/vps-projects"
 STATE_DIR="/var/lib/vps-bootstrap/pm2-restart"
 mkdir -p "${STATE_DIR}"
+
+meta_env_value() {
+  local file="$1"
+  local key="$2"
+  awk -F= -v key="${key}" '$1 == key { sub(/^[^=]*=/, ""); gsub(/\r/, ""); print; exit }' "${file}" 2>/dev/null || true
+}
+
+meta_for_pm2_name() {
+  local target="$1"
+  local meta=""
+  [[ -d "${META_DIR}" ]] || return 0
+  for meta in "${META_DIR}"/*.env; do
+    [[ -f "${meta}" ]] || continue
+    if [[ "$(meta_env_value "${meta}" PM2_NAME)" == "${target}" ]]; then
+      printf '%s' "${meta}"
+      return 0
+    fi
+  done
+}
 
 now="$(date +%s)"
 
@@ -761,8 +781,27 @@ while IFS=, read -r name path minutes; do
   fi
   printf '%s\n' "${now}" > "${check_file}"
 
+  meta=""
+  meta="$(meta_for_pm2_name "${name}")"
+  if [[ -n "${meta}" ]]; then
+    autostart="$(meta_env_value "${meta}" PM2_AUTOSTART)"
+    if [[ "${autostart:-yes}" != "yes" ]]; then
+      continue
+    fi
+  fi
+
   if ! pm2 describe "${name}" >/dev/null 2>&1; then
-    echo "[WARN] PM2 app not found: ${name}" >&2
+    if [[ -n "${meta}" ]]; then
+      repo_ref="$(meta_env_value "${meta}" REPO_REF)"
+      if [[ -n "${repo_ref}" ]]; then
+        echo "[WARN] PM2 app not found: ${name}; restarting ${repo_ref}" >&2
+        projectctl restart "${repo_ref}" >/dev/null 2>&1 || echo "[WARN] Failed to restart ${repo_ref}" >&2
+      else
+        echo "[WARN] PM2 app not found: ${name}" >&2
+      fi
+    else
+      echo "[WARN] PM2 app not found: ${name}" >&2
+    fi
     continue
   fi
 
