@@ -7908,10 +7908,10 @@ function renderPage() {
         }
         const deployRuntimeEl = document.getElementById('deployRuntime');
         if (deployRuntimeEl) deployRuntimeEl.value = 'auto';
-        const envText = document.getElementById('envText');
-        if (envText) envText.value = '';
-        const accessPassword = document.getElementById('accessPassword');
-        if (accessPassword) accessPassword.value = '';
+        const envTextEl = document.getElementById('envText');
+        if (envTextEl) envTextEl.value = '';
+        const accessPasswordEl = document.getElementById('accessPassword');
+        if (accessPasswordEl) accessPasswordEl.value = '';
         await refresh();
         if (openMergeMode) {
           await loadEnv(result.repo || payload.repo, { mergeMode: true });
