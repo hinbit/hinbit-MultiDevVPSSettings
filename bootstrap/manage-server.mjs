@@ -6941,9 +6941,9 @@ function renderPage() {
       openProgressPanel(
         decodeURIComponent(ref),
         mode === 'all'
-          ? 'Building all scripts for ' + decodeURIComponent(ref)
-          : 'Building root script for ' + decodeURIComponent(ref),
-        'Build Progress',
+          ? 'Building and restarting all scripts for ' + decodeURIComponent(ref)
+          : 'Building and restarting root script for ' + decodeURIComponent(ref),
+        'Build + Restart Progress',
       );
       try {
         const res = await fetch(API + '/projects/' + ref + '/build-stream?mode=' + encodeURIComponent(mode), {
@@ -7255,7 +7255,7 @@ function renderPage() {
           }
           const pullMode = mode === 'merge-env2' ? 'merge-env' : mode;
           await runPullWithProgress(ref, pullMode);
-          showMessage(progressFlash, 'Pull completed and build all ran for ' + decodeURIComponent(ref));
+          showMessage(progressFlash, 'Pull completed, build all ran, and PM2 restarted for ' + decodeURIComponent(ref));
           if (mode === 'merge-env2') {
             await loadEnv(ref, { mergeMode: true });
             showMessage(envFlash, 'Paste extra .env keys in the overlay and click Merge overlay & save.');

@@ -4288,8 +4288,9 @@ do_build() {
   if [[ "${build_failed}" == "yes" ]]; then
     die "Build failed for ${REPO_REF}"
   fi
+  restart_pm2
   touch_meta_file "${meta}"
-  printf '[projectctl] built %s (%s)\n' "${REPO_REF}" "${mode}"
+  printf '[projectctl] built and restarted %s (%s)\n' "${REPO_REF}" "${mode}"
 }
 
 do_restart() {
