@@ -1646,7 +1646,7 @@ function githubSshHostForUser(githubUser) {
   const user = normalizeGithubUser(githubUser);
   if (!user) return '';
   if (user === 'shaykid') return 'github.com';
-  if (user === 'developseach') return 'github.com';
+  if (user === 'developseach') return 'github-developseach';
   return `github-${user}`;
 }
 

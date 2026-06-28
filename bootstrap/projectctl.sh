@@ -133,7 +133,7 @@ github_ssh_host_from_owner() {
       return
       ;;
     developseach)
-      printf '%s' 'github.com'
+      printf '%s' 'github-developseach'
       return
       ;;
     hinbit)
