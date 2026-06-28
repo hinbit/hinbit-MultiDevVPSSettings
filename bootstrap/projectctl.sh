@@ -814,7 +814,9 @@ sync_duplicate_projects_from_source() {
     duplicate_port="${APP_PORT:-}"
     duplicate_sync_env_base="no"
     [[ "${duplicate_env_mode}" == "share" ]] && duplicate_sync_env_base="yes"
-    if ! sync_duplicate_project_from_source "${source_repo_ref}" "${duplicate_ref}" "${duplicate_domain}" "${duplicate_env_mode}" "${duplicate_db_mode}" "${duplicate_port}" "" "${duplicate_sync_env_base}" "no"; then
+    if ! (
+      sync_duplicate_project_from_source "${source_repo_ref}" "${duplicate_ref}" "${duplicate_domain}" "${duplicate_env_mode}" "${duplicate_db_mode}" "${duplicate_port}" "" "${duplicate_sync_env_base}" "no"
+    ); then
       printf '[projectctl] Warning: failed to refresh duplicate %s from source %s\n' "${duplicate_ref}" "${source_repo_ref}" >&2
     fi
   done
