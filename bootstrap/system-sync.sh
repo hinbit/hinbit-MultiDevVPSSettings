@@ -6,6 +6,7 @@ SYSTEM_DOMAIN="${SYSTEM_DOMAIN:-}"
 SYSTEM_PORTAL_WEBROOT="/var/www/system-portal"
 SYSTEM_PORTAL_FILE="/etc/nginx/sites-available/system-portal.conf"
 ACME_ROOT="/var/www/html"
+CUSTOM_CERT_ROOT="/etc/vps-custom-certs/server"
 
 if [[ -z "${SYSTEM_DOMAIN}" && -f "${SYSTEM_DOMAIN_FILE}" ]]; then
   SYSTEM_DOMAIN="$(cat "${SYSTEM_DOMAIN_FILE}")"
@@ -78,6 +79,7 @@ cat > "${SYSTEM_PORTAL_WEBROOT}/index.html" <<EOF
     <h2>Admin</h2>
     <ul>
       <li><a href="/manage/">Manage projects</a></li>
+      <li><a href="/manage/tls/">Manage SSL</a></li>
       <li><a href="/manage/ssh-keys/">Manage SSH Keys</a></li>
     </ul>
     <h2>DB Management</h2>
@@ -114,7 +116,7 @@ server {
     }
 
     location /manage/ {
-        proxy_pass http://127.0.0.1:8090/;
+        proxy_pass http://127.0.0.1:8090;
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
@@ -134,15 +136,21 @@ server {
     }
 
     location / {
-        root ${SYSTEM_PORTAL_WEBROOT};
-        index index.html;
-        try_files \$uri /index.html;
+        proxy_pass http://127.0.0.1:8090;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_redirect off;
     }
 }
 EOF
 }
 
 render_https() {
+  local cert_path="$1"
+  local key_path="$2"
   cat <<EOF
 server {
     listen 80;
@@ -161,8 +169,8 @@ server {
     listen 443 ssl http2;
     server_name ${SYSTEM_DOMAIN};
 
-    ssl_certificate /etc/letsencrypt/live/${SYSTEM_DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${SYSTEM_DOMAIN}/privkey.pem;
+    ssl_certificate ${cert_path};
+    ssl_certificate_key ${key_path};
 
     location = /phpmyadmin {
         return 301 /phpmyadmin/;
@@ -173,7 +181,7 @@ server {
     }
 
     location /manage/ {
-        proxy_pass http://127.0.0.1:8090/;
+        proxy_pass http://127.0.0.1:8090;
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
@@ -193,19 +201,31 @@ server {
     }
 
     location / {
-        root ${SYSTEM_PORTAL_WEBROOT};
-        index index.html;
-        try_files \$uri /index.html;
+        proxy_pass http://127.0.0.1:8090;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_redirect off;
     }
 }
 EOF
 }
 
-if [[ -s "/etc/letsencrypt/live/${SYSTEM_DOMAIN}/fullchain.pem" ]]; then
-  render_https > "${SYSTEM_PORTAL_FILE}"
+custom_cert_dir="${CUSTOM_CERT_ROOT}/${SYSTEM_DOMAIN}"
+custom_cert="${custom_cert_dir}/fullchain.pem"
+custom_key="${custom_cert_dir}/privkey.pem"
+letsencrypt_cert="/etc/letsencrypt/live/${SYSTEM_DOMAIN}/fullchain.pem"
+letsencrypt_key="/etc/letsencrypt/live/${SYSTEM_DOMAIN}/privkey.pem"
+
+if [[ -s "${letsencrypt_cert}" && -s "${letsencrypt_key}" ]]; then
+  render_https "${letsencrypt_cert}" "${letsencrypt_key}" > "${SYSTEM_PORTAL_FILE}"
+elif [[ -s "${custom_cert}" && -s "${custom_key}" ]]; then
+  render_https "${custom_cert}" "${custom_key}" > "${SYSTEM_PORTAL_FILE}"
 else
   if certbot certonly --webroot -w "${ACME_ROOT}" -d "${SYSTEM_DOMAIN}" --non-interactive --agree-tos --register-unsafely-without-email; then
-    render_https > "${SYSTEM_PORTAL_FILE}"
+    render_https "/etc/letsencrypt/live/${SYSTEM_DOMAIN}/fullchain.pem" "/etc/letsencrypt/live/${SYSTEM_DOMAIN}/privkey.pem" > "${SYSTEM_PORTAL_FILE}"
   else
     render_http > "${SYSTEM_PORTAL_FILE}"
   fi

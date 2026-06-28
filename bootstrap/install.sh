@@ -21,6 +21,8 @@ SSH_KEYS_FILE="/etc/vps-ssh-keys.json"
 SSH_KEYS_DIR="/root/.ssh/vps-managed-keys"
 MANAGE_SERVICE="/etc/systemd/system/vps-manage.service"
 SSH_HARDEN_FILE="/etc/ssh/sshd_config.d/99-vps-bootstrap.conf"
+VPS_PROXY_CONFIG_FILE="/etc/vps-proxy-service.json"
+TINYPROXY_CONF_FILE="/etc/tinyproxy/tinyproxy.conf"
 PHP_FPM_VERSION=""
 PHP_FPM_SERVICE=""
 PHP_FPM_SOCKET=""
@@ -75,9 +77,11 @@ EOF
     fail2ban \
     unattended-upgrades \
     nginx \
+    tinyproxy \
     certbot \
     python3-certbot-nginx \
     mysql-server \
+    docker.io \
     php-fpm \
     php-cli \
     php-mysql \
@@ -98,6 +102,8 @@ EOF
     log "Installing PM2"
     npm install -g pm2
   fi
+
+  systemctl enable --now docker >/dev/null 2>&1 || true
 
   corepack enable >/dev/null 2>&1 || true
 
@@ -189,6 +195,156 @@ bind-address = 0.0.0.0
 mysqlx-bind-address = 127.0.0.1
 skip-name-resolve = ON
 EOF
+}
+
+configure_inner_proxy_service() {
+  local repo_config="${ROOT_DIR}/VPS-PROXY.json"
+  local source_config="${VPS_PROXY_CONFIG_FILE}"
+  local listen_host=""
+  local listen_port=""
+
+  if [[ ! -f "${source_config}" && -f "${repo_config}" ]]; then
+    install -m 0644 "${repo_config}" "${source_config}"
+  fi
+
+  [[ -f "${source_config}" ]] || return 0
+
+  read -r listen_host listen_port < <(
+    python3 - "${source_config}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, 'r', encoding='utf-8') as handle:
+        data = json.load(handle)
+except Exception:
+    raise SystemExit(0)
+
+if not isinstance(data, dict) or not data.get('enabled', True):
+    raise SystemExit(0)
+
+listen_host = str(data.get('listen_host', '127.0.0.1')).strip() or '127.0.0.1'
+try:
+    listen_port = int(data.get('listen_port', 3128))
+except Exception:
+    listen_port = 3128
+if listen_port <= 0:
+    listen_port = 3128
+print(listen_host, listen_port)
+PY
+  )
+
+  [[ -n "${listen_host}" && -n "${listen_port}" ]] || return 0
+
+  install -d /etc/tinyproxy /var/log/tinyproxy /run/tinyproxy
+
+  python3 - "${source_config}" "${TINYPROXY_CONF_FILE}" <<'PY'
+import json
+import sys
+
+src = sys.argv[1]
+dst = sys.argv[2]
+
+try:
+    with open(src, 'r', encoding='utf-8') as handle:
+        data = json.load(handle)
+except Exception:
+    raise SystemExit(0)
+
+if not isinstance(data, dict) or not data.get('enabled', True):
+    raise SystemExit(0)
+
+listen_host = str(data.get('listen_host', '127.0.0.1')).strip() or '127.0.0.1'
+try:
+    listen_port = int(data.get('listen_port', 3128))
+except Exception:
+    listen_port = 3128
+if listen_port <= 0:
+    listen_port = 3128
+
+timeout = data.get('timeout', 600)
+try:
+    timeout = int(timeout)
+except Exception:
+    timeout = 600
+if timeout <= 0:
+    timeout = 600
+
+max_clients = data.get('max_clients', 100)
+try:
+    max_clients = int(max_clients)
+except Exception:
+    max_clients = 100
+if max_clients <= 0:
+    max_clients = 100
+
+log_level = str(data.get('log_level', 'Info')).strip() or 'Info'
+if log_level not in {'Critical', 'Error', 'Warning', 'Notice', 'Connect', 'Info'}:
+    log_level = 'Info'
+
+allow = data.get('allow', [])
+if not isinstance(allow, list):
+    allow = []
+allow = [str(item).strip() for item in allow if str(item).strip()]
+if not allow:
+    allow = ['127.0.0.1', '::1']
+
+connect_ports = data.get('connect_ports', [80, 443, 8443, 9443, 2053])
+if not isinstance(connect_ports, list):
+    connect_ports = [80, 443]
+normalized_connect_ports = []
+for item in connect_ports:
+    try:
+        port = int(item)
+    except Exception:
+        continue
+    if 1 <= port <= 65535 and port not in normalized_connect_ports:
+        normalized_connect_ports.append(port)
+if not normalized_connect_ports:
+    normalized_connect_ports = [80, 443, 8443, 9443, 2053]
+
+auth = data.get('auth', {})
+if not isinstance(auth, dict):
+    auth = {}
+auth_enabled = bool(auth.get('enabled', False))
+auth_username = str(auth.get('username', '')).strip()
+auth_password = str(auth.get('password', '')).strip()
+
+disable_via_header = bool(data.get('disable_via_header', True))
+
+lines = [
+    'User tinyproxy',
+    'Group tinyproxy',
+    f'Port {listen_port}',
+    f'Listen {listen_host}',
+    f'Timeout {timeout}',
+    'PidFile "/run/tinyproxy/tinyproxy.pid"',
+    'LogFile "/var/log/tinyproxy/tinyproxy.log"',
+    f'LogLevel {log_level}',
+    f'MaxClients {max_clients}',
+]
+if disable_via_header:
+    lines.append('DisableViaHeader Yes')
+for item in allow:
+    lines.append(f'Allow {item}')
+if auth_enabled and auth_username and auth_password:
+    lines.append(f'BasicAuth {auth_username} {auth_password}')
+for port in normalized_connect_ports:
+    lines.append(f'ConnectPort {port}')
+
+with open(dst, 'w', encoding='utf-8') as handle:
+    handle.write('\n'.join(lines) + '\n')
+PY
+
+  chown tinyproxy:tinyproxy /var/log/tinyproxy /run/tinyproxy 2>/dev/null || true
+  chmod 0755 /var/log/tinyproxy /run/tinyproxy 2>/dev/null || true
+
+  if [[ "${listen_host}" != "127.0.0.1" && "${listen_host}" != "::1" && "${listen_host}" != "localhost" ]]; then
+    ufw allow "${listen_port}/tcp" >/dev/null 2>&1 || true
+  fi
+
+  systemctl enable --now tinyproxy
 }
 
 configure_local_db_machine_credentials() {
@@ -349,11 +505,37 @@ NGINX_ENABLED="/etc/nginx/sites-enabled"
 MARKER="# generated by vps-bootstrap"
 MANIFEST="${STATE_DIR}/app-sync.manifest"
 ACME_ROOT="/var/www/html"
+PROJECT_META_DIR="/etc/vps-projects"
 
 mkdir -p "${STATE_DIR}"
 
 declare -A desired_domains=()
 declare -a desired_list=()
+
+meta_env_value() {
+  local file="$1"
+  local key="$2"
+  awk -F= -v key="${key}" '$1 == key { sub(/^[^=]*=/, ""); gsub(/\r/, ""); print; exit }' "${file}" 2>/dev/null || true
+}
+
+append_project_domains() {
+  local meta
+  local domain
+  local port
+  local type
+  local https
+
+  [[ -d "${PROJECT_META_DIR}" ]] || return 0
+  for meta in "${PROJECT_META_DIR}"/*.env; do
+    [[ -e "${meta}" ]] || continue
+    domain="$(meta_env_value "${meta}" APP_DOMAIN)"
+    port="$(meta_env_value "${meta}" APP_PORT)"
+    type="$(meta_env_value "${meta}" APP_TYPE)"
+    https="$(meta_env_value "${meta}" APP_HTTPS)"
+    [[ -n "${domain}" && -n "${port}" ]] || continue
+    printf '%s,%s,%s,%s\n' "${domain}" "${port}" "${type:-node}" "${https:-yes}"
+  done
+}
 
 render_http_only() {
   local domain="$1"
@@ -431,6 +613,41 @@ else
   cert_email_args=(--register-unsafely-without-email)
 fi
 
+SOURCE_CSV="$(mktemp)"
+NORMALIZED_CSV="$(mktemp)"
+trap 'rm -f "${SOURCE_CSV}" "${NORMALIZED_CSV}"' EXIT
+if [[ -f "${CSV}" ]]; then
+  cat "${CSV}" > "${SOURCE_CSV}"
+else
+  printf 'domain,port,type,https\n' > "${SOURCE_CSV}"
+fi
+append_project_domains >> "${SOURCE_CSV}"
+awk -F, -v OFS=, '
+  NR == 1 && $1 == "domain" { next }
+  $1 ~ /^#/ || $1 == "" { next }
+  {
+    gsub(/\r/, "", $1);
+    gsub(/\r/, "", $2);
+    gsub(/\r/, "", $3);
+    gsub(/\r/, "", $4);
+    if (!seen[$1]++) {
+      order[++count] = $1;
+    }
+    rows[$1] = $1 OFS $2 OFS $3 OFS $4;
+  }
+  END {
+    print "domain,port,type,https";
+    for (i = 1; i <= count; i++) {
+      domain = order[i];
+      if (!printed[domain]++) {
+        print rows[domain];
+      }
+    }
+  }
+' "${SOURCE_CSV}" > "${NORMALIZED_CSV}"
+
+install -m 0644 "${NORMALIZED_CSV}" "${CSV}"
+
 while IFS=, read -r domain port type https; do
   [[ -z "${domain:-}" ]] && continue
   [[ "${domain}" == "domain" ]] && continue
@@ -488,7 +705,7 @@ while IFS=, read -r domain port type https; do
   install -m 0644 "${tmp}" "${conf}"
   ln -sfn "${conf}" "${NGINX_ENABLED}/${domain}.conf"
   rm -f "${tmp}"
-done < "${CSV}"
+done < "${NORMALIZED_CSV}"
 
 if [[ -f "${MANIFEST}" ]]; then
   while IFS= read -r old_domain; do
@@ -653,6 +870,7 @@ cat > "\${SYSTEM_PORTAL_WEBROOT}/index.html" <<EOF2
     <h2>Admin</h2>
     <ul>
       <li><a href="/manage/">Manage projects</a></li>
+      <li><a href="/manage/tls/">Manage SSL</a></li>
       <li><a href="/manage/ssh-keys/">Manage SSH Keys</a></li>
     </ul>
     <h2>DB Management</h2>
@@ -787,6 +1005,7 @@ User=root
 WorkingDirectory=/root
 EnvironmentFile=-${SYSTEM_ENV_FILE}
 Environment=MANAGE_PORT=8090
+Environment=MANAGE_BIND_HOST=0.0.0.0
 Environment=TZ=Asia/Jerusalem
 ExecStart=${NODE_BIN} ${BIN_DIR}/manage-server.mjs
 Restart=always
@@ -885,6 +1104,7 @@ main() {
   configure_ssh_hardening
   configure_mysql_server
   install_system_files
+  configure_inner_proxy_service
 
   systemctl restart "${PHP_FPM_SERVICE}"
   systemctl restart nginx

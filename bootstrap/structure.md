@@ -32,6 +32,11 @@ This project rebuilds the VPS plumbing, not the app code.
   - Basic SSH brute-force protection
 - `/etc/ssh/sshd_config.d/99-vps-bootstrap.conf`
   - Optional SSH hardening when `ADMIN_USER` is set
+- `/etc/vps-proxy-service.json`
+  - Proxy service settings for `/manage/proxy/`
+  - Rendered into `/etc/tinyproxy/tinyproxy.conf`
+- `/etc/tinyproxy/tinyproxy.conf`
+  - Tinyproxy config generated from the proxy service settings
 
 ## Security defaults
 
@@ -39,6 +44,7 @@ This project rebuilds the VPS plumbing, not the app code.
 - fail2ban is enabled for SSH
 - unattended upgrades is enabled
 - phpMyAdmin is installed but only bound locally on `127.0.0.1:8081`
+- Tinyproxy is installed but stays local-only by default unless you change the proxy listen host
 
 ## App workflow
 
@@ -53,3 +59,4 @@ This project rebuilds the VPS plumbing, not the app code.
 - This bootstrap does not copy or deploy app repositories.
 - It assumes DNS is already pointed at the VPS before TLS issuance.
 - If you want SSH hardening, provide `ADMIN_USER` and `ADMIN_SSH_PUBKEY` before running the installer.
+- If you want the proxy service exposed beyond localhost, review the proxy allowlist and firewall rules first.

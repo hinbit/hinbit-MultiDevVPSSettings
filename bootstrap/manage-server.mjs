@@ -4,21 +4,32 @@ import path from 'path';
 import http from 'http';
 import { execFileSync, spawn, spawnSync } from 'child_process';
 import os from 'os';
+import { randomUUID } from 'crypto';
 import { fileURLToPath } from 'url';
 
 const META_DIR = '/etc/vps-projects';
 const AUTH_DIR = '/etc/nginx/project-auth';
 const SYSTEM_ENV_FILE = '/etc/vps-system.env';
+const SYSTEM_DOMAIN_FILE = '/etc/vps-system-domain';
 const DB_MACHINES_FILE = '/etc/vps-db-machines.json';
 const SSH_KEYS_FILE = '/etc/vps-ssh-keys.json';
 const SSH_KEYS_DIR = '/root/.ssh/vps-managed-keys';
+const SSH_CONFIG_FILE = '/root/.ssh/config';
+const SSH_CONFIG_BEGIN = '# BEGIN Multidev managed GitHub SSH config';
+const SSH_CONFIG_END = '# END Multidev managed GitHub SSH config';
 const PROJECT_ENV_BACKUP_DIR = '/etc/vps-project-env-backups';
+const MANAGE_VERSION_FILE = '/etc/vps-manage-version.json';
+const TLS_CUSTOM_DIR = '/etc/vps-custom-certs';
+const TLS_SERVER_DIR = path.join(TLS_CUSTOM_DIR, 'server');
+const TLS_PROJECT_DIR = path.join(TLS_CUSTOM_DIR, 'projects');
 const PROJECTCTL = '/usr/local/bin/projectctl';
 const PM2 = 'pm2';
 const BASIC_USER = 'manage';
 const PORT = Number(process.env.MANAGE_PORT || 8090);
+const BIND_HOST = process.env.MANAGE_BIND_HOST || '0.0.0.0';
 const PASSWORD = process.env.MANAGE_PASSWORD || '';
 const LOCAL_DB_MACHINE_ID = 'local-current';
+const CUSTOM_DB_MACHINE_ID = 'custom';
 const LOCAL_DB_MACHINE = {
   id: LOCAL_DB_MACHINE_ID,
   name: 'localhost (current)',
@@ -30,6 +41,7 @@ const LOCAL_DB_MACHINE = {
 };
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const REPO_ROOT = path.resolve(__dirname, '..');
 const ENV_CANDIDATES = [
   '.env',
   '.env.local',
@@ -39,6 +51,35 @@ const ENV_CANDIDATES = [
   '.env.production.local',
   '.env.development',
 ];
+const MAX_ENV_FILE_BYTES = 1024 * 1024;
+const VPS_PROXY_CONFIG_FILE = '/etc/vps-proxy-service.json';
+const TINYPROXY_CONF_FILE = '/etc/tinyproxy/tinyproxy.conf';
+const TINYPROXY_SERVICE = 'tinyproxy';
+const DEFAULT_PROXY_AUTH = {
+  username: 'local-proxy',
+  password: 'pargod-browsing-2026',
+};
+const DEFAULT_PROXY_CONFIG = {
+  enabled: true,
+  service: 'tinyproxy',
+  listen_host: '127.0.0.1',
+  listen_port: 3128,
+  allow: ['127.0.0.1', '::1'],
+  auth: {
+    enabled: false,
+    ...DEFAULT_PROXY_AUTH,
+  },
+  connect_ports: [80, 443, 8443, 9443, 2053],
+  timeout: 600,
+  max_clients: 100,
+  log_level: 'Info',
+  disable_via_header: true,
+  proxy_pool: {
+    source_file: '',
+    selected_id: '',
+    entries: [],
+  },
+};
 
 function loadSystemEnv() {
   if (!fs.existsSync(SYSTEM_ENV_FILE)) return;
@@ -50,8 +91,8 @@ function loadSystemEnv() {
     if (idx === -1) continue;
     const key = trimmed.slice(0, idx).trim();
     const value = trimmed.slice(idx + 1).trim();
-    if (key === 'MANAGE_PASSWORD' && !process.env.MANAGE_PASSWORD) {
-      process.env.MANAGE_PASSWORD = value;
+    if (key.startsWith('MANAGE_') && !process.env[key]) {
+      process.env[key] = value;
     }
   }
 }
@@ -67,8 +108,14 @@ function die(msg) {
 function slugFromRef(ref) {
   return String(ref || '')
     .replace(/^git@github.com:/, '')
+    .replace(/^git@github-developseach:/, '')
+    .replace(/^git@github-hinbit:/, '')
     .replace(/^https:\/\/github.com\//, '')
+    .replace(/^https:\/\/github-developseach\//, '')
+    .replace(/^https:\/\/github-hinbit\//, '')
     .replace(/^github.com:/, '')
+    .replace(/^github-developseach:/, '')
+    .replace(/^github-hinbit:/, '')
     .replace(/\.git$/, '')
     .replace(/\//g, '-')
     .replace(/[^A-Za-z0-9._-]/g, '-');
@@ -77,8 +124,14 @@ function slugFromRef(ref) {
 function repoRefFromArg(ref) {
   const cleaned = String(ref || '')
     .replace(/^git@github.com:/, '')
+    .replace(/^git@github-developseach:/, '')
+    .replace(/^git@github-hinbit:/, '')
     .replace(/^https:\/\/github.com\//, '')
+    .replace(/^https:\/\/github-developseach\//, '')
+    .replace(/^https:\/\/github-hinbit\//, '')
     .replace(/^github.com:/, '')
+    .replace(/^github-developseach:/, '')
+    .replace(/^github-hinbit:/, '')
     .replace(/\.git$/, '');
   if (!cleaned.includes('/')) {
     throw new Error(`Expected owner/repo, got: ${ref}`);
@@ -90,6 +143,21 @@ function metaPathForRef(ref) {
   return path.join(META_DIR, `${slugFromRef(ref)}.env`);
 }
 
+function touchFileMtime(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return false;
+  try {
+    const now = new Date();
+    fs.utimesSync(filePath, now, now);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function touchProjectMeta(ref) {
+  return touchFileMtime(metaPathForRef(ref));
+}
+
 function parseEnvFile(filePath) {
   const data = {};
   if (!fs.existsSync(filePath)) return data;
@@ -99,23 +167,225 @@ function parseEnvFile(filePath) {
     const idx = line.indexOf('=');
     if (idx === -1) continue;
     const key = line.slice(0, idx).trim();
-    const value = line.slice(idx + 1).trim();
+    let value = line.slice(idx + 1).trim();
+    if (value.length >= 2 && ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith('"') && value.endsWith('"')))) {
+      value = value.slice(1, -1);
+    }
     data[key] = value;
   }
   return data;
 }
 
-function readProjectEnv(projectPath) {
-  const merged = {};
-  const files = [];
-  for (const name of ENV_CANDIDATES) {
-    const filePath = path.join(projectPath, name);
-    if (!fs.existsSync(filePath)) continue;
-    files.push(filePath);
-    Object.assign(merged, parseEnvFile(filePath));
+function parseEnvText(text) {
+  const data = {};
+  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  for (const rawLine of lines) {
+    const line = String(rawLine || '').trim();
+    if (!line || line.startsWith('#')) continue;
+    const idx = line.indexOf('=');
+    if (idx === -1) continue;
+    const key = line.slice(0, idx).trim();
+    if (!key) continue;
+    let value = line.slice(idx + 1).trim();
+    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))) {
+      const quote = value[0];
+      value = value.slice(1, -1);
+      if (quote === '"') {
+        value = value
+          .replace(/\\n/g, '\n')
+          .replace(/\\r/g, '\r')
+          .replace(/\\t/g, '\t')
+          .replace(/\\(["\\$`])/g, '$1');
+      }
+    }
+    data[key] = value;
   }
+  return data;
+}
 
-  return { merged, files };
+function parseEnvTextDetailed(text) {
+  const entries = [];
+  const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+  lines.forEach((rawLine, index) => {
+    const line = String(rawLine || '').trim();
+    if (!line || line.startsWith('#')) return;
+    const idx = line.indexOf('=');
+    if (idx === -1) return;
+    const key = line.slice(0, idx).trim();
+    if (!key) return;
+    let value = line.slice(idx + 1).trim();
+    if (value.length >= 2 && ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith('"') && value.endsWith('"')))) {
+      const quote = value[0];
+      value = value.slice(1, -1);
+      if (quote === '"') {
+        value = value
+          .replace(/\\n/g, '\n')
+          .replace(/\\r/g, '\r')
+          .replace(/\\t/g, '\t')
+          .replace(/\\(["\\$`])/g, '$1');
+      }
+    }
+    entries.push({
+      key,
+      value,
+      lineNumber: index + 1,
+      rawLine,
+    });
+  });
+  return entries;
+}
+
+function entriesToEnvObject(entries) {
+  const data = {};
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!entry || !entry.key) continue;
+    data[entry.key] = entry.value;
+  }
+  return data;
+}
+
+function discoverProjectEnvFiles(projectPath) {
+  const baseDirs = [
+    projectPath,
+    path.join(projectPath, 'server'),
+    path.join(projectPath, 'client'),
+    path.join(projectPath, 'dashboard'),
+  ];
+  const seen = new Set();
+  const files = [];
+  for (const baseDir of baseDirs) {
+    for (const candidate of ENV_CANDIDATES) {
+      const filePath = path.join(baseDir, candidate);
+      const resolved = path.resolve(filePath);
+      if (seen.has(resolved) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) continue;
+      const stat = fs.statSync(filePath);
+      if (!Number.isFinite(stat.size) || stat.size > MAX_ENV_FILE_BYTES) {
+        console.warn(`[manage] skipping oversized env file ${filePath} (${stat.size} bytes)`);
+        continue;
+      }
+      seen.add(resolved);
+      const raw = fs.readFileSync(filePath, 'utf8');
+      const entries = parseEnvTextDetailed(raw);
+      files.push({
+        path: filePath,
+        relativePath: path.relative(projectPath, filePath) || path.basename(filePath),
+        name: path.basename(filePath),
+        content: raw,
+        entries,
+        env: entriesToEnvObject(entries),
+      });
+    }
+  }
+  return files;
+}
+
+function shellQuoteEnvValue(value) {
+  const raw = String(value ?? '');
+  return `"${raw
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\$/g, '\\$')
+    .replace(/`/g, '\\`')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t')}"`;
+}
+
+function serializeEnvText(env) {
+  const entries = Object.entries(env || {})
+    .filter(([key]) => String(key || '').trim())
+    .sort(([a], [b]) => a.localeCompare(b));
+  return entries.map(([key, value]) => `${key}=${shellQuoteEnvValue(value)}`).join('\n') + (entries.length ? '\n' : '');
+}
+
+function updateEnvFileValue(filePath, key, value) {
+  const current = fs.existsSync(filePath) ? parseEnvFile(filePath) : {};
+  current[key] = value;
+  fs.writeFileSync(filePath, serializeEnvText(current), 'utf8');
+}
+
+function readProjectEnv(projectPath) {
+  const envFiles = discoverProjectEnvFiles(projectPath);
+  const merged = {};
+  const envEntries = [];
+  const entryGroups = new Map();
+  for (const file of envFiles) {
+    const seenInFile = new Set();
+    for (const entry of Array.isArray(file.entries) ? file.entries : []) {
+      if (!entry || !entry.key) continue;
+      const key = String(entry.key);
+      const current = entryGroups.get(key) || {
+        key,
+        value: '',
+        source: '',
+        sourcePath: '',
+        sourceLine: 0,
+        sourceValue: '',
+        duplicate: false,
+        duplicateCount: 0,
+        sources: [],
+      };
+      if (seenInFile.has(key)) {
+        current.duplicate = true;
+      }
+      current.value = entry.value;
+      current.source = file.relativePath || file.name || file.path;
+      current.sourcePath = file.path;
+      current.sourceLine = entry.lineNumber || 0;
+      current.sourceValue = entry.value;
+      current.sources.push({
+        path: file.path,
+        relativePath: file.relativePath || file.name || file.path,
+        lineNumber: entry.lineNumber || 0,
+        value: entry.value,
+      });
+      current.duplicateCount = current.sources.length;
+      current.duplicate = current.duplicate || current.duplicateCount > 1;
+      entryGroups.set(key, current);
+      seenInFile.add(key);
+      merged[key] = entry.value;
+    }
+  }
+  for (const item of entryGroups.values()) {
+    envEntries.push(item);
+  }
+  envEntries.sort((a, b) => a.key.localeCompare(b.key));
+
+  return {
+    merged,
+    files: envFiles.map((file) => file.path),
+    envFiles,
+    envEntries,
+  };
+}
+
+function chooseProjectEnvSaveTarget(projectPath, files = []) {
+  const fileSet = new Set((Array.isArray(files) ? files : []).map((file) => path.resolve(file)));
+  for (let i = ENV_CANDIDATES.length - 1; i >= 0; i -= 1) {
+    const candidate = path.join(projectPath || '', ENV_CANDIDATES[i]);
+    if (fileSet.has(path.resolve(candidate))) {
+      return candidate;
+    }
+  }
+  return path.join(projectPath || '', '.env');
+}
+
+function resolveProjectEnvSaveTarget(projectPath, files = [], requestedPath = '') {
+  const cleanRequested = String(requestedPath || '').trim();
+  if (cleanRequested) {
+    const candidate = path.isAbsolute(cleanRequested)
+      ? cleanRequested
+      : path.resolve(projectPath || '', cleanRequested);
+    const candidateResolved = path.resolve(candidate);
+    const fileSet = new Set((Array.isArray(files) ? files : []).map((file) => path.resolve(file)));
+    if (fileSet.has(candidateResolved)) {
+      return candidateResolved;
+    }
+    if (candidateResolved.startsWith(path.resolve(projectPath || '') + path.sep) && path.basename(candidateResolved).startsWith('.env')) {
+      return candidateResolved;
+    }
+  }
+  return chooseProjectEnvSaveTarget(projectPath, files);
 }
 
 function projectEnvBackupDir(ref) {
@@ -237,6 +507,157 @@ function readProjectDiskUsage(projectPath) {
   }
 }
 
+function readProjectFilesystemUsage(projectPath) {
+  if (!projectPath || !fs.existsSync(projectPath)) {
+    return {
+      total: 0,
+      used: 0,
+      free: 0,
+      percent: 0,
+      mount: '',
+    };
+  }
+  try {
+    const out = execFileSync('df', ['-B1', '--output=size,used,avail,pcent,target', projectPath], { encoding: 'utf8' }).trim().split(/\r?\n/);
+    if (out.length < 2) {
+      return {
+        total: 0,
+        used: 0,
+        free: 0,
+        percent: 0,
+        mount: '',
+      };
+    }
+    const parts = out[1].trim().split(/\s+/);
+    return {
+      total: Number.parseInt(parts[0] || '0', 10) || 0,
+      used: Number.parseInt(parts[1] || '0', 10) || 0,
+      free: Number.parseInt(parts[2] || '0', 10) || 0,
+      percent: Number.parseFloat(String(parts[3] || '0').replace('%', '')) || 0,
+      mount: parts[4] || '',
+    };
+  } catch {
+    return {
+      total: 0,
+      used: 0,
+      free: 0,
+      percent: 0,
+      mount: '',
+    };
+  }
+}
+
+function readProjectGitInfo(projectPath) {
+  if (!projectPath || !fs.existsSync(path.join(projectPath, '.git'))) {
+    return {
+      commit: '',
+      commitShort: '',
+      commitDate: '',
+    };
+  }
+  try {
+    const commit = execFileSync('git', ['-C', projectPath, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const commitShort = commit ? commit.slice(0, 12) : '';
+    const commitDate = execFileSync('git', ['-C', projectPath, 'log', '-1', '--format=%cI'], { encoding: 'utf8' }).trim();
+    return {
+      commit,
+      commitShort,
+      commitDate,
+    };
+  } catch {
+    return {
+      commit: '',
+      commitShort: '',
+      commitDate: '',
+    };
+  }
+}
+
+function readManageBuildInfo() {
+  const fallback = {
+    commit: '',
+    commitShort: '',
+    commitDate: '',
+    repo: 'hinbit/hinbit-MultiDevVPSSettings',
+  };
+  try {
+    if (!fs.existsSync(MANAGE_VERSION_FILE)) return fallback;
+    const data = JSON.parse(fs.readFileSync(MANAGE_VERSION_FILE, 'utf8'));
+    const commit = String(data.commit || data.sha || '').trim();
+    const commitShort = String(data.commitShort || data.short || commit.slice(0, 12)).trim();
+    const commitDate = String(data.commitDate || data.date || '').trim();
+    return {
+      commit,
+      commitShort,
+      commitDate,
+      repo: String(data.repo || fallback.repo).trim() || fallback.repo,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function projectFallbackDomain(domain) {
+  const parts = String(domain || '').trim().split('.').filter(Boolean);
+  if (parts.length < 3) return '';
+  return parts.slice(1).join('.');
+}
+
+function normalizeDomainBinding(binding, fallback = {}) {
+  const domain = String(binding?.domain || '').trim().toLowerCase();
+  if (!domain) return null;
+  return {
+    domain,
+    port: String(binding?.port || fallback.port || '').trim(),
+    https: String(binding?.https || fallback.https || 'yes').trim() || 'yes',
+    envFile: String(binding?.envFile || '.env').trim() || '.env',
+    primary: Boolean(binding?.primary),
+    type: String(binding?.type || fallback.type || 'project').trim() || 'project',
+  };
+}
+
+function parseProjectDomainBindings(meta) {
+  const fallback = {
+    port: String(meta?.APP_PORT || '').trim(),
+    https: String(meta?.APP_HTTPS || 'yes').trim() || 'yes',
+    type: String(meta?.APP_TYPE || 'project').trim() || 'project',
+  };
+  const raw = String(meta?.APP_DOMAIN_BINDINGS_JSON || '').trim();
+  let bindings = [];
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        bindings = parsed.map((item) => normalizeDomainBinding(item, fallback)).filter(Boolean);
+      }
+    } catch {
+      bindings = [];
+    }
+  }
+  if (!bindings.length && String(meta?.APP_DOMAIN || '').trim()) {
+    bindings = [normalizeDomainBinding({
+      domain: meta.APP_DOMAIN,
+      port: meta.APP_PORT,
+      https: meta.APP_HTTPS,
+      envFile: '.env',
+      primary: true,
+      type: meta.APP_TYPE,
+    }, fallback)].filter(Boolean);
+  }
+  if (!bindings.some((item) => item.primary) && String(meta?.APP_DOMAIN || '').trim()) {
+    const primary = normalizeDomainBinding({
+      domain: meta.APP_DOMAIN,
+      port: meta.APP_PORT,
+      https: meta.APP_HTTPS,
+      envFile: '.env',
+      primary: true,
+      type: meta.APP_TYPE,
+    }, fallback);
+    if (primary) bindings.unshift(primary);
+  }
+  return bindings.filter(Boolean);
+}
+
 function readProjectSslStatus(project) {
   const domain = String(project?.APP_DOMAIN || '').trim();
   const https = String(project?.APP_HTTPS || '').toLowerCase();
@@ -245,6 +666,19 @@ function readProjectSslStatus(project) {
   }
   if (https !== 'yes') {
     return { label: 'HTTP only', className: 'warn', active: false };
+  }
+
+  const custom = readTlsStatus('project', domain, domain);
+  if (custom.active && custom.source === 'custom') {
+    return { label: 'SSL active (custom)', className: 'good', active: true };
+  }
+
+  const fallbackDomain = projectFallbackDomain(domain);
+  if (fallbackDomain) {
+    const defaultDomain = readTlsStatus('server', fallbackDomain, fallbackDomain);
+    if (defaultDomain.active && defaultDomain.source === 'custom') {
+      return { label: 'SSL active (default domain)', className: 'good', active: true };
+    }
   }
 
   const confPath = `/etc/nginx/sites-available/${domain}.conf`;
@@ -261,16 +695,82 @@ function readProjectSslStatus(project) {
   return { label: 'SSL missing', className: 'warn', active: false };
 }
 
-function readPackageScripts(projectPath) {
-  try {
-    const pkgPath = path.join(projectPath, 'package.json');
-    if (!fs.existsSync(pkgPath)) return [];
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-    const scripts = pkg && pkg.scripts ? pkg.scripts : {};
-    return Object.entries(scripts).map(([name, command]) => ({ name, command: String(command) }));
-  } catch {
-    return [];
+function readProjectTlsStatus(project) {
+  const domain = String(project?.APP_DOMAIN || '').trim();
+  const ssl = readProjectSslStatus(project);
+  const tls = domain ? readTlsStatus('project', domain, domain) : {
+    scope: 'project',
+    key: '',
+    label: 'no domain',
+    source: 'missing',
+    active: false,
+    certPath: '',
+    keyPath: '',
+    dir: '',
+  };
+  const fallbackDomain = projectFallbackDomain(domain);
+  const defaultTls = fallbackDomain ? readTlsStatus('server', fallbackDomain, fallbackDomain) : null;
+  if (defaultTls && defaultTls.active && defaultTls.source === 'custom' && !(tls.active && tls.source === 'custom')) {
+    return {
+      domain,
+      defaultDomain: fallbackDomain,
+      ...defaultTls,
+      source: 'default-domain',
+      label: fallbackDomain,
+      statusLabel: ssl.label,
+      statusClass: ssl.className,
+      active: ssl.active,
+    };
   }
+  return {
+    domain,
+    ...tls,
+    statusLabel: ssl.label,
+    statusClass: ssl.className,
+    active: ssl.active,
+  };
+}
+
+function readPackageScripts(projectPath) {
+  const packageEntries = [
+    { dir: '', pkgPath: path.join(projectPath, 'package.json') },
+    { dir: 'server', pkgPath: path.join(projectPath, 'server', 'package.json') },
+    { dir: 'client', pkgPath: path.join(projectPath, 'client', 'package.json') },
+  ];
+  const scripts = [];
+  for (const entry of packageEntries) {
+    if (!fs.existsSync(entry.pkgPath)) continue;
+    try {
+      const pkg = JSON.parse(fs.readFileSync(entry.pkgPath, 'utf8'));
+      const pkgScripts = pkg && pkg.scripts ? pkg.scripts : {};
+      for (const [name, command] of Object.entries(pkgScripts)) {
+        scripts.push({
+          name,
+          command: String(command),
+          dir: entry.dir,
+          packageJson: entry.pkgPath,
+        });
+      }
+    } catch {
+      // Ignore a broken package manifest and keep scanning the others.
+    }
+  }
+  return scripts;
+}
+
+function isDbScript(script) {
+  const name = String(script?.name || '').toLowerCase();
+  const command = String(script?.command || '').toLowerCase();
+  const scriptText = `${name} ${command}`;
+  if (!scriptText.trim()) return false;
+
+  const nameMatch = /(^|[:._-])(db|database|mysql|mariadb|postgres|postgresql|pg|seed|migrate|prisma|knex|typeorm|sequelize|drizzle|mongo|mongodb)(?=[:._-]|$)/i.test(name);
+  const commandMatch = /(mysql|mariadb|postgres|postgresql|psql|prisma|knex|typeorm|sequelize|drizzle|mongo|mongodb|sqlite)/i.test(command);
+  return nameMatch || commandMatch;
+}
+
+function readDbScripts(projectPath) {
+  return readPackageScripts(projectPath).filter(isDbScript);
 }
 
 function readProjects() {
@@ -278,19 +778,29 @@ function readProjects() {
     ? fs.readdirSync(META_DIR).filter((name) => name.endsWith('.env'))
     : [];
   return projectFiles.map((name) => {
-    const meta = parseEnvFile(path.join(META_DIR, name));
+    const metaPath = path.join(META_DIR, name);
+    const meta = parseEnvFile(metaPath);
+    const stat = fs.existsSync(metaPath) ? fs.statSync(metaPath) : null;
     const authFile = meta.APP_DOMAIN ? path.join(AUTH_DIR, `${meta.APP_DOMAIN}.htpasswd`) : '';
     const protectedAccess = authFile ? fs.existsSync(authFile) && fs.statSync(authFile).size > 0 : false;
     const pm2Name = meta.PM2_NAME || '';
     return {
       ...meta,
+      metaPath,
+      metaMtimeMs: stat ? Number(stat.mtimeMs || 0) : 0,
       PROJECT_SLUG: meta.PROJECT_SLUG || name.replace(/\.env$/, ''),
       protected: protectedAccess,
       auth_file: authFile,
-      repo: meta.REPO_REF || '',
+      repo: meta.SOURCE_REPO_REF || meta.REPO_REF || '',
+      ref: meta.PROJECT_SLUG || name.replace(/\.env$/, ''),
+      sourceRepoRef: meta.SOURCE_REPO_REF || meta.REPO_REF || '',
+      duplicate: Boolean(meta.DUPLICATE_SOURCE_REPO_REF),
+      duplicateSourceRepoRef: meta.DUPLICATE_SOURCE_REPO_REF || '',
+      duplicateEnvMode: meta.DUPLICATE_ENV_MODE || '',
+      duplicateDbMode: meta.DUPLICATE_DB_MODE || '',
       scripts: readPackageScripts(meta.APP_DIR || ''),
     };
-  }).sort((a, b) => String(a.APP_DOMAIN || a.PROJECT_SLUG).localeCompare(String(b.APP_DOMAIN || b.PROJECT_SLUG)));
+  });
 }
 
 function pickDbDetails(projectPath) {
@@ -301,6 +811,13 @@ function pickDbDetails(projectPath) {
     'DB_DATABASE',
     'DB_USER',
     'DB_PASSWORD',
+    'DB_MACHINE_ID',
+    'DB_MACHINE_NAME',
+    'DB_MACHINE_HOST',
+    'DB_MACHINE_PORT',
+    'DB_MACHINE_ROOT_USER',
+    'DB_MACHINE_ROOT_PASSWORD',
+    'DB_MACHINE_NOTES',
     'DB_HOST',
     'DB_PORT',
     'MYSQL_DATABASE',
@@ -323,8 +840,18 @@ function pickDbDetails(projectPath) {
 }
 
 function pickEnvDetails(projectPath) {
-  const { merged, files } = readProjectEnv(projectPath);
-  return { files, env: merged };
+  const { merged, files, envFiles, envEntries } = readProjectEnv(projectPath);
+  const preferredFile = envFiles.find((file) => path.basename(file.path) === '.env')
+    || envFiles[0]
+    || null;
+  return {
+    files,
+    envFiles,
+    envEntries,
+    env: merged,
+    saveTarget: chooseProjectEnvSaveTarget(projectPath, files),
+    selectedFile: preferredFile ? preferredFile.path : chooseProjectEnvSaveTarget(projectPath, files),
+  };
 }
 
 function readProjectGitStatus(projectPath) {
@@ -341,18 +868,92 @@ function readProjectGitStatus(projectPath) {
   }
 }
 
-function mysqlExecForMachine(machineId, query) {
+function normalizeMysqlMachine(machineOrId) {
+  if (machineOrId && typeof machineOrId === 'object' && !Array.isArray(machineOrId)) {
+    return {
+      id: String(machineOrId.id || CUSTOM_DB_MACHINE_ID).trim() || CUSTOM_DB_MACHINE_ID,
+      name: String(machineOrId.name || 'custom').trim() || 'custom',
+      host: String(machineOrId.host || '').trim(),
+      rootUser: String(machineOrId.rootUser || machineOrId.user || 'root').trim() || 'root',
+      rootPassword: String(machineOrId.rootPassword || machineOrId.password || '').trim(),
+      port: String(machineOrId.port || '3306').trim() || '3306',
+      notes: String(machineOrId.notes || '').trim(),
+      originHost: String(machineOrId.originHost || '').trim(),
+    };
+  }
+
+  if (String(machineOrId || '') === CUSTOM_DB_MACHINE_ID) {
+    return {
+      id: CUSTOM_DB_MACHINE_ID,
+      name: 'custom',
+      host: '',
+      rootUser: 'root',
+      rootPassword: '',
+      port: '3306',
+      notes: '',
+      originHost: '',
+    };
+  }
+
   const machines = readDbMachines();
-  const machine = machines.find((item) => String(item.id) === String(machineId)) || machines.find((item) => String(item.id) === LOCAL_DB_MACHINE_ID) || LOCAL_DB_MACHINE;
+  return machines.find((item) => String(item.id) === String(machineOrId))
+    || machines.find((item) => String(item.id) === LOCAL_DB_MACHINE_ID)
+    || LOCAL_DB_MACHINE;
+}
+
+function resolveProjectMysqlMachine(meta, projectPath) {
+  const { db } = pickDbDetails(projectPath);
+  const machines = readDbMachines();
+  const machineId = String(meta.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID).trim() || LOCAL_DB_MACHINE_ID;
+  const machine = machines.find((item) => String(item.id) === machineId) || null;
+  if (machine) {
+    return {
+      machine,
+      isCustom: false,
+    };
+  }
+
+  const host = String(db.DB_MACHINE_HOST || db.DB_HOST || db.MYSQL_HOST || db.POSTGRES_HOST || '').trim();
+  if (!host) {
+    return {
+      machine: null,
+      isCustom: machineId === CUSTOM_DB_MACHINE_ID,
+    };
+  }
+
+  const machineName = String(db.DB_MACHINE_NAME || 'Custom DB machine').trim() || 'Custom DB machine';
+  const port = String(db.DB_MACHINE_PORT || db.DB_PORT || db.MYSQL_PORT || db.POSTGRES_PORT || '3306').trim() || '3306';
+  const rootUser = String(db.DB_MACHINE_ROOT_USER || 'root').trim() || 'root';
+  const rootPassword = String(db.DB_MACHINE_ROOT_PASSWORD || '').trim();
+  const notes = String(db.DB_MACHINE_NOTES || '').trim();
+
+  return {
+    machine: {
+      id: CUSTOM_DB_MACHINE_ID,
+      name: machineName,
+      host,
+      rootUser,
+      rootPassword,
+      port,
+      notes,
+      originHost: '',
+    },
+    isCustom: true,
+  };
+}
+
+function mysqlExecForMachine(machineOrId, query) {
+  const machine = normalizeMysqlMachine(machineOrId);
   const host = String(machine.host || '127.0.0.1').trim();
   const port = String(machine.port || '3306').trim() || '3306';
   const user = String(machine.rootUser || 'root').trim() || 'root';
   const password = String(machine.rootPassword || '').trim();
+  const timeout = host === 'localhost' || host === '127.0.0.1' || host === '::1' ? 1500 : 2500;
   if (!password && (host === 'localhost' || host === '127.0.0.1' || host === '::1')) {
     return execFileSync(
       'mysql',
       ['--protocol=socket', '-uroot', '--batch', '--skip-column-names', '-e', query],
-      { encoding: 'utf8' },
+      { encoding: 'utf8', timeout },
     );
   }
   return execFileSync(
@@ -361,14 +962,19 @@ function mysqlExecForMachine(machineId, query) {
     {
       encoding: 'utf8',
       env: { ...process.env, MYSQL_PWD: password },
+      timeout,
     },
   );
 }
 
 function readMysqlAccounts(dbUser, machineId = LOCAL_DB_MACHINE_ID) {
   if (!dbUser) return [];
+  const machine = normalizeMysqlMachine(machineId);
+  if (String(machine.id || '') === CUSTOM_DB_MACHINE_ID && !String(machine.rootPassword || '').trim()) {
+    return [];
+  }
   try {
-    const out = mysqlExecForMachine(machineId, `SELECT CONCAT(User, '@', Host) FROM mysql.user WHERE User='${String(dbUser).replace(/'/g, "''")}' ORDER BY Host;`);
+    const out = mysqlExecForMachine(machine, `SELECT CONCAT(User, '@', Host) FROM mysql.user WHERE User='${String(dbUser).replace(/'/g, "''")}' ORDER BY Host;`);
     return out.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   } catch {
     return [];
@@ -388,6 +994,7 @@ function readDbMachines() {
       rootPassword: String(machine.rootPassword || machine.password || '').trim(),
       port: String(machine.port || '3306').trim() || '3306',
       notes: String(machine.notes || '').trim(),
+      originHost: String(machine.originHost || machine.remoteHost || '').trim(),
     })).filter((machine) => machine.name || machine.host || machine.rootUser || machine.rootPassword);
     if (!machines.some((machine) => machine.id === LOCAL_DB_MACHINE_ID)) {
       machines.unshift({ ...LOCAL_DB_MACHINE });
@@ -407,16 +1014,656 @@ function writeDbMachines(machines) {
   fs.chmodSync(DB_MACHINES_FILE, 0o600);
 }
 
+function safeTlsKey(input) {
+  return String(input || '')
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 120);
+}
+
+function tlsEntryDir(scope, key) {
+  const safeKey = safeTlsKey(key);
+  if (!safeKey) return '';
+  if (scope === 'server') {
+    return path.join(TLS_SERVER_DIR, safeKey);
+  }
+  return path.join(TLS_PROJECT_DIR, safeKey);
+}
+
+function tlsEntryPaths(scope, key) {
+  const dir = tlsEntryDir(scope, key);
+  if (!dir) return { dir: '', certPath: '', keyPath: '' };
+  return {
+    dir,
+    certPath: path.join(dir, 'fullchain.pem'),
+    keyPath: path.join(dir, 'privkey.pem'),
+  };
+}
+
+function ensureTlsDirs() {
+  fs.mkdirSync(TLS_SERVER_DIR, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(TLS_PROJECT_DIR, { recursive: true, mode: 0o700 });
+}
+
+function readTlsStatus(scope, key, label = '') {
+  const { dir, certPath, keyPath } = tlsEntryPaths(scope, key);
+  const exists = Boolean(dir && fs.existsSync(certPath) && fs.existsSync(keyPath));
+  const letsEncryptCert = scope === 'server'
+    ? `/etc/letsencrypt/live/${String(key || '').trim()}/fullchain.pem`
+    : `/etc/letsencrypt/live/${String(key || '').trim()}/fullchain.pem`;
+  const letsEncryptKey = scope === 'server'
+    ? `/etc/letsencrypt/live/${String(key || '').trim()}/privkey.pem`
+    : `/etc/letsencrypt/live/${String(key || '').trim()}/privkey.pem`;
+  const letsEncryptActive = fs.existsSync(letsEncryptCert) && fs.existsSync(letsEncryptKey);
+  if (exists) {
+    return {
+      scope,
+      key,
+      label: label || key,
+      source: 'custom',
+      active: true,
+      certPath,
+      keyPath,
+      dir,
+    };
+  }
+  if (letsEncryptActive) {
+    return {
+      scope,
+      key,
+      label: label || key,
+      source: 'letsencrypt',
+      active: true,
+      certPath: letsEncryptCert,
+      keyPath: letsEncryptKey,
+      dir: path.dirname(letsEncryptCert),
+    };
+  }
+  return {
+    scope,
+    key,
+    label: label || key,
+    source: 'missing',
+    active: false,
+    certPath: '',
+    keyPath: '',
+    dir,
+  };
+}
+
+function saveTlsEntry(scope, key, certificatePem, privateKeyPem) {
+  const { dir, certPath, keyPath } = tlsEntryPaths(scope, key);
+  if (!dir) throw new Error('Invalid TLS key');
+  if (!String(certificatePem || '').trim()) throw new Error('Certificate PEM is required');
+  if (!String(privateKeyPem || '').trim()) throw new Error('Private key PEM is required');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(certPath, String(certificatePem).replace(/\r\n/g, '\n').trim() + '\n');
+  fs.writeFileSync(keyPath, String(privateKeyPem).replace(/\r\n/g, '\n').trim() + '\n');
+  fs.chmodSync(certPath, 0o644);
+  fs.chmodSync(keyPath, 0o600);
+  return { dir, certPath, keyPath };
+}
+
+function deleteTlsEntry(scope, key) {
+  const { dir } = tlsEntryPaths(scope, key);
+  if (!dir || !fs.existsSync(dir)) return false;
+  fs.rmSync(dir, { recursive: true, force: true });
+  return true;
+}
+
+function getProxyConfigPath() {
+  if (fs.existsSync(VPS_PROXY_CONFIG_FILE)) return VPS_PROXY_CONFIG_FILE;
+  const repoDefault = path.join(REPO_ROOT, 'VPS-PROXY.json');
+  if (fs.existsSync(repoDefault)) return repoDefault;
+  return VPS_PROXY_CONFIG_FILE;
+}
+
+function readProxyServiceConfig() {
+  const sourcePath = getProxyConfigPath();
+  let data = {};
+  try {
+    if (fs.existsSync(sourcePath)) {
+      data = JSON.parse(fs.readFileSync(sourcePath, 'utf8'));
+    }
+  } catch {
+    data = {};
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) data = {};
+  const auth = data.auth && typeof data.auth === 'object' && !Array.isArray(data.auth) ? data.auth : {};
+  const allow = Array.isArray(data.allow) ? data.allow : [];
+  const connectPorts = Array.isArray(data.connect_ports) ? data.connect_ports : [];
+  return {
+    ...DEFAULT_PROXY_CONFIG,
+    ...data,
+    enabled: data.enabled !== undefined ? Boolean(data.enabled) : DEFAULT_PROXY_CONFIG.enabled,
+    listen_host: String(data.listen_host || DEFAULT_PROXY_CONFIG.listen_host).trim() || DEFAULT_PROXY_CONFIG.listen_host,
+    listen_port: Number.parseInt(String(data.listen_port || DEFAULT_PROXY_CONFIG.listen_port), 10) || DEFAULT_PROXY_CONFIG.listen_port,
+    allow: allow.map((item) => String(item).trim()).filter(Boolean),
+    auth: {
+      ...DEFAULT_PROXY_CONFIG.auth,
+      ...auth,
+      enabled: Boolean(auth.enabled),
+      username: String(auth.username || DEFAULT_PROXY_AUTH.username).trim() || DEFAULT_PROXY_AUTH.username,
+      password: String(auth.password || DEFAULT_PROXY_AUTH.password),
+    },
+    connect_ports: connectPorts
+      .map((item) => Number.parseInt(String(item), 10))
+      .filter((item) => Number.isInteger(item) && item >= 1 && item <= 65535),
+    timeout: Number.parseInt(String(data.timeout || DEFAULT_PROXY_CONFIG.timeout), 10) || DEFAULT_PROXY_CONFIG.timeout,
+    max_clients: Number.parseInt(String(data.max_clients || DEFAULT_PROXY_CONFIG.max_clients), 10) || DEFAULT_PROXY_CONFIG.max_clients,
+    log_level: String(data.log_level || DEFAULT_PROXY_CONFIG.log_level).trim() || DEFAULT_PROXY_CONFIG.log_level,
+    disable_via_header: data.disable_via_header !== undefined ? Boolean(data.disable_via_header) : DEFAULT_PROXY_CONFIG.disable_via_header,
+  };
+}
+
+function proxyConfigValidationError(config) {
+  if (!config.listen_host) return 'Proxy listen host is required';
+  if (!Number.isInteger(config.listen_port) || config.listen_port < 1 || config.listen_port > 65535) {
+    return 'Proxy listen port must be between 1 and 65535';
+  }
+  if (config.auth.enabled) {
+    if (!config.auth.username) return 'Proxy auth username is required when auth is enabled';
+    if (!config.auth.password) return 'Proxy auth password is required when auth is enabled';
+  }
+  return '';
+}
+
+function inferProxyProtocol(port) {
+  const socksPorts = new Set([1080, 1081, 9050, 1085, 9150, 4145]);
+  if (socksPorts.has(Number(port))) return 'socks5';
+  return 'http';
+}
+
+function normalizeProxyPoolEntry(input = {}, index = 0) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error(`Proxy pool entry ${index + 1} must be an object`);
+  }
+  const host = String(input.host || input.hostname || input.ip_address || input.ip || '').trim();
+  if (!host) throw new Error(`Proxy pool entry ${index + 1} is missing a host`);
+  const portValue = Number.parseInt(String(input.port ?? input.proxy_port ?? ''), 10);
+  if (!Number.isInteger(portValue) || portValue < 1 || portValue > 65535) {
+    throw new Error(`Proxy pool entry ${index + 1} has an invalid port`);
+  }
+  const protocolRaw = String(input.protocol || input.scheme || input.type || '').trim().toLowerCase();
+  const protocol = protocolRaw || inferProxyProtocol(portValue);
+  const allowedProtocols = new Set(['http', 'https', 'socks4', 'socks5', 'auto']);
+  if (!allowedProtocols.has(protocol)) {
+    throw new Error(`Proxy pool entry ${index + 1} has an invalid protocol`);
+  }
+  const username = String(input.username || input.proxy_username || '').trim();
+  const password = String(input.password || input.proxy_password || '');
+  const label = String(input.label || input.name || host).trim() || host;
+  const id = String(input.id || `proxy-${index + 1}-${randomUUID().slice(0, 8)}`);
+  return {
+    id,
+    label,
+    host,
+    port: portValue,
+    protocol,
+    username,
+    password,
+    notes: String(input.notes || '').trim(),
+    exit_ip: String(input.exit_ip || input.proxy_exit_ip || '').trim(),
+    exit_location: String(input.exit_location || input.location_summary || input.location || '').trim(),
+    exit_city: String(input.exit_city || '').trim(),
+    exit_region: String(input.exit_region || '').trim(),
+    exit_country: String(input.exit_country || '').trim(),
+    exit_org: String(input.exit_org || '').trim(),
+    exit_timezone: String(input.exit_timezone || '').trim(),
+    working: Boolean(input.working),
+    status: String(input.status || (input.working ? 'working' : 'unchecked')).trim() || 'unchecked',
+    checked_at: String(input.checked_at || input.checkedAt || '').trim(),
+    last_error: String(input.last_error || input.lastError || '').trim(),
+  };
+}
+
+function normalizeProxyPool(input = {}) {
+  const poolInput = input.proxy_pool && typeof input.proxy_pool === 'object' && !Array.isArray(input.proxy_pool) ? input.proxy_pool : {};
+  const rawEntries = Array.isArray(poolInput.entries)
+    ? poolInput.entries
+    : Array.isArray(input.proxy_entries)
+      ? input.proxy_entries
+      : Array.isArray(input.proxies)
+        ? input.proxies
+        : [];
+  const entries = rawEntries.map((entry, index) => normalizeProxyPoolEntry(entry, index));
+  const selectedId = String(poolInput.selected_id || input.selected_proxy_id || input.selectedId || '').trim();
+  const sourceFile = String(poolInput.source_file || input.proxy_source_file || input.source_file || '').trim();
+  const checkedAt = String(poolInput.checked_at || input.proxy_checked_at || '').trim();
+  const selectedEntry = entries.find((entry) => entry.id === selectedId) || entries.find((entry) => entry.working) || entries[0] || null;
+  return {
+    source_file: sourceFile,
+    selected_id: selectedEntry ? selectedEntry.id : '',
+    checked_at: checkedAt,
+    entries,
+  };
+}
+
+function proxyPoolValidationError(pool) {
+  if (!pool || typeof pool !== 'object' || Array.isArray(pool)) {
+    return 'Proxy pool must be an object';
+  }
+  if (!Array.isArray(pool.entries)) {
+    return 'Proxy pool entries must be an array';
+  }
+  return '';
+}
+
+function formatProxyHost(host) {
+  const text = String(host || '').trim();
+  if (!text) return '';
+  if (text.includes(':') && !text.startsWith('[')) {
+    return `[${text}]`;
+  }
+  return text;
+}
+
+function proxyEntryUrl(entry, protocolOverride = '') {
+  if (!entry || typeof entry !== 'object') return '';
+  const protocol = String(protocolOverride || entry.protocol || 'http').trim().toLowerCase() || 'http';
+  const auth = entry.username
+    ? `${encodeURIComponent(entry.username)}${entry.password ? `:${encodeURIComponent(entry.password)}` : ''}@`
+    : '';
+  const host = formatProxyHost(entry.host);
+  return `${protocol}://${auth}${host}:${entry.port}`;
+}
+
+function proxyEntryCopyText(entry) {
+  const url = proxyEntryUrl(entry);
+  const lines = [
+    `proxy_url=${url}`,
+    `proxy_protocol=${String(entry?.protocol || 'http')}`,
+    `proxy_host=${String(entry?.host || '')}`,
+    `proxy_port=${String(entry?.port || '')}`,
+    `proxy_username=${String(entry?.username || '')}`,
+    `proxy_password=${String(entry?.password || '')}`,
+  ];
+  return lines.join('\n');
+}
+
+function proxyServiceUrl(config) {
+  if (!config || typeof config !== 'object') return '';
+  const host = formatProxyHost(config.listen_host || DEFAULT_PROXY_CONFIG.listen_host);
+  const port = Number.parseInt(String(config.listen_port || DEFAULT_PROXY_CONFIG.listen_port), 10) || DEFAULT_PROXY_CONFIG.listen_port;
+  const auth = config.auth?.enabled && config.auth?.username
+    ? `${encodeURIComponent(config.auth.username)}${config.auth.password ? `:${encodeURIComponent(config.auth.password)}` : ''}@`
+    : '';
+  return `http://${auth}${host}:${port}`;
+}
+
+function proxyLocationSummary(info = {}) {
+  const city = String(info.city || info.city_name || '').trim();
+  const region = String(info.region || info.region_name || '').trim();
+  const country = String(info.country_name || info.country || '').trim();
+  const parts = [city, region, country].filter(Boolean);
+  return parts.join(' · ');
+}
+
+function fetchProxyExitInfo(proxyUrl) {
+  const endpoints = ['https://ipapi.co/json/', 'https://ipinfo.io/json'];
+  let lastError = '';
+  for (const endpoint of endpoints) {
+    const result = spawnSync(
+      'curl',
+      [
+        '-fsS',
+        '--proxy', proxyUrl,
+        '--proxy-connect-timeout', '8',
+        '--max-time', '15',
+        endpoint,
+      ],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    if (result.status !== 0) {
+      lastError = String(result.stderr || result.error?.message || `curl exited ${result.status ?? 'unknown'}`).trim() || lastError;
+      continue;
+    }
+    const raw = String(result.stdout || '').trim();
+    if (!raw) {
+      lastError = 'Geo lookup returned empty response';
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      return {
+        ok: true,
+        checked_at: new Date().toISOString(),
+        endpoint,
+        raw,
+        exit_ip: String(parsed.ip || parsed.query || '').trim(),
+        exit_location: proxyLocationSummary(parsed),
+        exit_city: String(parsed.city || '').trim(),
+        exit_region: String(parsed.region || parsed.region_name || '').trim(),
+        exit_country: String(parsed.country_name || parsed.country || '').trim(),
+        exit_org: String(parsed.org || parsed.organization || parsed.asn?.org || '').trim(),
+        exit_timezone: String(parsed.timezone || '').trim(),
+      };
+    } catch (error) {
+      lastError = `Failed to parse geo response from ${endpoint}: ${error.message}`;
+    }
+  }
+  return {
+    ok: false,
+    checked_at: new Date().toISOString(),
+    error: lastError || 'Geo lookup failed',
+  };
+}
+
+function testProxyEntry(entry) {
+  if (!entry || typeof entry !== 'object') {
+    return { ok: false, error: 'Proxy entry is missing' };
+  }
+  const protocols = entry.protocol && entry.protocol !== 'auto'
+    ? [entry.protocol]
+    : ['http', 'https', 'socks5', 'socks4'];
+  let lastError = 'Proxy check failed';
+  for (const protocol of protocols) {
+    const proxyUrl = proxyEntryUrl(entry, protocol);
+    if (!proxyUrl) continue;
+    const result = spawnSync(
+      'curl',
+      [
+        '-fsS',
+        '--proxy', proxyUrl,
+        '--proxy-connect-timeout', '5',
+        '--max-time', '12',
+        'https://example.com',
+      ],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    if (result.status === 0) {
+      const geo = fetchProxyExitInfo(proxyUrl);
+      return {
+        ok: true,
+        protocol,
+        proxyUrl,
+        checked_at: new Date().toISOString(),
+        output: String(result.stdout || '').trim(),
+        exit_ip: geo.exit_ip || '',
+        exit_location: geo.exit_location || '',
+        exit_city: geo.exit_city || '',
+        exit_region: geo.exit_region || '',
+        exit_country: geo.exit_country || '',
+        exit_org: geo.exit_org || '',
+        exit_timezone: geo.exit_timezone || '',
+        geo_error: geo.ok ? '' : (geo.error || ''),
+      };
+    }
+    lastError = String(result.stderr || result.error?.message || `curl exited ${result.status ?? 'unknown'}`).trim() || lastError;
+  }
+  return {
+    ok: false,
+    error: lastError,
+    checked_at: new Date().toISOString(),
+  };
+}
+
+function cloneProxyPoolEntries(entries = []) {
+  return entries.map((entry, index) => normalizeProxyPoolEntry(entry, index));
+}
+
+function normalizeProxyConfig(input = {}) {
+  const authInput = input.auth && typeof input.auth === 'object' && !Array.isArray(input.auth) ? input.auth : {};
+  const allowInput = Array.isArray(input.allow) ? input.allow : [];
+  const connectPortsInput = Array.isArray(input.connect_ports) ? input.connect_ports : [];
+  const poolInput = input.proxy_pool && typeof input.proxy_pool === 'object' && !Array.isArray(input.proxy_pool) ? input.proxy_pool : {};
+  const poolEntries = Array.isArray(poolInput.entries) ? poolInput.entries : [];
+  const allow = allowInput.map((item) => String(item).trim()).filter(Boolean);
+  const connectPorts = [];
+  for (const item of connectPortsInput) {
+    const port = Number.parseInt(String(item), 10);
+    if (Number.isInteger(port) && port >= 1 && port <= 65535 && !connectPorts.includes(port)) {
+      connectPorts.push(port);
+    }
+  }
+  const config = {
+    ...DEFAULT_PROXY_CONFIG,
+    ...input,
+    enabled: input.enabled !== undefined ? Boolean(input.enabled) : DEFAULT_PROXY_CONFIG.enabled,
+    service: 'tinyproxy',
+    listen_host: String(input.listen_host || DEFAULT_PROXY_CONFIG.listen_host).trim() || DEFAULT_PROXY_CONFIG.listen_host,
+    listen_port: Number.parseInt(String(input.listen_port || DEFAULT_PROXY_CONFIG.listen_port), 10) || DEFAULT_PROXY_CONFIG.listen_port,
+    allow: allow.length ? allow : DEFAULT_PROXY_CONFIG.allow.slice(),
+    auth: {
+      ...DEFAULT_PROXY_CONFIG.auth,
+      ...authInput,
+      enabled: Boolean(authInput.enabled),
+      username: String(authInput.username || DEFAULT_PROXY_AUTH.username).trim() || DEFAULT_PROXY_AUTH.username,
+      password: String(authInput.password || DEFAULT_PROXY_AUTH.password),
+    },
+    connect_ports: connectPorts.length ? connectPorts : DEFAULT_PROXY_CONFIG.connect_ports.slice(),
+    timeout: Number.parseInt(String(input.timeout || DEFAULT_PROXY_CONFIG.timeout), 10) || DEFAULT_PROXY_CONFIG.timeout,
+    max_clients: Number.parseInt(String(input.max_clients || DEFAULT_PROXY_CONFIG.max_clients), 10) || DEFAULT_PROXY_CONFIG.max_clients,
+    log_level: String(input.log_level || DEFAULT_PROXY_CONFIG.log_level).trim() || DEFAULT_PROXY_CONFIG.log_level,
+    disable_via_header: input.disable_via_header !== undefined ? Boolean(input.disable_via_header) : DEFAULT_PROXY_CONFIG.disable_via_header,
+    proxy_pool: normalizeProxyPool({
+      proxy_pool: {
+        ...DEFAULT_PROXY_CONFIG.proxy_pool,
+        ...poolInput,
+        entries: cloneProxyPoolEntries(poolEntries),
+      },
+      selected_proxy_id: poolInput.selected_id || '',
+    }),
+  };
+  const validationError = proxyConfigValidationError(config);
+  if (validationError) throw new Error(validationError);
+  return config;
+}
+
+function writeProxyServiceConfig(config) {
+  const next = normalizeProxyConfig(config);
+  fs.writeFileSync(VPS_PROXY_CONFIG_FILE, `${JSON.stringify(next, null, 2)}\n`);
+  fs.chmodSync(VPS_PROXY_CONFIG_FILE, 0o600);
+  return next;
+}
+
+function renderTinyproxyConf(config) {
+  const lines = [
+    'User tinyproxy',
+    'Group tinyproxy',
+    `Port ${config.listen_port}`,
+    `Listen ${config.listen_host}`,
+    `Timeout ${config.timeout}`,
+    'PidFile "/run/tinyproxy/tinyproxy.pid"',
+    'LogFile "/var/log/tinyproxy/tinyproxy.log"',
+    `LogLevel ${config.log_level}`,
+    `MaxClients ${config.max_clients}`,
+  ];
+  if (config.disable_via_header) {
+    lines.push('DisableViaHeader Yes');
+  }
+  for (const item of config.allow) {
+    lines.push(`Allow ${item}`);
+  }
+  if (config.auth.enabled && config.auth.username && config.auth.password) {
+    lines.push(`BasicAuth ${config.auth.username} ${config.auth.password}`);
+  }
+  for (const port of config.connect_ports) {
+    lines.push(`ConnectPort ${port}`);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+function getServiceStatus(unit) {
+  const active = spawnSync('systemctl', ['is-active', unit], { encoding: 'utf8' });
+  const enabled = spawnSync('systemctl', ['is-enabled', unit], { encoding: 'utf8' });
+  return {
+    unit,
+    active: active.status === 0 ? String(active.stdout || '').trim() : 'inactive',
+    enabled: enabled.status === 0 ? String(enabled.stdout || '').trim() : 'disabled',
+  };
+}
+
+function readProxyServiceStatus() {
+  const config = readProxyServiceConfig();
+  const status = getServiceStatus(TINYPROXY_SERVICE);
+  const pool = config.proxy_pool || normalizeProxyPool({});
+  const selected = pool.entries.find((entry) => entry.id === pool.selected_id) || pool.entries.find((entry) => entry.working) || pool.entries[0] || null;
+  return {
+    ...config,
+    status,
+    sourcePath: getProxyConfigPath(),
+    confPath: TINYPROXY_CONF_FILE,
+    proxy_pool: {
+      ...pool,
+      entries: pool.entries.map((entry) => ({ ...entry })),
+    },
+    selected_proxy: selected ? { ...selected, copy_text: proxyEntryCopyText(selected), url: proxyEntryUrl(selected) } : null,
+    service_url: proxyServiceUrl(config),
+  };
+}
+
+function saveProxyServiceConfig(configInput) {
+  const config = writeProxyServiceConfig(configInput);
+  fs.mkdirSync('/etc/tinyproxy', { recursive: true, mode: 0o755 });
+  fs.mkdirSync('/var/log/tinyproxy', { recursive: true, mode: 0o755 });
+  fs.mkdirSync('/run/tinyproxy', { recursive: true, mode: 0o755 });
+  fs.writeFileSync(TINYPROXY_CONF_FILE, renderTinyproxyConf(config), 'utf8');
+  fs.chmodSync(TINYPROXY_CONF_FILE, 0o644);
+
+  if (config.listen_host !== '127.0.0.1' && config.listen_host !== '::1' && config.listen_host !== 'localhost') {
+    spawnSync('ufw', ['allow', `${config.listen_port}/tcp`], { stdio: 'ignore' });
+  }
+
+  if (config.enabled) {
+    spawnSync('systemctl', ['enable', '--now', TINYPROXY_SERVICE], { stdio: 'ignore' });
+  } else {
+    spawnSync('systemctl', ['disable', '--now', TINYPROXY_SERVICE], { stdio: 'ignore' });
+  }
+  return readProxyServiceStatus();
+}
+
+function updateProxyPoolEntry(pool, entryId, updates = {}) {
+  const entries = Array.isArray(pool.entries) ? pool.entries.map((entry) => ({ ...entry })) : [];
+  const index = entries.findIndex((entry) => String(entry.id) === String(entryId));
+  if (index === -1) throw new Error('Selected proxy not found');
+  const current = entries[index];
+  const next = normalizeProxyPoolEntry({ ...current, ...updates, id: current.id }, index);
+  entries[index] = next;
+  return {
+    ...pool,
+    entries,
+  };
+}
+
+function markProxyPoolEntryResult(entry, result) {
+  return {
+    ...entry,
+    protocol: result?.ok && result.protocol ? result.protocol : entry.protocol,
+    working: Boolean(result?.ok),
+    status: result?.ok ? 'working' : 'failed',
+    checked_at: result?.checked_at || new Date().toISOString(),
+    last_error: result?.ok ? '' : String(result?.error || 'Proxy check failed').trim(),
+    exit_ip: result?.exit_ip || entry.exit_ip || '',
+    exit_location: result?.exit_location || entry.exit_location || '',
+    exit_city: result?.exit_city || entry.exit_city || '',
+    exit_region: result?.exit_region || entry.exit_region || '',
+    exit_country: result?.exit_country || entry.exit_country || '',
+    exit_org: result?.exit_org || entry.exit_org || '',
+    exit_timezone: result?.exit_timezone || entry.exit_timezone || '',
+  };
+}
+
+function setProxyPoolSelection(pool, entryId) {
+  const entries = Array.isArray(pool.entries) ? pool.entries.map((entry) => ({ ...entry })) : [];
+  const selected = entries.find((entry) => String(entry.id) === String(entryId));
+  if (!selected) throw new Error('Selected proxy not found');
+  return {
+    ...pool,
+    selected_id: selected.id,
+  };
+}
+
+function saveProxyPool(configInput) {
+  const next = normalizeProxyConfig(configInput);
+  return saveProxyServiceConfig(next);
+}
+
+function getSystemDomain() {
+  try {
+    if (fs.existsSync(SYSTEM_DOMAIN_FILE)) {
+      return fs.readFileSync(SYSTEM_DOMAIN_FILE, 'utf8').trim();
+    }
+  } catch {
+    // Ignore unreadable system domain file.
+  }
+  return '';
+}
+
+function readSystemTlsStatus() {
+  const domain = getSystemDomain();
+  if (!domain) {
+    return {
+      scope: 'server',
+      key: '',
+      label: 'no system domain',
+      source: 'missing',
+      active: false,
+      certPath: '',
+      keyPath: '',
+      dir: '',
+      domain: '',
+    };
+  }
+  return {
+    ...readTlsStatus('server', domain, domain),
+    domain,
+  };
+}
+
+function tlsScopeLabel(scope) {
+  return scope === 'server' ? 'Server default' : 'Project';
+}
+
+function describeDbMachine(machine) {
+  const name = String(machine?.name || machine?.id || 'DB machine').trim() || 'DB machine';
+  const host = String(machine?.host || '').trim();
+  const originHost = String(machine?.originHost || '').trim();
+  const port = String(machine?.port || '').trim();
+  const notes = String(machine?.notes || '').trim();
+  const parts = [name];
+  if (originHost && originHost !== host) {
+    parts.push(`${originHost} via ${host}${port ? `:${port}` : ''}`.trim());
+  } else if (host) {
+    parts.push(port ? `${host}:${port}` : host);
+  }
+  if (notes) parts.push(notes);
+  return parts.filter(Boolean).join(' · ');
+}
+
+function normalizeGithubUser(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function githubSshHostForUser(githubUser) {
+  const user = normalizeGithubUser(githubUser);
+  if (!user) return '';
+  if (user === 'shaykid') return 'github.com';
+  return `github-${user}`;
+}
+
 function readSshKeyRegistry() {
   try {
     if (!fs.existsSync(SSH_KEYS_FILE)) return [];
     const data = JSON.parse(fs.readFileSync(SSH_KEYS_FILE, 'utf8'));
     if (!Array.isArray(data)) return [];
     return data.map((item) => ({
-      id: String(item.id || item.path || '').trim(),
+      id: path.isAbsolute(String(item.id || item.path || '').trim())
+        ? String(item.id || item.path || '').trim()
+        : path.join('/', String(item.id || item.path || '').trim()),
       name: String(item.name || path.basename(String(item.path || '')) || '').trim(),
       memo: String(item.memo || '').trim(),
-      path: String(item.path || item.id || '').trim(),
+      githubUser: normalizeGithubUser(item.githubUser || ''),
+      path: path.isAbsolute(String(item.path || item.id || '').trim())
+        ? String(item.path || item.id || '').trim()
+        : path.join('/', String(item.path || item.id || '').trim()),
       createdAt: Number(item.createdAt || 0) || 0,
       updatedAt: Number(item.updatedAt || item.createdAt || 0) || 0,
     })).filter((item) => item.path);
@@ -429,6 +1676,70 @@ function writeSshKeyRegistry(records) {
   const list = Array.isArray(records) ? records.slice() : [];
   fs.writeFileSync(SSH_KEYS_FILE, `${JSON.stringify(list, null, 2)}\n`);
   fs.chmodSync(SSH_KEYS_FILE, 0o600);
+}
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function syncGithubSshConfig() {
+  const keys = readSshKeys()
+    .filter((key) => normalizeGithubUser(key.githubUser) && key.path && key.publicPath)
+    .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0));
+  const selected = new Map();
+
+  for (const key of keys) {
+    const user = normalizeGithubUser(key.githubUser);
+    if (!user || selected.has(user)) continue;
+    selected.set(user, key);
+  }
+
+  const entries = Array.from(selected.entries())
+    .map(([user, key]) => ({
+      githubUser: user,
+      host: githubSshHostForUser(user),
+      path: key.path,
+    }))
+    .filter((entry) => entry.host && entry.path)
+    .sort((a, b) => a.host.localeCompare(b.host));
+
+  const block = entries.length
+    ? [
+        SSH_CONFIG_BEGIN,
+        ...entries.flatMap((entry) => [
+          `Host ${entry.host}`,
+          '  HostName github.com',
+          '  User git',
+          '  IdentitiesOnly yes',
+          `  IdentityFile ${entry.path}`,
+        ]),
+        SSH_CONFIG_END,
+        '',
+      ].join('\n')
+    : '';
+
+  const existing = fs.existsSync(SSH_CONFIG_FILE) ? fs.readFileSync(SSH_CONFIG_FILE, 'utf8') : '';
+  const blockPattern = new RegExp(
+    `${escapeRegExp(SSH_CONFIG_BEGIN)}[\\s\\S]*?${escapeRegExp(SSH_CONFIG_END)}\\n?`,
+    'm',
+  );
+  const preserved = String(existing || '').replace(blockPattern, '').replace(/\n{3,}$/g, '\n\n').trimEnd();
+
+  if (!block.trim()) {
+    if (preserved) {
+      fs.mkdirSync(path.dirname(SSH_CONFIG_FILE), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(SSH_CONFIG_FILE, `${preserved}\n`);
+      fs.chmodSync(SSH_CONFIG_FILE, 0o600);
+    } else if (fs.existsSync(SSH_CONFIG_FILE)) {
+      fs.unlinkSync(SSH_CONFIG_FILE);
+    }
+    return;
+  }
+
+  const next = `${preserved ? `${preserved}\n\n` : ''}${block}`;
+  fs.mkdirSync(path.dirname(SSH_CONFIG_FILE), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(SSH_CONFIG_FILE, next);
+  fs.chmodSync(SSH_CONFIG_FILE, 0o600);
 }
 
 function normalizeSshKeyName(name) {
@@ -502,6 +1813,8 @@ function readSshKeys() {
       id: item.path,
       name: reg.name || item.name,
       memo: reg.memo || '',
+      githubUser: normalizeGithubUser(reg.githubUser || ''),
+      githubHost: githubSshHostForUser(reg.githubUser || ''),
       path: item.path,
       publicPath: item.publicPath,
       publicKey,
@@ -517,6 +1830,8 @@ function saveSshKeyMemo(payload) {
   if (!pathId) throw new Error('Missing SSH key id');
   const memo = String(payload?.memo || '').trim();
   const name = String(payload?.name || '').trim();
+  const hasGithubUser = Object.prototype.hasOwnProperty.call(payload || {}, 'githubUser');
+  const githubUser = hasGithubUser ? normalizeGithubUser(payload?.githubUser || '') : undefined;
   const records = readSshKeyRegistry();
   const existingIndex = records.findIndex((item) => item.path === pathId);
   const existing = existingIndex >= 0 ? records[existingIndex] : {};
@@ -525,12 +1840,14 @@ function saveSshKeyMemo(payload) {
     path: pathId,
     name: name || existing.name || path.basename(pathId),
     memo,
+    githubUser: hasGithubUser ? githubUser : normalizeGithubUser(existing.githubUser || ''),
     createdAt: existing.createdAt || Date.now(),
     updatedAt: Date.now(),
   };
   if (existingIndex >= 0) records[existingIndex] = next;
   else records.push(next);
   writeSshKeyRegistry(records);
+  syncGithubSshConfig();
   return next;
 }
 
@@ -538,6 +1855,7 @@ function createSshKey(payload) {
   ensureSshKeysDir();
   const rawName = normalizeSshKeyName(payload?.name || 'github-key') || 'github-key';
   const memo = String(payload?.memo || '').trim();
+  const githubUser = normalizeGithubUser(payload?.githubUser || '');
   const comment = memo || rawName;
   let base = path.join(SSH_KEYS_DIR, rawName);
   let keyPath = base;
@@ -554,12 +1872,14 @@ function createSshKey(payload) {
     path: keyPath,
     name: path.basename(keyPath),
     memo,
+    githubUser,
     createdAt: stat.birthtimeMs || stat.mtimeMs || Date.now(),
     updatedAt: stat.mtimeMs || Date.now(),
   };
   const records = readSshKeyRegistry();
   records.push(record);
   writeSshKeyRegistry(records);
+  syncGithubSshConfig();
   return {
     ...record,
     publicPath: `${keyPath}.pub`,
@@ -574,6 +1894,7 @@ function deleteSshKey(keyId) {
   const records = readSshKeyRegistry();
   const nextRecords = records.filter((item) => String(item.path) !== id);
   writeSshKeyRegistry(nextRecords);
+  syncGithubSshConfig();
 
   try { fs.rmSync(id, { force: true }); } catch {}
   try { fs.rmSync(`${id}.pub`, { force: true }); } catch {}
@@ -594,6 +1915,7 @@ function createSshKeysZip() {
     id: key.id,
     name: key.name || path.basename(key.path || `key-${index}`),
     memo: key.memo || '',
+    githubUser: key.githubUser || '',
     path: key.path || '',
     publicPath: key.publicPath || '',
     archiveBase: safeArchiveName(key.name || path.basename(key.path || `key-${index}`), `ssh-key-${index + 1}`),
@@ -693,6 +2015,7 @@ print(extract_dir)
       path: destBase,
       name: String(item.name || path.basename(destBase)),
       memo: String(item.memo || ''),
+      githubUser: normalizeGithubUser(item.githubUser || ''),
       createdAt: Number(item.createdAt || stat.birthtimeMs || stat.mtimeMs || Date.now()) || Date.now(),
       updatedAt: Number(item.updatedAt || stat.mtimeMs || Date.now()) || Date.now(),
     });
@@ -702,13 +2025,15 @@ print(extract_dir)
     const merged = readSshKeyRegistry().filter((item) => !String(item.path || '').startsWith(SSH_KEYS_DIR));
     merged.push(...imported);
     writeSshKeyRegistry(merged);
+    syncGithubSshConfig();
   }
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
   return imported.length;
 }
 
-function normalizeDbMachine(input, existing = {}) {
+function normalizeDbMachine(input, existing = {}, options = {}) {
+  const allowMissingRootCredentials = Boolean(options.allowMissingRootCredentials);
   const name = String(input?.name || input?.label || existing.name || '').trim();
   const host = String(input?.host || existing.host || '').trim();
   const rootUser = String(input?.rootUser || input?.user || existing.rootUser || '').trim();
@@ -718,7 +2043,7 @@ function normalizeDbMachine(input, existing = {}) {
 
   if (!name) throw new Error('DB machine name is required');
   if (!host) throw new Error('DB machine host is required');
-  if (!rootUser) throw new Error('DB root user is required');
+  if (!allowMissingRootCredentials && !rootUser) throw new Error('DB root user is required');
   if (!/^[A-Za-z0-9._:-]+$/.test(host)) throw new Error(`Invalid DB machine host: ${host}`);
   if (!/^[0-9]+$/.test(port)) {
     port = '3306';
@@ -727,7 +2052,7 @@ function normalizeDbMachine(input, existing = {}) {
   if (!Number.isFinite(portNum) || portNum < 1 || portNum > 65535) {
     throw new Error(`Invalid DB port: ${port}`);
   }
-  if (!rootPassword && !['localhost', '127.0.0.1', '::1'].includes(host)) {
+  if (!allowMissingRootCredentials && !rootPassword && !['localhost', '127.0.0.1', '::1'].includes(host)) {
     throw new Error('DB root password is required');
   }
 
@@ -781,7 +2106,12 @@ function runPython(script, args = []) {
 function createEnvZip(projectPath) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vps-env-'));
   const zipPath = path.join(tmpDir, 'project-env.zip');
-  const filesJson = JSON.stringify(ENV_CANDIDATES);
+  const filesJson = JSON.stringify([
+    ...ENV_CANDIDATES,
+    ...ENV_CANDIDATES.map((name) => path.join('server', name)),
+    ...ENV_CANDIDATES.map((name) => path.join('client', name)),
+    ...ENV_CANDIDATES.map((name) => path.join('dashboard', name)),
+  ]);
   runPython(
     `
 import json, os, sys, zipfile
@@ -808,7 +2138,12 @@ function replaceEnvZip(projectPath, zipBuffer) {
   const extractDir = path.join(tmpDir, 'extract');
   fs.writeFileSync(zipPath, zipBuffer);
   fs.mkdirSync(extractDir, { recursive: true });
-  const filesJson = JSON.stringify(ENV_CANDIDATES);
+  const filesJson = JSON.stringify([
+    ...ENV_CANDIDATES,
+    ...ENV_CANDIDATES.map((name) => path.join('server', name)),
+    ...ENV_CANDIDATES.map((name) => path.join('client', name)),
+    ...ENV_CANDIDATES.map((name) => path.join('dashboard', name)),
+  ]);
   runPython(
     `
 import json, os, pathlib, sys, zipfile
@@ -820,10 +2155,12 @@ with zipfile.ZipFile(zip_path) as zf:
         name = info.filename.replace('\\\\', '/')
         if not name or name.endswith('/'):
             continue
-        if '/' in name or '\\\\' in name:
-            raise SystemExit(f'Invalid zip entry: {name}')
         if name not in allowed:
             continue
+        target = pathlib.Path(extract_dir, name).resolve()
+        root = pathlib.Path(extract_dir).resolve()
+        if root != target and root not in target.parents:
+            raise SystemExit(f'Invalid zip entry: {name}')
         zf.extract(info, extract_dir)
 print(extract_dir)
 `,
@@ -836,12 +2173,29 @@ print(extract_dir)
       fs.rmSync(target, { force: true });
     }
   }
+  for (const parent of ['server', 'client', 'dashboard']) {
+    for (const name of ENV_CANDIDATES) {
+      const target = path.join(projectPath, parent, name);
+      if (fs.existsSync(target)) {
+        fs.rmSync(target, { force: true });
+      }
+    }
+  }
 
   for (const name of ENV_CANDIDATES) {
     const source = path.join(extractDir, name);
     if (!fs.existsSync(source)) continue;
     fs.copyFileSync(source, path.join(projectPath, name));
     fs.chmodSync(path.join(projectPath, name), 0o600);
+  }
+  for (const parent of ['server', 'client', 'dashboard']) {
+    for (const name of ENV_CANDIDATES) {
+      const source = path.join(extractDir, parent, name);
+      if (!fs.existsSync(source)) continue;
+      fs.mkdirSync(path.join(projectPath, parent), { recursive: true });
+      fs.copyFileSync(source, path.join(projectPath, parent, name));
+      fs.chmodSync(path.join(projectPath, parent, name), 0o600);
+    }
   }
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -867,27 +2221,61 @@ function projectView() {
   return readProjects().map((project) => {
     const proc = byName.get(project.PM2_NAME || project.PROJECT_SLUG);
     const env = proc?.pm2_env || {};
+    const projectEnv = project.APP_DIR ? pickEnvDetails(project.APP_DIR) : { env: {} };
     const { db } = pickDbDetails(project.APP_DIR || '');
+    const projectMachineContext = resolveProjectMysqlMachine(project, project.APP_DIR || '');
+    const projectMachine = projectMachineContext.machine || null;
+    const projectMachineLabel = projectMachine
+      ? describeDbMachine(projectMachine)
+      : (project.DB_MACHINE_ID === CUSTOM_DB_MACHINE_ID ? (project.DB_MACHINE_NAME || 'Custom / manual DB machine') : (project.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID));
     const disk = readProjectDiskUsage(project.APP_DIR || '');
+    const fsUsage = readProjectFilesystemUsage(project.APP_DIR || '');
+    const gitInfo = readProjectGitInfo(project.APP_DIR || '');
     const ssl = readProjectSslStatus(project);
+    const domainBindings = parseProjectDomainBindings(project);
+    const aliasBindings = domainBindings.filter((item) => !item.primary);
+    const lastBuildMode = String(project.LAST_BUILD_MODE || '').trim();
+    const lastBuildStatus = String(project.LAST_BUILD_STATUS || '').trim();
+    const lastBuildAt = String(project.LAST_BUILD_AT || '').trim();
     return {
-      repo: project.REPO_REF || '',
+      ref: project.ref || project.PROJECT_SLUG || '',
+      repo: project.repo || project.REPO_REF || '',
       slug: project.PROJECT_SLUG || '',
       path: project.APP_DIR || '',
       pm2: project.PM2_NAME || '',
       port: project.APP_PORT || '',
       domain: project.APP_DOMAIN || '',
+      domainBindings,
+      aliasBindings,
+      domainCount: domainBindings.length,
       branch: project.BRANCH || '',
       https: project.APP_HTTPS || '',
       kind: project.START_KIND || '',
+      runtime: project.DEPLOY_RUNTIME || 'auto',
       type: project.APP_TYPE || '',
       packageManager: project.PACKAGE_MANAGER || '',
+      vpnProfile: project.VPN_PROFILE || project.VPN_PROFILE_NAME || project.VPN_EGRESS_PROFILE || projectEnv.env.VPN_PROFILE || projectEnv.env.VPN_PROFILE_NAME || projectEnv.env.VPN_EGRESS_PROFILE || '',
+      duplicate: Boolean(project.duplicate),
+      duplicateSourceRepoRef: project.duplicateSourceRepoRef || '',
+      duplicateEnvMode: project.duplicateEnvMode || '',
+      duplicateDbMode: project.duplicateDbMode || '',
       mysqlAllowedIps: project.MYSQL_ALLOWED_IPS || '',
       dbMachineId: project.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID,
+      dbMachineLabel: projectMachineLabel,
+      dbMachineHost: projectMachine?.originHost || projectMachine?.host || '',
+      dbMachineRootUser: projectMachine?.rootUser || '',
+      dbMachineRootPassword: projectMachine?.rootPassword || '',
+      dbMachineNotes: projectMachine?.notes || '',
+      dbMachineMode: projectMachineContext.isCustom ? 'custom' : 'global',
       sshUser: project.SSH_UPLOAD_USER || '',
       sshPassword: project.SSH_UPLOAD_PASSWORD || '',
       disk,
       diskHuman: formatBytes(disk),
+      filesystemTotal: fsUsage.total,
+      filesystemUsed: fsUsage.used,
+      filesystemFree: fsUsage.free,
+      filesystemPercent: fsUsage.percent,
+      filesystemMount: fsUsage.mount,
       dbName: db.DB_NAME || db.DB_DATABASE || db.MYSQL_DATABASE || db.POSTGRES_DB || '',
       dbUser: db.DB_USER || db.MYSQL_USER || db.POSTGRES_USER || '',
       dbPassword: db.DB_PASSWORD || db.MYSQL_PASSWORD || db.POSTGRES_PASSWORD || '',
@@ -895,6 +2283,7 @@ function projectView() {
       sslActive: ssl.active,
       sslStatus: ssl.label,
       sslStatusClass: ssl.className,
+      sslSource: ssl.source || 'missing',
       status: env.status || 'stopped',
       restarts: env.restart_time ?? proc?.pm2_env?.restart_time ?? 0,
       uptime: proc?.pm2_env?.pm_uptime || 0,
@@ -904,7 +2293,19 @@ function projectView() {
       nodeEnv: env.node_env || '',
       memory: proc?.monit?.memory ?? proc?.pm2_env?.monit?.memory ?? 0,
       cpu: proc?.monit?.cpu ?? proc?.pm2_env?.monit?.cpu ?? 0,
+      gitCommit: gitInfo.commit || '',
+      gitCommitShort: gitInfo.commitShort || '',
+      gitCommitDate: gitInfo.commitDate || '',
+      lastBuildMode,
+      lastBuildStatus,
+      lastBuildAt,
+      lastBuildDate: lastBuildAt ? new Date(lastBuildAt).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }) : '',
+      lastUsedAtMs: Number(project.metaMtimeMs || 0) || 0,
     };
+  }).sort((a, b) => {
+    const lastUsedDiff = Number(b.lastUsedAtMs || 0) - Number(a.lastUsedAtMs || 0);
+    if (lastUsedDiff) return lastUsedDiff;
+    return String(a.domain || a.slug || a.repo || '').localeCompare(String(b.domain || b.slug || b.repo || ''));
   });
 }
 
@@ -959,8 +2360,8 @@ function renderVaultPage() {
     .muted { color: #94a3b8; }
     .panel { background: rgba(8, 15, 29, 0.88); border: 1px solid rgba(148,163,184,0.2); border-radius: 18px; padding: 20px; box-shadow: 0 12px 40px rgba(0,0,0,0.35); }
     .table-wrap { overflow: auto; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; vertical-align: top; padding: 10px; border-bottom: 1px solid rgba(148,163,184,0.16); }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th, td { text-align: left; vertical-align: top; padding: 10px; border-bottom: 1px solid rgba(148,163,184,0.16); overflow-wrap: anywhere; word-break: break-word; }
     th { color: #93c5fd; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
     code { background: #0b1220; padding: 2px 6px; border-radius: 6px; }
     .actions { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -1191,11 +2592,14 @@ function renderDbMachineRows(machines) {
   }).join('');
 }
 
-function renderDbMachineOptions(machines, selectedId = LOCAL_DB_MACHINE_ID) {
+function renderDbMachineOptions(machines, selectedId = LOCAL_DB_MACHINE_ID, includeCustom = false) {
   const list = Array.isArray(machines) && machines.length ? machines : [{ ...LOCAL_DB_MACHINE }];
-  return list.map((machine) => {
+  const items = includeCustom
+    ? [{ id: CUSTOM_DB_MACHINE_ID, name: 'Custom / manual DB machine', host: '', notes: 'Saved per project only' }, ...list]
+    : list;
+  return items.map((machine) => {
     const id = String(machine.id || '');
-    const label = `${machine.name || id}${machine.host ? ` · ${machine.host}` : ''}`;
+    const label = describeDbMachine(machine);
     return `<option value="${escapeHtml(id)}"${id === String(selectedId || '') ? ' selected' : ''}>${escapeHtml(label)}</option>`;
   }).join('');
 }
@@ -1377,7 +2781,7 @@ function renderDbMachinesPage() {
     }
 
     async function api(path, options = {}) {
-      const res = await fetch(\`\${API}\${path}\`, {
+      const res = await fetch(API + path, {
         headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
         credentials: 'same-origin',
         ...options,
@@ -1387,7 +2791,7 @@ function renderDbMachinesPage() {
       try { data = text ? JSON.parse(text) : null; } catch { data = text; }
       if (!res.ok) {
         const message = data && typeof data === 'object' ? (data.error || data.message || text) : text;
-        throw new Error(message || \`Request failed: \${res.status}\`);
+        throw new Error(message || 'Request failed: ' + res.status);
       }
       return data;
     }
@@ -1532,7 +2936,7 @@ function renderDbMachinesPage() {
 
 function renderSshKeyRows(keys) {
   if (!keys.length) {
-    return '<tr><td colspan="6" class="muted">No SSH keys found on this machine.</td></tr>';
+    return '<tr><td colspan="7" class="muted">No SSH keys found on this machine.</td></tr>';
   }
   return keys.map((key) => {
     const ref = escapeHtml(key.id || '');
@@ -1544,13 +2948,17 @@ function renderSshKeyRows(keys) {
         <td>
           <textarea data-key-memo="${ref}" rows="3" placeholder="Memo for this key">${escapeHtml(key.memo || '')}</textarea>
         </td>
+        <td>
+          <input data-key-github-user="${ref}" value="${escapeHtml(key.githubUser || '')}" placeholder="shaykid">
+          <div class="small muted" style="margin-top:6px">SSH host: <code>${escapeHtml(key.githubHost || 'github.com')}</code></div>
+        </td>
         <td><code>${escapeHtml(key.path || '')}</code></td>
         <td><code>${escapeHtml(key.fingerprint || 'n/a')}</code></td>
         <td><code class="public-key">${escapeHtml(key.publicKey || '')}</code></td>
         <td>
           <div class="actions">
             <button class="secondary" type="button" data-key-copy="${ref}">Copy public</button>
-            <button class="secondary" type="button" data-key-save="${ref}">Save memo</button>
+            <button class="secondary" type="button" data-key-save="${ref}">Save key</button>
             <button class="danger" type="button" data-key-delete="${ref}">Delete</button>
           </div>
         </td>
@@ -1654,6 +3062,9 @@ function renderSshKeysPage() {
         <label>Memo
           <input id="keyMemo" placeholder="GitHub account or project note">
         </label>
+        <label>GitHub user
+          <input id="keyGithubUser" placeholder="shaykid">
+        </label>
       </div>
       <div class="top-actions">
         <button id="createBtn" type="button">Create key</button>
@@ -1675,6 +3086,7 @@ function renderSshKeysPage() {
             <tr>
               <th>Name</th>
               <th>Memo</th>
+              <th>GitHub user</th>
               <th>Path</th>
               <th>Fingerprint</th>
               <th>Public key</th>
@@ -1694,6 +3106,7 @@ function renderSshKeysPage() {
     const createResult = document.getElementById('createResult');
     const keyName = document.getElementById('keyName');
     const keyMemo = document.getElementById('keyMemo');
+    const keyGithubUser = document.getElementById('keyGithubUser');
     const createBtn = document.getElementById('createBtn');
     const importBtn = document.getElementById('importBtn');
     const importFile = document.getElementById('importFile');
@@ -1739,18 +3152,22 @@ function renderSshKeysPage() {
             <td>
               <textarea data-key-memo="\${escapeHtml(key.id || '')}" rows="3">\${escapeHtml(key.memo || '')}</textarea>
             </td>
+            <td>
+              <input data-key-github-user="\${escapeHtml(key.id || '')}" value="\${escapeHtml(key.githubUser || '')}" placeholder="shaykid">
+              <div class="small muted" style="margin-top:6px">SSH host: <code>\${escapeHtml(key.githubHost || 'github.com')}</code></div>
+            </td>
             <td><code>\${escapeHtml(key.path || '')}</code></td>
             <td><code>\${escapeHtml(key.fingerprint || 'n/a')}</code></td>
             <td><code class="public-key">\${escapeHtml(key.publicKey || '')}</code></td>
             <td>
               <div class="actions">
                 <button class="secondary" data-key-copy="\${escapeHtml(key.id || '')}" type="button">Copy public</button>
-                <button class="secondary" data-key-save="\${escapeHtml(key.id || '')}" type="button">Save memo</button>
+                <button class="secondary" data-key-save="\${escapeHtml(key.id || '')}" type="button">Save key</button>
               </div>
             </td>
           </tr>
         \`).join('')
-        : '<tr><td colspan="6" class="muted">No SSH keys found on this machine.</td></tr>';
+        : '<tr><td colspan="7" class="muted">No SSH keys found on this machine.</td></tr>';
     }
 
     async function refresh() {
@@ -1763,6 +3180,7 @@ function renderSshKeysPage() {
       const payload = {
         name: keyName.value.trim(),
         memo: keyMemo.value.trim(),
+        githubUser: keyGithubUser.value.trim(),
       };
       const res = await api('/ssh-keys', {
         method: 'POST',
@@ -1772,6 +3190,7 @@ function renderSshKeysPage() {
       await refresh();
       keyName.value = '';
       keyMemo.value = '';
+      keyGithubUser.value = '';
     }
 
     async function importKeys() {
@@ -1812,13 +3231,15 @@ function renderSshKeysPage() {
         if (!key) return;
         const memoField = keysBody.querySelector(\`[data-key-memo="\${CSS.escape(String(key.id || ''))}"]\`);
         const nameField = keysBody.querySelector(\`[data-key-name="\${CSS.escape(String(key.id || ''))}"]\`);
+        const githubUserField = keysBody.querySelector(\`[data-key-github-user="\${CSS.escape(String(key.id || ''))}"]\`);
         const memo = memoField ? memoField.value : '';
         const name = nameField ? nameField.value : '';
+        const githubUser = githubUserField ? githubUserField.value : '';
         const res = await api(\`/ssh-keys/\${encodeURIComponent(key.id)}\`, {
           method: 'POST',
-          body: JSON.stringify({ memo, name }),
+          body: JSON.stringify({ memo, name, githubUser }),
         });
-        showMessage(listResult, res.message || 'Memo saved');
+        showMessage(listResult, res.message || 'SSH key saved');
         await refresh();
         return;
       }
@@ -1885,6 +3306,21 @@ function runProjectCtl(args, input = null) {
   return (res.stdout || '').trim();
 }
 
+function runSyncScript(scriptName) {
+  const scriptPath = scriptName === 'server'
+    ? '/usr/local/bin/system-sync.sh'
+    : '/usr/local/bin/app-sync.sh';
+  const res = spawnSync('bash', [scriptPath], {
+    encoding: 'utf8',
+    maxBuffer: 20 * 1024 * 1024,
+  });
+  if (res.error) throw res.error;
+  if (res.status !== 0) {
+    throw new Error((res.stderr || res.stdout || `${scriptPath} failed`).trim());
+  }
+  return (res.stdout || '').trim();
+}
+
 function streamProjectCtl(res, args, extraEnv = {}) {
   const child = spawn(PROJECTCTL, args, {
     cwd: '/',
@@ -1938,12 +3374,149 @@ function formatBytes(bytes) {
   return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
 }
 
+function fmtTime(ms) {
+  if (!ms) return 'n/a';
+  const diff = Date.now() - Number(ms);
+  if (!Number.isFinite(diff) || diff < 0) return 'n/a';
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hrs = Math.floor(min / 60);
+  if (hrs < 24) return `${hrs}h`;
+  return `${Math.floor(hrs / 24)}d`;
+}
+
+function projectStatusClass(status) {
+  const value = String(status || '').toLowerCase();
+  if (value.includes('online')) return 'status-online';
+  if (value.includes('launch')) return 'status-launching';
+  if (value.includes('error')) return 'status-errored';
+  return 'status-stopped';
+}
+
+function renderProjectActions(project) {
+  const ref = encodeURIComponent(project.ref || project.slug || project.repo || '');
+  const passwordRef = escapeHtml(ref);
+  return `
+        <div class="actions">
+          ${project.domain ? '<a class="btn ghost" href="https://' + escapeHtml(project.domain) + '/" target="_blank" rel="noreferrer">Open</a>' : ''}
+          <a class="btn ghost" href="/manage/tls/?ref=${escapeHtml(ref)}">SSL</a>
+          <button class="secondary" data-action="duplicate" data-ref="${escapeHtml(ref)}">Duplicate</button>
+          <button class="secondary" data-action="update" data-ref="${escapeHtml(ref)}">Pull</button>
+          <button class="secondary" data-action="restart" data-ref="${escapeHtml(ref)}">Restart</button>
+          <button class="secondary" data-action="stop" data-ref="${escapeHtml(ref)}">Stop</button>
+          <button class="danger" data-action="uninstall" data-ref="${escapeHtml(ref)}">Kill</button>
+          <button class="secondary" data-action="db" data-ref="${escapeHtml(ref)}">DB</button>
+          <button class="secondary" data-action="mysql" data-ref="${escapeHtml(ref)}">MySQL</button>
+          <button class="secondary" data-action="ssh" data-ref="${escapeHtml(ref)}">SSH</button>
+          <button class="secondary" data-action="env" data-ref="${escapeHtml(ref)}">Env</button>
+          <button class="secondary" data-action="env-backup" data-ref="${escapeHtml(ref)}">Backup</button>
+          <button class="danger" data-action="env-restore" data-ref="${escapeHtml(ref)}">Restore</button>
+          <button class="secondary" data-action="scripts" data-ref="${escapeHtml(ref)}">Scripts</button>
+          <button class="secondary" data-action="log" data-ref="${escapeHtml(ref)}">Log</button>
+          <span class="pill">${project.protected ? 'protected' : 'open'}</span>
+        </div>
+        <div class="space"></div>
+        <div class="stack">
+          <input data-password-for="${passwordRef}" type="password" placeholder="Project password">
+          <div class="actions">
+            <button class="secondary" data-action="protect" data-ref="${escapeHtml(ref)}">Set password</button>
+            <button class="ghost" data-action="clear-password" data-ref="${escapeHtml(ref)}">Clear password</button>
+          </div>
+        </div>
+  `;
+}
+
+function renderProjectRows(projects) {
+  if (!Array.isArray(projects) || !projects.length) {
+    return '<tr><td colspan="11" class="muted">No projects found.</td></tr>';
+  }
+  return projects.map((project) => `
+        <tr>
+          <td>
+            <div><strong>${escapeHtml(project.repo || project.slug || '')}</strong>${project.duplicate ? ' <span class="pill warn">duplicate</span>' : ''}</div>
+            <div class="small">${escapeHtml(project.path || '')}</div>
+            <div class="small">version: ${escapeHtml(project.gitCommitShort || 'n/a')} · ${escapeHtml(project.gitCommitDate ? new Date(project.gitCommitDate).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }) : 'n/a')}</div>
+            ${project.duplicateSourceRepoRef ? '<div class="small">source: <code>' + escapeHtml(project.duplicateSourceRepoRef) + '</code></div>' : ''}
+            <div class="small">build: ${escapeHtml(project.lastBuildMode ? `${project.lastBuildMode} · ${project.lastBuildStatus || 'unknown'} · ${project.lastBuildDate || 'n/a'}` : 'n/a')}</div>
+          </td>
+          <td>
+            <div>${project.domain ? `<a href="https://${escapeHtml(project.domain)}/" target="_blank" rel="noreferrer">${escapeHtml(project.domain)}</a>` : '<span class="muted">n/a</span>'}</div>
+            <div class="small">${project.https === 'yes' ? 'HTTPS' : 'HTTP only'} · <span class="pill ${escapeHtml(project.sslStatusClass || 'neutral')}">${escapeHtml(project.sslStatus || 'n/a')}</span></div>
+            <div class="small">runtime: <code>${escapeHtml(project.runtime || 'auto')}</code></div>
+            <div class="small">vpn: <code>${escapeHtml(project.vpnProfile || 'none')}</code></div>
+          </td>
+          <td>
+            <div><code>${escapeHtml(project.pm2 || '')}</code></div>
+            <div class="small">${escapeHtml(project.scriptPath || '')}</div>
+          </td>
+          <td>${escapeHtml(project.port || '')}</td>
+          <td>${escapeHtml(formatBytes(project.memory || 0))}</td>
+          <td>
+            <div>${escapeHtml(project.diskHuman || formatBytes(project.disk || 0))}</div>
+            <div class="small">${escapeHtml(project.filesystemUsed ? `${formatBytes(project.filesystemUsed)} / ${formatBytes(project.filesystemTotal || 0)}` : 'n/a')}</div>
+          </td>
+          <td><span class="${projectStatusClass(project.status)}">${escapeHtml(project.status || '')}</span></td>
+          <td>${project.protected ? 'yes' : 'no'}</td>
+          <td><span class="pill ${escapeHtml(project.sslStatusClass || 'neutral')}">${escapeHtml(project.sslStatus || 'n/a')}</span></td>
+          <td>${escapeHtml(project.branch || '')}</td>
+          <td class="small">
+            kind: ${escapeHtml(project.kind || '')}<br>
+            runtime: ${escapeHtml(project.runtime || 'auto')}<br>
+            vpn: ${escapeHtml(project.vpnProfile || 'none')}<br>
+            type: ${escapeHtml(project.type || '')}<br>
+            pm: ${escapeHtml(project.packageManager || '')}<br>
+            restarts: ${escapeHtml(String(project.restarts ?? 0))}<br>
+            uptime: ${escapeHtml(fmtTime(project.uptime))}<br>
+            env: ${escapeHtml(project.nodeEnv || '')}<br>
+            cpu load: ${escapeHtml(Number(project.cpu || 0).toFixed(1))}%<br>
+            ram: ${escapeHtml(project.memory ? formatBytes(project.memory) : '0 B')}<br>
+            disk: ${escapeHtml(project.filesystemUsed ? `${formatBytes(project.filesystemUsed)} / ${formatBytes(project.filesystemTotal || 0)}` : (project.diskHuman || formatBytes(project.disk || 0)))}<br>
+            mount: ${escapeHtml(project.filesystemMount || 'n/a')}<br>
+            last commit: ${escapeHtml(project.gitCommitShort || 'n/a')}<br>
+            committed at: ${escapeHtml(project.gitCommitDate ? new Date(project.gitCommitDate).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }) : 'n/a')}<br>
+            last build: ${escapeHtml(project.lastBuildMode ? `${project.lastBuildMode} · ${project.lastBuildStatus || 'unknown'}` : 'n/a')}<br>
+            build at: ${escapeHtml(project.lastBuildDate || 'n/a')}<br>
+            ssh: ${escapeHtml(project.sshUser || 'n/a')}<br>
+            mysql ips: ${escapeHtml(project.mysqlAllowedIps || 'local only')}
+          </td>
+        </tr>
+        <tr class="project-actions-row">
+          <td colspan="11">${renderProjectActions(project)}</td>
+        </tr>
+  `).join('');
+}
+
 function getSystemStats() {
   const load = os.loadavg();
   const cores = Math.max(1, os.cpus().length);
   const total = os.totalmem();
   const free = os.freemem();
   const used = total - free;
+  let diskTotal = 0;
+  let diskUsed = 0;
+  let diskFree = 0;
+  let diskPercent = 0;
+  let diskMount = '/';
+  try {
+    const df = execFileSync('df', ['-B1', '--output=size,used,avail,pcent,target', '/'], { encoding: 'utf8' })
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean);
+    if (df.length >= 2) {
+      const parts = df[df.length - 1].trim().split(/\s+/);
+      if (parts.length >= 5) {
+        diskTotal = Number(parts[0]) || 0;
+        diskUsed = Number(parts[1]) || 0;
+        diskFree = Number(parts[2]) || 0;
+        diskPercent = Number(String(parts[3]).replace('%', '')) || 0;
+        diskMount = parts[4] || '/';
+      }
+    }
+  } catch {
+    // Ignore disk stat failures.
+  }
   return {
     load1: load[0],
     load5: load[1],
@@ -1954,6 +3527,11 @@ function getSystemStats() {
     memoryFree: free,
     memoryUsed: used,
     memoryPercent: (used / total) * 100,
+    diskTotal,
+    diskUsed,
+    diskFree,
+    diskPercent,
+    diskMount,
     uptimeSeconds: os.uptime(),
   };
 }
@@ -2022,9 +3600,1443 @@ function escapeHtml(value) {
     .replace(/"/g, '&quot;');
 }
 
-function renderPage() {
+function renderPortalPage() {
+  const projects = projectView();
   const dbMachines = readDbMachines();
-  const dbMachineOptions = renderDbMachineOptions(dbMachines, LOCAL_DB_MACHINE_ID);
+  const sshKeys = readSshKeys();
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MultiDev Portal</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font-family: Inter, system-ui, sans-serif; background: radial-gradient(circle at top, #11213d 0, #08111f 50%, #05070c 100%); color: #e5eef8; padding-top: 84px; }
+    header, main { max-width: 1200px; margin: 0 auto; padding: 24px; }
+    header { display: flex; justify-content: space-between; align-items: end; gap: 16px; }
+    h1, h2 { margin: 0 0 12px; }
+    .muted { color: #94a3b8; }
+    .small { font-size: 12px; color: #94a3b8; }
+    .grid { display: grid; gap: 16px; }
+    .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .card {
+      display: grid;
+      gap: 10px;
+      padding: 18px;
+      border-radius: 18px;
+      border: 1px solid rgba(148,163,184,0.18);
+      background: linear-gradient(180deg, rgba(11,18,32,0.92), rgba(8,15,29,0.92));
+      text-decoration: none;
+      color: inherit;
+      min-height: 160px;
+    }
+    .card:hover { border-color: rgba(96,165,250,0.5); transform: translateY(-1px); }
+    .card-title { font-size: 22px; font-weight: 800; margin: 0; }
+    .card-desc { color: #cbd5e1; line-height: 1.5; }
+    .card-meta { color: #93c5fd; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+    .top-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .btn {
+      background: linear-gradient(180deg, #38bdf8, #0ea5e9);
+      color: #00111d;
+      border: 0;
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .btn.ghost { background: transparent; color: #dbeafe; border: 1px solid #2a3b59; }
+    .hinbit-brand {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      z-index: 80;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(8, 15, 29, 0.82);
+      border: 1px solid rgba(148,163,184,0.22);
+      box-shadow: 0 12px 32px rgba(0,0,0,0.25);
+      text-decoration: none;
+      color: #e5eef8;
+      backdrop-filter: blur(12px);
+    }
+    .hinbit-brand img { width: 22px; height: 22px; display: block; object-fit: contain; }
+    .hinbit-brand span { font-size: 12px; font-weight: 700; letter-spacing: 0.02em; white-space: nowrap; }
+    @media (max-width: 860px) {
+      .cards { grid-template-columns: 1fr; }
+      header { align-items: start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <a class="hinbit-brand" href="https://hinbit.com" target="_blank" rel="noreferrer">
+    <img src="https://hinbit.com/hebrew_site/hinbit-logo-symbol.png" alt="Hinbit">
+    <span>Powered by Hinbit Development</span>
+  </a>
+  <header>
+    <div>
+      <h1>MultiDev Portal</h1>
+      <div class="muted">Choose the area you want to manage.</div>
+      <div class="small">${escapeHtml(String(projects.length))} projects, ${escapeHtml(String(sshKeys.length))} SSH keys, ${escapeHtml(String(dbMachines.length))} DB machines</div>
+    </div>
+    <div class="top-actions">
+      <a class="btn ghost" href="/manage/">Projects</a>
+      <a class="btn ghost" href="/manage/tls/">Manage SSL</a>
+      <a class="btn ghost" href="/manage/proxy/">Proxy Service</a>
+      <a class="btn ghost" href="/manage/ssh-keys/">SSH Keys</a>
+      <a class="btn ghost" href="/manage/vault/">DB Vault</a>
+      <a class="btn ghost" href="/manage/db-machines/">DB Machines</a>
+      <a class="btn ghost" href="/manage/tls/">TLS / Certificates</a>
+    </div>
+  </header>
+  <main class="grid cards">
+    <a class="card" href="/manage/">
+      <div class="card-meta">Projects</div>
+      <h2 class="card-title">Manage Projects</h2>
+      <div class="card-desc">Install, update, restart, and inspect running projects, PM2 apps, logs, env files, and domain wiring.</div>
+    </a>
+    <a class="card" href="/manage/ssh-keys/">
+      <div class="card-meta">SSH</div>
+      <h2 class="card-title">Manage SSH Keys</h2>
+      <div class="card-desc">Create, export, import, and memoize server SSH keys for GitHub and deployment access.</div>
+    </a>
+    <a class="card" href="/manage/vault/">
+      <div class="card-meta">Database</div>
+      <h2 class="card-title">DB Vault</h2>
+      <div class="card-desc">View project database credentials with quick copy actions.</div>
+    </a>
+    <a class="card" href="/manage/db-machines/">
+      <div class="card-meta">Machines</div>
+      <h2 class="card-title">DB Machines</h2>
+      <div class="card-desc">Register and edit local or remote DB machines, root credentials, and allowed IPs.</div>
+    </a>
+    <a class="card" href="/manage/proxy/">
+      <div class="card-meta">Proxy</div>
+      <h2 class="card-title">Proxy Service</h2>
+      <div class="card-desc">Edit the VPS forward proxy settings, local bind address, auth, and CONNECT port allowlist.</div>
+    </a>
+    <a class="card" href="/manage/tls/">
+      <div class="card-meta">Security</div>
+      <h2 class="card-title">TLS / Certificates</h2>
+      <div class="card-desc">Upload server and project certificates, switch between custom certs and Let’s Encrypt, and keep nginx in sync.</div>
+    </a>
+    <a class="card" href="/phpmyadmin/">
+      <div class="card-meta">Database UI</div>
+      <h2 class="card-title">phpMyAdmin</h2>
+      <div class="card-desc">Open the MySQL admin UI for database inspection and maintenance.</div>
+    </a>
+    <a class="card" href="/manage/">
+      <div class="card-meta">Dashboard</div>
+      <h2 class="card-title">Project Dashboard</h2>
+      <div class="card-desc">Jump to the full project list and PM2 management screen.</div>
+    </a>
+  </main>
+</body>
+</html>`;
+}
+
+function renderProxyPage() {
+  const proxy = readProxyServiceStatus();
+  const initialProxy = JSON.stringify(proxy).replace(/</g, '\\u003c');
+  const statusClass = proxy.enabled ? (proxy.status?.active === 'active' ? 'good' : 'warn') : 'neutral';
+  const statusLabel = proxy.enabled
+    ? (proxy.status?.active === 'active' ? 'Proxy active' : 'Proxy enabled, not running')
+    : 'Proxy disabled';
+  const bypassList = Array.isArray(proxy.allow) && proxy.allow.length ? proxy.allow.join('\n') : '127.0.0.1\n::1';
+  const connectPorts = Array.isArray(proxy.connect_ports) && proxy.connect_ports.length ? proxy.connect_ports.join('\n') : '80\n443\n8443\n9443\n2053';
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Proxy Service</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font-family: Inter, system-ui, sans-serif; background: radial-gradient(circle at top, #11213d 0, #08111f 50%, #05070c 100%); color: #e5eef8; padding-top: 84px; }
+    header, main { max-width: 1200px; margin: 0 auto; padding: 24px; }
+    header { display: flex; justify-content: space-between; align-items: end; gap: 16px; }
+    h1, h2 { margin: 0 0 12px; }
+    .muted { color: #94a3b8; }
+    .small { font-size: 12px; color: #94a3b8; }
+    .grid { display: grid; gap: 16px; }
+    .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .panel { background: rgba(8, 15, 29, 0.88); border: 1px solid rgba(148,163,184,0.2); border-radius: 18px; padding: 20px; box-shadow: 0 12px 40px rgba(0,0,0,0.35); }
+    .stack { display: grid; gap: 12px; }
+    label { display: grid; gap: 6px; font-size: 13px; color: #cbd5e1; }
+    input, textarea, select { width: 100%; box-sizing: border-box; background: #0b1220; color: #e5eef8; border: 1px solid #22304a; border-radius: 10px; padding: 10px 12px; }
+    textarea { min-height: 100px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    button, .btn { background: linear-gradient(180deg, #38bdf8, #0ea5e9); color: #00111d; border: 0; border-radius: 999px; padding: 10px 14px; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+    button.secondary, .btn.secondary { background: #162033; color: #dbeafe; border: 1px solid #2a3b59; }
+    button.danger, .btn.danger { background: linear-gradient(180deg, #f87171, #ef4444); color: #1c0202; }
+    button.ghost, .btn.ghost { background: transparent; color: #dbeafe; border: 1px solid #2a3b59; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .pill { display: inline-flex; padding: 3px 8px; border-radius: 999px; background: #102338; border: 1px solid #23405f; font-size: 12px; }
+    .pill.good { background: #0f3a24; border-color: #14532d; color: #86efac; }
+    .pill.warn { background: #3f2d0c; border-color: #7c2d12; color: #fde68a; }
+    .pill.neutral { background: #1f2937; border-color: #334155; color: #cbd5e1; }
+    .flash { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #0b1220; border: 1px solid #22304a; white-space: pre-wrap; }
+    .hinbit-brand {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      z-index: 80;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(8, 15, 29, 0.82);
+      border: 1px solid rgba(148,163,184,0.22);
+      box-shadow: 0 12px 32px rgba(0,0,0,0.25);
+      text-decoration: none;
+      color: #e5eef8;
+      backdrop-filter: blur(12px);
+    }
+    .hinbit-brand img { width: 22px; height: 22px; display: block; object-fit: contain; }
+    .hinbit-brand span { font-size: 12px; font-weight: 700; letter-spacing: 0.02em; white-space: nowrap; }
+    @media (max-width: 860px) {
+      .two { grid-template-columns: 1fr; }
+      header { align-items: start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <a class="hinbit-brand" href="https://hinbit.com" target="_blank" rel="noreferrer">
+    <img src="https://hinbit.com/hebrew_site/hinbit-logo-symbol.png" alt="Hinbit">
+    <span>Powered by Hinbit Development</span>
+  </a>
+  <header>
+    <div>
+      <h1>Proxy Service</h1>
+      <div class="muted">Tinyproxy runs as a local forward proxy for browsers, curl, and SSH-tunneled clients.</div>
+      <div class="small">Config: <code id="configPathText">${escapeHtml(proxy.sourcePath || VPS_PROXY_CONFIG_FILE)}</code> · Conf: <code id="confPathText">${escapeHtml(proxy.confPath || TINYPROXY_CONF_FILE)}</code></div>
+    </div>
+    <div class="actions">
+      <a class="btn ghost" href="/">Portal</a>
+      <a class="btn ghost" href="/manage/">Projects</a>
+      <a class="btn ghost" href="/manage/tls/">TLS / Certificates</a>
+      <a class="btn ghost" href="/manage/ssh-keys/">SSH Keys</a>
+      <a class="btn ghost" href="/manage/vault/">DB Vault</a>
+      <a class="btn ghost" href="/manage/db-machines/">DB Machines</a>
+      <button id="refreshBtn" class="secondary" type="button">Refresh</button>
+    </div>
+  </header>
+  <main class="grid" style="gap:20px">
+    <section class="panel">
+      <h2>Current status</h2>
+      <div class="grid two" style="margin-top:14px;">
+        <div class="stack">
+          <div class="pill ${statusClass}" id="statusPill">${escapeHtml(statusLabel)}</div>
+          <div class="small">Service: <code id="serviceNameText">${escapeHtml(proxy.service || TINYPROXY_SERVICE)}</code></div>
+          <div class="small">systemd active: <code id="systemdActiveText">${escapeHtml(proxy.status?.active || 'inactive')}</code></div>
+          <div class="small">systemd enabled: <code id="systemdEnabledText">${escapeHtml(proxy.status?.enabled || 'disabled')}</code></div>
+          <div class="small">The safe default is localhost only. Keep the listen host at <code>127.0.0.1</code> if you only need browser access on the VPS itself.</div>
+        </div>
+        <div class="stack">
+          <div class="kv-item">
+            <div class="small">Browser proxy URL</div>
+            <div><code id="proxyUrlText">${escapeHtml(proxy.service_url || proxyServiceUrl(proxy) || `http://${proxy.listen_host || '127.0.0.1'}:${String(proxy.listen_port || 3128)}`)}</code></div>
+            <div class="small">Use this in the browser or curl proxy settings.</div>
+          </div>
+          <div class="actions">
+            <button id="copyProxyUrlBtn" class="secondary" type="button">Copy URL</button>
+            <button id="copyProxyCredsBtn" class="secondary" type="button">Copy credentials</button>
+          </div>
+          <div class="kv-item">
+            <div class="small">About the bypass list</div>
+            <div class="small">The bypass list below is used as Tinyproxy’s <code>Allow</code> list. Keep <code>127.0.0.1</code> and <code>::1</code> if the proxy stays local.</div>
+          </div>
+        </div>
+      </div>
+      <div id="proxyFlash" class="flash" hidden></div>
+    </section>
+
+    <section class="panel">
+      <h2>Proxy settings</h2>
+      <div class="grid two" style="margin-top:14px;">
+        <div class="stack">
+          <label><input id="proxyEnabled" type="checkbox" checked> Enable proxy service</label>
+          <label>Listen host
+            <input id="proxyListenHost" placeholder="127.0.0.1">
+          </label>
+          <label>Listen port
+            <input id="proxyListenPort" type="number" min="1" max="65535" step="1" placeholder="3128">
+          </label>
+          <label>Proxy bypass list
+            <textarea id="proxyBypassList" placeholder="127.0.0.1&#10;::1"></textarea>
+          </label>
+        </div>
+        <div class="stack">
+          <label><input id="proxyAuthEnabled" type="checkbox"> Require username/password</label>
+          <label>Proxy username
+            <input id="proxyUsername" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          </label>
+          <label>Proxy password
+            <input id="proxyPassword" type="password" autocomplete="new-password">
+          </label>
+          <label>CONNECT port allowlist
+            <textarea id="proxyConnectPorts" placeholder="80&#10;443&#10;8443&#10;9443&#10;2053"></textarea>
+          </label>
+          <label>Log level
+            <select id="proxyLogLevel">
+              <option>Critical</option>
+              <option>Error</option>
+              <option>Warning</option>
+              <option>Notice</option>
+              <option>Connect</option>
+              <option selected>Info</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div class="grid two" style="margin-top:14px;">
+        <div class="stack">
+          <label>Timeout
+            <input id="proxyTimeout" type="number" min="1" max="86400" step="1" placeholder="600">
+          </label>
+          <label>Max clients
+            <input id="proxyMaxClients" type="number" min="1" max="10000" step="1" placeholder="100">
+          </label>
+        </div>
+        <div class="stack">
+          <label><input id="proxyDisableViaHeader" type="checkbox" checked> Disable Via header</label>
+          <div class="kv-item">
+            <div class="small">Usage hint</div>
+            <div class="small">For a local-only browser proxy, keep the listen host at <code>127.0.0.1</code> and use the browser proxy URL shown above.</div>
+          </div>
+          <div class="actions">
+            <button id="saveBtn" type="button">Save and apply</button>
+            <button id="activateBtn" class="secondary" type="button">Activate service</button>
+            <button id="disableBtn" class="secondary" type="button">Disable service</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Proxy pool</h2>
+      <div class="grid two" style="margin-top:14px;">
+        <div class="stack">
+          <label>Upload proxy JSON
+            <input id="proxyPoolFile" type="file" accept=".json,application/json">
+          </label>
+          <div class="actions">
+            <button id="proxyImportBtn" type="button">Import and check</button>
+            <button id="proxyCheckBtn" class="secondary" type="button">Check selected proxy</button>
+          </div>
+          <div class="kv-item">
+            <div class="small">Pool summary</div>
+            <div id="proxyPoolSummary">No proxy list imported yet.</div>
+          </div>
+          <div id="proxyPoolFlash" class="flash" hidden></div>
+        </div>
+        <div class="stack">
+          <label>Selected proxy
+            <select id="proxyPoolSelected"></select>
+          </label>
+          <label>Protocol
+            <select id="proxyPoolProtocol">
+              <option value="http">HTTP</option>
+              <option value="https">HTTPS</option>
+              <option value="socks5">SOCKS5</option>
+              <option value="socks4">SOCKS4</option>
+              <option value="auto">Auto</option>
+            </select>
+          </label>
+          <label>Host
+            <input id="proxyPoolHost" placeholder="1.2.3.4">
+          </label>
+          <label>Port
+            <input id="proxyPoolPort" type="number" min="1" max="65535" step="1" placeholder="8080">
+          </label>
+          <label>Username
+            <input id="proxyPoolUsername" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          </label>
+          <label>Password
+            <input id="proxyPoolPassword" type="password" autocomplete="new-password">
+          </label>
+          <label>Notes
+            <textarea id="proxyPoolNotes" placeholder="Optional copy-paste notes or source"></textarea>
+          </label>
+          <div class="actions">
+            <button id="proxySaveSelectedBtn" type="button">Save selected</button>
+            <button id="proxyCopyUrlBtn" class="secondary" type="button">Copy URL</button>
+            <button id="proxyCopyCredsBtn" class="secondary" type="button">Copy credentials</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const API = '/manage/api';
+    const initialProxy = ${initialProxy};
+    const defaultProxyAuth = ${JSON.stringify(DEFAULT_PROXY_AUTH).replace(/</g, '\\u003c')};
+    const proxyEnabled = document.getElementById('proxyEnabled');
+    const proxyListenHost = document.getElementById('proxyListenHost');
+    const proxyListenPort = document.getElementById('proxyListenPort');
+    const proxyBypassList = document.getElementById('proxyBypassList');
+    const proxyAuthEnabled = document.getElementById('proxyAuthEnabled');
+    const proxyUsername = document.getElementById('proxyUsername');
+    const proxyPassword = document.getElementById('proxyPassword');
+    const proxyConnectPorts = document.getElementById('proxyConnectPorts');
+    const proxyTimeout = document.getElementById('proxyTimeout');
+    const proxyMaxClients = document.getElementById('proxyMaxClients');
+    const proxyLogLevel = document.getElementById('proxyLogLevel');
+    const proxyDisableViaHeader = document.getElementById('proxyDisableViaHeader');
+    const proxyFlash = document.getElementById('proxyFlash');
+    const statusPill = document.getElementById('statusPill');
+    const systemdActiveText = document.getElementById('systemdActiveText');
+    const systemdEnabledText = document.getElementById('systemdEnabledText');
+    const proxyUrlText = document.getElementById('proxyUrlText');
+    const copyProxyUrlBtn = document.getElementById('copyProxyUrlBtn');
+    const copyProxyCredsBtn = document.getElementById('copyProxyCredsBtn');
+    const configPathText = document.getElementById('configPathText');
+    const confPathText = document.getElementById('confPathText');
+    const serviceNameText = document.getElementById('serviceNameText');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const saveBtn = document.getElementById('saveBtn');
+    const activateBtn = document.getElementById('activateBtn');
+    const disableBtn = document.getElementById('disableBtn');
+    const proxyPoolFile = document.getElementById('proxyPoolFile');
+    const proxyImportBtn = document.getElementById('proxyImportBtn');
+    const proxyCheckBtn = document.getElementById('proxyCheckBtn');
+    const proxyPoolSummary = document.getElementById('proxyPoolSummary');
+    const proxyPoolFlash = document.getElementById('proxyPoolFlash');
+    const proxyPoolSelected = document.getElementById('proxyPoolSelected');
+    const proxyPoolProtocol = document.getElementById('proxyPoolProtocol');
+    const proxyPoolHost = document.getElementById('proxyPoolHost');
+    const proxyPoolPort = document.getElementById('proxyPoolPort');
+    const proxyPoolUsername = document.getElementById('proxyPoolUsername');
+    const proxyPoolPassword = document.getElementById('proxyPoolPassword');
+    const proxyPoolNotes = document.getElementById('proxyPoolNotes');
+    const proxySaveSelectedBtn = document.getElementById('proxySaveSelectedBtn');
+    const proxyCopyUrlBtn = document.getElementById('proxyCopyUrlBtn');
+    const proxyCopyCredsBtn = document.getElementById('proxyCopyCredsBtn');
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function showMessage(value, ok = true) {
+      proxyFlash.hidden = false;
+      proxyFlash.style.borderColor = ok ? '#1d4ed8' : '#7f1d1d';
+      proxyFlash.textContent = value;
+    }
+
+    function toList(text) {
+      return String(text || '')
+        .split(/[\n,]+/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+    }
+
+    function fromList(values) {
+      return Array.isArray(values) && values.length ? values.join('\n') : '';
+    }
+
+    let currentProxyPool = initialProxy.proxy_pool || { entries: [], selected_id: '' };
+
+    function showPoolMessage(value, ok = true) {
+      proxyPoolFlash.hidden = false;
+      proxyPoolFlash.style.borderColor = ok ? '#1d4ed8' : '#7f1d1d';
+      proxyPoolFlash.textContent = value;
+    }
+
+    function copyText(value) {
+      return navigator.clipboard.writeText(String(value || ''));
+    }
+
+    function serviceProxyCopyText() {
+      const url = proxyUrlText.textContent || '';
+      return [
+        'proxy_url=' + url,
+        'proxy_username=' + (proxyUsername.value.trim() || defaultProxyAuth.username),
+        'proxy_password=' + (proxyPassword.value || defaultProxyAuth.password),
+      ].join('\n');
+    }
+
+    function poolEntryUrl(entry) {
+      if (!entry) return '';
+      const protocol = String(entry.protocol || 'http').trim().toLowerCase() || 'http';
+      const auth = entry.username
+        ? encodeURIComponent(entry.username) + (entry.password ? ':' + encodeURIComponent(entry.password) : '') + '@'
+        : '';
+      const host = String(entry.host || '').includes(':') && !String(entry.host || '').startsWith('[')
+        ? '[' + String(entry.host || '').trim() + ']'
+        : String(entry.host || '').trim();
+      return protocol + '://' + auth + host + ':' + entry.port;
+    }
+
+    function poolEntryCopyText(entry) {
+      if (!entry) return '';
+      return [
+        'proxy_url=' + poolEntryUrl(entry),
+        'proxy_protocol=' + (entry.protocol || 'http'),
+        'proxy_host=' + (entry.host || ''),
+        'proxy_port=' + (entry.port || ''),
+        'proxy_username=' + (entry.username || ''),
+        'proxy_password=' + (entry.password || ''),
+      ].join('\n');
+    }
+
+    function getSelectedPoolEntry() {
+      const pool = currentProxyPool || {};
+      const entries = Array.isArray(pool.entries) ? pool.entries : [];
+      const selectedId = String(pool.selected_id || '');
+      return entries.find((entry) => String(entry.id) === selectedId) || entries.find((entry) => entry.working) || entries[0] || null;
+    }
+
+    function renderProxyPoolOptions(entries, selectedId = '') {
+      const list = Array.isArray(entries) ? entries : [];
+      if (!list.length) {
+        proxyPoolSelected.innerHTML = '<option value="">No proxies imported</option>';
+        return;
+      }
+      proxyPoolSelected.innerHTML = list.map((entry, index) => {
+        const label = (entry.label || entry.host || ('proxy-' + (index + 1))) + ' · ' + (entry.host || '') + ':' + (entry.port || '');
+        return '<option value="' + escapeHtml(String(entry.id || '')) + '"' + (String(entry.id || '') === String(selectedId || '') ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+      }).join('');
+    }
+
+    function renderProxyPoolSummary(pool) {
+      const entries = Array.isArray(pool?.entries) ? pool.entries : [];
+      const selected = getSelectedPoolEntry();
+      const workingCount = entries.filter((entry) => entry.working).length;
+      const selectedLabel = selected
+        ? (selected.label || selected.host || 'Selected proxy') + ' · ' + poolEntryUrl(selected)
+        : 'No proxy selected';
+      const geoLabel = selected
+        ? [selected.exit_ip || '', selected.exit_location || ''].filter(Boolean).join(' · ')
+        : '';
+      proxyPoolSummary.innerHTML =
+        '<div><strong>' + escapeHtml(String(entries.length)) + '</strong> proxies imported, <strong>' + escapeHtml(String(workingCount)) + '</strong> marked working</div>' +
+        '<div class="small">' + escapeHtml(selectedLabel) + '</div>' +
+        (geoLabel ? '<div class="small">Exit: ' + escapeHtml(geoLabel) + '</div>' : '') +
+        '<div class="small">' + escapeHtml(selected?.checked_at || pool?.checked_at || 'Not checked yet') + '</div>' +
+        '<div class="small">' + escapeHtml(selected?.last_error || '') + '</div>';
+    }
+
+    function applyProxyPool(data) {
+      const pool = data?.proxy_pool || data || { entries: [], selected_id: '' };
+      currentProxyPool = {
+        source_file: pool.source_file || '',
+        selected_id: pool.selected_id || '',
+        checked_at: pool.checked_at || '',
+        entries: Array.isArray(pool.entries) ? pool.entries : [],
+      };
+      renderProxyPoolOptions(currentProxyPool.entries, currentProxyPool.selected_id);
+      renderProxyPoolSummary(currentProxyPool);
+      const selected = getSelectedPoolEntry();
+      proxyPoolProtocol.value = selected?.protocol || 'http';
+      proxyPoolHost.value = selected?.host || '';
+      proxyPoolPort.value = selected?.port || 8080;
+      proxyPoolUsername.value = selected?.username || '';
+      proxyPoolPassword.value = selected?.password || '';
+      proxyPoolNotes.value = selected?.notes || '';
+      proxyCheckBtn.disabled = !selected;
+      proxySaveSelectedBtn.disabled = !selected;
+      proxyCopyUrlBtn.disabled = !selected;
+      proxyCopyCredsBtn.disabled = !selected;
+    }
+
+    function applyProxy(data) {
+      const proxy = data?.proxy || data || {};
+      const status = proxy.status || {};
+      proxyEnabled.checked = Boolean(proxy.enabled);
+      proxyListenHost.value = proxy.listen_host || '127.0.0.1';
+      proxyListenPort.value = proxy.listen_port || 3128;
+      proxyBypassList.value = fromList(proxy.allow || ['127.0.0.1', '::1']);
+      proxyAuthEnabled.checked = Boolean(proxy.auth?.enabled);
+      proxyUsername.value = proxy.auth?.username || defaultProxyAuth.username || '';
+      proxyPassword.value = proxy.auth?.password || defaultProxyAuth.password || '';
+      proxyConnectPorts.value = fromList(proxy.connect_ports || [80, 443, 8443, 9443, 2053]);
+      proxyTimeout.value = proxy.timeout || 600;
+      proxyMaxClients.value = proxy.max_clients || 100;
+      proxyLogLevel.value = proxy.log_level || 'Info';
+      proxyDisableViaHeader.checked = Boolean(proxy.disable_via_header);
+      statusPill.className = 'pill ' + (proxy.enabled ? (status.active === 'active' ? 'good' : 'warn') : 'neutral');
+      statusPill.textContent = proxy.enabled ? (status.active === 'active' ? 'Proxy active' : 'Proxy enabled, not running') : 'Proxy disabled';
+      systemdActiveText.textContent = status.active || 'inactive';
+      systemdEnabledText.textContent = status.enabled || 'disabled';
+      proxyUrlText.textContent = proxy.service_url || 'http://' + (proxy.listen_host || '127.0.0.1') + ':' + (proxy.listen_port || 3128);
+      configPathText.textContent = proxy.sourcePath || '${escapeHtml(VPS_PROXY_CONFIG_FILE)}';
+      confPathText.textContent = proxy.confPath || '${escapeHtml(TINYPROXY_CONF_FILE)}';
+      serviceNameText.textContent = proxy.service || '${escapeHtml(TINYPROXY_SERVICE)}';
+      applyProxyPool(proxy);
+    }
+
+    async function api(path, options = {}) {
+      const res = await fetch(\`\${API}\${path}\`, {
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        credentials: 'same-origin',
+        ...options,
+      });
+      const text = await res.text();
+      let data;
+      try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+      if (!res.ok) {
+        const message = data && typeof data === 'object' ? (data.error || data.message || text) : text;
+        throw new Error(message || \`Request failed: \${res.status}\`);
+      }
+      return data;
+    }
+
+    async function refresh() {
+      const data = await api('/proxy');
+      applyProxy(data);
+    }
+
+    async function save(enabledOverride = null) {
+      const forceEnabled = enabledOverride === true;
+      const authEnabled = forceEnabled ? true : proxyAuthEnabled.checked;
+      const username = proxyUsername.value.trim() || (forceEnabled ? defaultProxyAuth.username : '');
+      const password = proxyPassword.value || (forceEnabled ? defaultProxyAuth.password : '');
+      const payload = {
+        enabled: enabledOverride === null ? proxyEnabled.checked : Boolean(enabledOverride),
+        listen_host: proxyListenHost.value.trim() || '127.0.0.1',
+        listen_port: Number.parseInt(proxyListenPort.value, 10) || 3128,
+        allow: toList(proxyBypassList.value),
+        auth: {
+          enabled: authEnabled,
+          username: username || defaultProxyAuth.username,
+          password: password || defaultProxyAuth.password,
+        },
+        connect_ports: toList(proxyConnectPorts.value).map((value) => Number.parseInt(value, 10)).filter((value) => Number.isInteger(value) && value > 0 && value < 65536),
+        timeout: Number.parseInt(proxyTimeout.value, 10) || 600,
+        max_clients: Number.parseInt(proxyMaxClients.value, 10) || 100,
+        log_level: proxyLogLevel.value,
+        disable_via_header: proxyDisableViaHeader.checked,
+      };
+      const data = await api('/proxy', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      applyProxy(data);
+      showMessage(data.message || 'Proxy service saved and applied');
+    }
+
+    async function activateProxy() {
+      proxyEnabled.checked = true;
+      proxyAuthEnabled.checked = true;
+      if (!proxyUsername.value.trim()) proxyUsername.value = defaultProxyAuth.username;
+      if (!proxyPassword.value) proxyPassword.value = defaultProxyAuth.password;
+      const data = await save(true);
+      showMessage(data.message || 'Proxy service activated');
+      return data;
+    }
+
+    async function importProxyPool() {
+      const file = proxyPoolFile.files && proxyPoolFile.files[0];
+      if (!file) {
+        throw new Error('Choose a proxy JSON file first');
+      }
+      const text = await file.text();
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch (error) {
+        throw new Error('Invalid JSON file: ' + error.message);
+      }
+      const payload = {
+        proxies: Array.isArray(parsed) ? parsed : (parsed.proxies || parsed.entries || parsed.proxy_pool || parsed),
+        source_file: file.name || 'uploaded.json',
+      };
+      const data = await api('/proxy/pool/import', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      applyProxy(data);
+      showPoolMessage(data.message || 'Proxy pool imported');
+      proxyPoolFile.value = '';
+    }
+
+    async function checkSelectedProxy() {
+      const selected = getSelectedPoolEntry();
+      if (!selected) {
+        throw new Error('No proxy is selected');
+      }
+      const data = await api('/proxy/pool/check', {
+        method: 'POST',
+        body: JSON.stringify({ id: selected.id }),
+      });
+      applyProxy(data);
+      showPoolMessage(data.message || 'Selected proxy checked');
+      return data;
+    }
+
+    async function saveSelectedProxy() {
+      const selected = getSelectedPoolEntry();
+      if (!selected) {
+        throw new Error('No proxy is selected');
+      }
+      const payload = {
+        id: selected.id,
+        protocol: proxyPoolProtocol.value,
+        host: proxyPoolHost.value.trim(),
+        port: Number.parseInt(proxyPoolPort.value, 10) || 80,
+        username: proxyPoolUsername.value.trim(),
+        password: proxyPoolPassword.value,
+        notes: proxyPoolNotes.value.trim(),
+      };
+      const data = await api('/proxy/pool/selected', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      applyProxy(data);
+      showPoolMessage(data.message || 'Selected proxy saved');
+    }
+
+    async function copySelectedProxyUrl() {
+      const selected = getSelectedPoolEntry();
+      if (!selected) return;
+      await copyText(poolEntryUrl(selected));
+      showPoolMessage('Proxy URL copied');
+    }
+
+    async function copySelectedProxyCreds() {
+      const selected = getSelectedPoolEntry();
+      if (!selected) return;
+      await copyText(poolEntryCopyText(selected));
+      showPoolMessage('Proxy credentials copied');
+    }
+
+    refreshBtn.addEventListener('click', async () => {
+      refreshBtn.disabled = true;
+      try {
+        await refresh();
+        showMessage('Proxy status refreshed');
+      } catch (error) {
+        showMessage(error.message, false);
+      } finally {
+        refreshBtn.disabled = false;
+      }
+    });
+
+    saveBtn.addEventListener('click', async () => {
+      saveBtn.disabled = true;
+      disableBtn.disabled = true;
+      activateBtn.disabled = true;
+      try {
+        await save();
+      } catch (error) {
+        showMessage(error.message, false);
+      } finally {
+        saveBtn.disabled = false;
+        disableBtn.disabled = false;
+        activateBtn.disabled = false;
+      }
+    });
+
+    activateBtn.addEventListener('click', async () => {
+      activateBtn.disabled = true;
+      saveBtn.disabled = true;
+      disableBtn.disabled = true;
+      try {
+        await activateProxy();
+      } catch (error) {
+        showMessage(error.message, false);
+      } finally {
+        activateBtn.disabled = false;
+        saveBtn.disabled = false;
+        disableBtn.disabled = false;
+      }
+    });
+
+    proxyPoolSelected.addEventListener('change', () => {
+      const selected = (currentProxyPool.entries || []).find((entry) => String(entry.id) === String(proxyPoolSelected.value));
+      if (!selected) return;
+      currentProxyPool = { ...currentProxyPool, selected_id: selected.id };
+      proxyPoolProtocol.value = selected.protocol || 'http';
+      proxyPoolHost.value = selected.host || '';
+      proxyPoolPort.value = selected.port || 8080;
+      proxyPoolUsername.value = selected.username || '';
+      proxyPoolPassword.value = selected.password || '';
+      proxyPoolNotes.value = selected.notes || '';
+      renderProxyPoolSummary(currentProxyPool);
+    });
+
+    proxyImportBtn.addEventListener('click', async () => {
+      proxyImportBtn.disabled = true;
+      proxyCheckBtn.disabled = true;
+      try {
+        await importProxyPool();
+      } catch (error) {
+        showPoolMessage(error.message, false);
+      } finally {
+        proxyImportBtn.disabled = false;
+        proxyCheckBtn.disabled = !getSelectedPoolEntry();
+      }
+    });
+
+    proxyCheckBtn.addEventListener('click', async () => {
+      proxyCheckBtn.disabled = true;
+      try {
+        await checkSelectedProxy();
+      } catch (error) {
+        showPoolMessage(error.message, false);
+      } finally {
+        proxyCheckBtn.disabled = !getSelectedPoolEntry();
+      }
+    });
+
+    proxySaveSelectedBtn.addEventListener('click', async () => {
+      proxySaveSelectedBtn.disabled = true;
+      try {
+        await saveSelectedProxy();
+      } catch (error) {
+        showPoolMessage(error.message, false);
+      } finally {
+        proxySaveSelectedBtn.disabled = !getSelectedPoolEntry();
+      }
+    });
+
+    proxyCopyUrlBtn.addEventListener('click', async () => {
+      try {
+        await copySelectedProxyUrl();
+      } catch (error) {
+        showPoolMessage(error.message, false);
+      }
+    });
+
+    proxyCopyCredsBtn.addEventListener('click', async () => {
+      try {
+        await copySelectedProxyCreds();
+      } catch (error) {
+        showPoolMessage(error.message, false);
+      }
+    });
+
+    copyProxyUrlBtn.addEventListener('click', async () => {
+      try {
+        await copyText(proxyUrlText.textContent || '');
+        showMessage('Proxy URL copied');
+      } catch (error) {
+        showMessage(error.message, false);
+      }
+    });
+
+    copyProxyCredsBtn.addEventListener('click', async () => {
+      try {
+        await copyText(serviceProxyCopyText());
+        showMessage('Proxy credentials copied');
+      } catch (error) {
+        showMessage(error.message, false);
+      }
+    });
+
+    disableBtn.addEventListener('click', async () => {
+      disableBtn.disabled = true;
+      saveBtn.disabled = true;
+      try {
+        await save(false);
+      } catch (error) {
+        showMessage(error.message, false);
+      } finally {
+        disableBtn.disabled = false;
+        saveBtn.disabled = false;
+      }
+    });
+
+    applyProxy(initialProxy);
+  </script>
+</body>
+</html>`;
+}
+
+function renderTlsPage(selectedRef = '') {
+  const projects = projectView();
+  const server = readSystemTlsStatus();
+  const selectedProject = projects.find((project) => {
+    const ref = project.repo || project.slug || '';
+    return ref === selectedRef;
+  }) || projects[0] || null;
+  const defaultAppDomain = projectFallbackDomain(selectedProject?.domain || '');
+  const defaultAppTls = defaultAppDomain ? readTlsStatus('server', defaultAppDomain, defaultAppDomain) : {
+    scope: 'server',
+    key: '',
+    label: 'no default domain',
+    source: 'missing',
+    active: false,
+    certPath: '',
+    keyPath: '',
+    dir: '',
+  };
+  const initialProjects = JSON.stringify(projects).replace(/</g, '\\u003c');
+  const initialServer = JSON.stringify(server).replace(/</g, '\\u003c');
+  const initialDefaultApp = JSON.stringify(defaultAppTls).replace(/</g, '\\u003c');
+  const initialDefaultAppDomain = JSON.stringify(defaultAppDomain || '').replace(/</g, '\\u003c');
+  const projectOptions = projects.length
+    ? projects.map((project) => {
+        const ref = project.repo || project.slug || '';
+        const label = `${project.repo || project.slug || ''} · ${project.domain || 'no domain'}`;
+        return `<option value="${escapeHtml(ref)}"${ref === (selectedProject?.repo || selectedProject?.slug || '') ? ' selected' : ''}>${escapeHtml(label)}</option>`;
+      }).join('')
+    : '<option value="">No projects found</option>';
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TLS / Certificates</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font-family: Inter, system-ui, sans-serif; background: radial-gradient(circle at top, #11213d 0, #08111f 50%, #05070c 100%); color: #e5eef8; padding-top: 84px; }
+    header, main { max-width: 1400px; margin: 0 auto; padding: 24px; }
+    header { display: flex; justify-content: space-between; align-items: end; gap: 16px; }
+    h1, h2 { margin: 0 0 12px; }
+    .muted { color: #94a3b8; }
+    .small { font-size: 12px; color: #94a3b8; }
+    .panel { background: rgba(8, 15, 29, 0.88); border: 1px solid rgba(148,163,184,0.2); border-radius: 18px; padding: 20px; box-shadow: 0 12px 40px rgba(0,0,0,0.35); }
+    .grid { display: grid; gap: 16px; }
+    .two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .stack { display: grid; gap: 12px; }
+    label { display: grid; gap: 6px; font-size: 13px; color: #cbd5e1; }
+    input, textarea, select { width: 100%; box-sizing: border-box; background: #0b1220; color: #e5eef8; border: 1px solid #22304a; border-radius: 10px; padding: 10px 12px; }
+    textarea { min-height: 180px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    button, .btn { background: linear-gradient(180deg, #38bdf8, #0ea5e9); color: #00111d; border: 0; border-radius: 999px; padding: 10px 14px; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+    button.secondary, .btn.secondary { background: #162033; color: #dbeafe; border: 1px solid #2a3b59; }
+    button.danger, .btn.danger { background: linear-gradient(180deg, #f87171, #ef4444); color: #1c0202; }
+    button.ghost, .btn.ghost { background: transparent; color: #dbeafe; border: 1px solid #2a3b59; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .kv-item { display: grid; gap: 4px; padding: 12px; border: 1px solid #22304a; border-radius: 12px; background: #0b1220; }
+    .kv-item code { white-space: pre-wrap; word-break: break-word; }
+    .kv-item.env-duplicate { border-color: rgba(248, 113, 113, 0.55); background: rgba(127, 29, 29, 0.18); }
+    .kv-item.env-duplicate code,
+    .kv-item.env-duplicate .small,
+    .kv-item.env-duplicate .pill { color: #fecaca; }
+    .pill { display: inline-flex; padding: 3px 8px; border-radius: 999px; background: #102338; border: 1px solid #23405f; font-size: 12px; }
+    .pill.good { background: #0f3a24; border-color: #14532d; color: #86efac; }
+    .pill.warn { background: #3f2d0c; border-color: #7c2d12; color: #fde68a; }
+    .pill.neutral { background: #1f2937; border-color: #334155; color: #cbd5e1; }
+    .flash { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #0b1220; border: 1px solid #22304a; white-space: pre-wrap; }
+    .hinbit-brand {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      z-index: 80;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(8, 15, 29, 0.82);
+      border: 1px solid rgba(148,163,184,0.22);
+      box-shadow: 0 12px 32px rgba(0,0,0,0.25);
+      text-decoration: none;
+      color: #e5eef8;
+      backdrop-filter: blur(12px);
+    }
+    .hinbit-brand img { width: 22px; height: 22px; display: block; object-fit: contain; }
+    .hinbit-brand span { font-size: 12px; font-weight: 700; letter-spacing: 0.02em; white-space: nowrap; }
+    @media (max-width: 980px) {
+      .two { grid-template-columns: 1fr; }
+      header { align-items: start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <a class="hinbit-brand" href="https://hinbit.com" target="_blank" rel="noreferrer">
+    <img src="https://hinbit.com/hebrew_site/hinbit-logo-symbol.png" alt="Hinbit">
+    <span>Powered by Hinbit Development</span>
+  </a>
+  <header>
+    <div>
+      <h1>TLS / Certificates</h1>
+      <div class="muted">Upload or paste a certificate and private key for the server domain or a project domain.</div>
+      <div class="small">Custom certs are stored under <code>/etc/vps-custom-certs</code> and win over Let’s Encrypt.</div>
+    </div>
+    <div class="actions">
+      <a class="btn ghost" href="/">Portal</a>
+      <a class="btn ghost" href="/manage/">Projects</a>
+      <a class="btn ghost" href="/manage/ssh-keys/">SSH Keys</a>
+      <a class="btn ghost" href="/manage/vault/">DB Vault</a>
+      <a class="btn ghost" href="/manage/db-machines/">DB Machines</a>
+      <button id="refreshBtn" class="secondary" type="button">Refresh</button>
+    </div>
+  </header>
+  <main class="grid" style="gap:20px">
+    <section class="panel">
+      <h2>Server default certificate</h2>
+      <div class="small">Applies to the server domain in <code>/etc/vps-system-domain</code>. Current domain: <code id="serverDomainText">${escapeHtml(server.domain || getSystemDomain() || 'n/a')}</code></div>
+      <div class="grid two" style="margin-top:14px;">
+        <div class="kv-item">
+          <div class="small">Current status</div>
+          <div><span id="serverStatusPill" class="pill ${escapeHtml(server.source === 'custom' ? 'good' : (server.source === 'letsencrypt' ? 'good' : 'warn'))}">${escapeHtml(server.label || 'n/a')}</span></div>
+          <div class="small">Source: <code id="serverSourceText">${escapeHtml(server.source || 'missing')}</code></div>
+          <div class="small">Certificate path: <code id="serverCertPathText">${escapeHtml(server.certPath || 'n/a')}</code></div>
+          <div class="small">Key path: <code id="serverKeyPathText">${escapeHtml(server.keyPath || 'n/a')}</code></div>
+        </div>
+        <div class="stack">
+          <label>Certificate / fullchain PEM
+            <textarea id="serverCertPem" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+          </label>
+          <label>Private key PEM
+            <textarea id="serverKeyPem" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+          </label>
+          <div class="actions">
+            <button id="saveServerBtn" type="button">Save server cert</button>
+            <button id="deleteServerBtn" class="danger" type="button">Delete custom cert</button>
+          </div>
+        </div>
+      </div>
+      <div id="serverFlash" class="flash" hidden></div>
+    </section>
+
+    <section class="panel">
+      <h2>Default app-domain certificate</h2>
+      <div class="small">Applies to shared base domains like <code>seach.co.il</code>. Projects such as <code>mon2026.seach.co.il</code> will use it unless they have a project-specific certificate.</div>
+      <div class="grid two" style="margin-top:14px;">
+        <label>Default domain
+          <input id="defaultAppDomainInput" placeholder="seach.co.il" value="${escapeHtml(defaultAppDomain || '')}">
+        </label>
+        <div class="kv-item">
+          <div class="small">Current status</div>
+          <div><span id="defaultAppStatusPill" class="pill ${escapeHtml(defaultAppTls.source === 'custom' ? 'good' : (defaultAppTls.source === 'letsencrypt' ? 'good' : 'warn'))}">${escapeHtml(defaultAppTls.label || 'n/a')}</span></div>
+          <div class="small">Source: <code id="defaultAppSourceText">${escapeHtml(defaultAppTls.source || 'missing')}</code></div>
+          <div class="small">Certificate path: <code id="defaultAppCertPathText">${escapeHtml(defaultAppTls.certPath || 'n/a')}</code></div>
+          <div class="small">Key path: <code id="defaultAppKeyPathText">${escapeHtml(defaultAppTls.keyPath || 'n/a')}</code></div>
+        </div>
+      </div>
+      <div class="grid two" style="margin-top:14px;">
+        <div class="stack">
+          <label>Certificate / fullchain PEM
+            <textarea id="defaultAppCertPem" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+          </label>
+          <label>Private key PEM
+            <textarea id="defaultAppKeyPem" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+          </label>
+          <div class="actions">
+            <button id="saveDefaultAppBtn" type="button">Save default app cert</button>
+            <button id="deleteDefaultAppBtn" class="danger" type="button">Delete custom cert</button>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="kv-item">
+            <div class="small">How it works</div>
+            <div class="small">Save a certificate for the base domain and nginx will use it for matching subdomains when no project-specific certificate exists.</div>
+          </div>
+          <div class="kv-item">
+            <div class="small">Notes</div>
+            <div class="small">For your setup, that means a certificate saved for <code>seach.co.il</code> can cover new projects like <code>mon2026.seach.co.il</code>.</div>
+          </div>
+        </div>
+      </div>
+      <div id="defaultAppFlash" class="flash" hidden></div>
+    </section>
+
+    <section class="panel">
+      <h2>Project certificate</h2>
+      <div class="grid two">
+        <label>Project
+          <select id="projectSelect">${projectOptions}</select>
+        </label>
+        <div class="kv-item">
+          <div class="small">Selected project</div>
+          <div><strong id="projectTitleText">${escapeHtml(selectedProject?.repo || selectedProject?.slug || 'n/a')}</strong></div>
+          <div class="small">Domain: <code id="projectDomainText">${escapeHtml(selectedProject?.domain || 'n/a')}</code></div>
+          <div class="small">Status: <span id="projectStatusPill" class="pill neutral">Loading...</span></div>
+          <div class="small">Source: <code id="projectSourceText">n/a</code></div>
+          <div class="small">Certificate path: <code id="projectCertPathText">n/a</code></div>
+          <div class="small">Key path: <code id="projectKeyPathText">n/a</code></div>
+        </div>
+      </div>
+      <div class="grid two" style="margin-top:14px;">
+        <div class="stack">
+          <label>Certificate / fullchain PEM
+            <textarea id="projectCertPem" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+          </label>
+          <label>Private key PEM
+            <textarea id="projectKeyPem" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+          </label>
+          <div class="actions">
+            <button id="saveProjectBtn" type="button">Save project cert</button>
+            <button id="deleteProjectBtn" class="danger" type="button">Delete custom cert</button>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="kv-item">
+            <div class="small">How it works</div>
+            <div class="small">Paste the certificate and private key, save, and the server will rewrite the correct nginx vhost. Custom certs under <code>/etc/vps-custom-certs</code> override Let’s Encrypt on the next sync.</div>
+          </div>
+          <div class="kv-item">
+            <div class="small">Notes</div>
+            <div class="small">Use a Cloudflare Origin Certificate here if you want Cloudflare proxied HTTPS, or paste a browser-trusted cert if you have one. For projects, the domain must match the selected project domain.</div>
+          </div>
+        </div>
+      </div>
+      <div id="projectFlash" class="flash" hidden></div>
+    </section>
+  </main>
+  <script>
+    const API = '/manage/api';
+    const currentProjects = ${initialProjects};
+    const initialServer = ${initialServer};
+    const initialSelectedRef = ${JSON.stringify(selectedProject ? (selectedProject.repo || selectedProject.slug || '') : '')};
+    const serverDomainText = document.getElementById('serverDomainText');
+    const serverStatusPill = document.getElementById('serverStatusPill');
+    const serverSourceText = document.getElementById('serverSourceText');
+    const serverCertPathText = document.getElementById('serverCertPathText');
+    const serverKeyPathText = document.getElementById('serverKeyPathText');
+    const serverCertPem = document.getElementById('serverCertPem');
+    const serverKeyPem = document.getElementById('serverKeyPem');
+    const serverFlash = document.getElementById('serverFlash');
+    const saveServerBtn = document.getElementById('saveServerBtn');
+    const deleteServerBtn = document.getElementById('deleteServerBtn');
+    const defaultAppDomainInput = document.getElementById('defaultAppDomainInput');
+    const defaultAppStatusPill = document.getElementById('defaultAppStatusPill');
+    const defaultAppSourceText = document.getElementById('defaultAppSourceText');
+    const defaultAppCertPathText = document.getElementById('defaultAppCertPathText');
+    const defaultAppKeyPathText = document.getElementById('defaultAppKeyPathText');
+    const defaultAppCertPem = document.getElementById('defaultAppCertPem');
+    const defaultAppKeyPem = document.getElementById('defaultAppKeyPem');
+    const defaultAppFlash = document.getElementById('defaultAppFlash');
+    const saveDefaultAppBtn = document.getElementById('saveDefaultAppBtn');
+    const deleteDefaultAppBtn = document.getElementById('deleteDefaultAppBtn');
+    const projectSelect = document.getElementById('projectSelect');
+    const projectTitleText = document.getElementById('projectTitleText');
+    const projectDomainText = document.getElementById('projectDomainText');
+    const projectStatusPill = document.getElementById('projectStatusPill');
+    const projectSourceText = document.getElementById('projectSourceText');
+    const projectCertPathText = document.getElementById('projectCertPathText');
+    const projectKeyPathText = document.getElementById('projectKeyPathText');
+    const projectCertPem = document.getElementById('projectCertPem');
+    const projectKeyPem = document.getElementById('projectKeyPem');
+    const projectFlash = document.getElementById('projectFlash');
+    const saveProjectBtn = document.getElementById('saveProjectBtn');
+    const deleteProjectBtn = document.getElementById('deleteProjectBtn');
+    const refreshBtn = document.getElementById('refreshBtn');
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function showMessage(el, value, ok = true) {
+      el.hidden = false;
+      el.style.borderColor = ok ? '#1d4ed8' : '#7f1d1d';
+      el.textContent = value;
+    }
+
+    async function api(path, options = {}) {
+      const res = await fetch(\`\${API}\${path}\`, {
+        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+        credentials: 'same-origin',
+        ...options,
+      });
+      const text = await res.text();
+      let data;
+      try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+      if (!res.ok) {
+        const message = data && typeof data === 'object' ? (data.error || data.message || text) : text;
+        throw new Error(message || \`Request failed: \${res.status}\`);
+      }
+      return data;
+    }
+
+    function statusClass(source, active) {
+      if (source === 'custom' || source === 'letsencrypt') return 'good';
+      return active ? 'good' : 'warn';
+    }
+
+    function renderProjectOptions(list, selectedRef = '') {
+      const projects = Array.isArray(list) ? list : [];
+      return projects.length
+        ? projects.map((project) => {
+            const ref = String(project.repo || project.slug || '');
+            const label = (project.repo || project.slug || '') + ' · ' + (project.domain || 'no domain');
+            return '<option value="' + escapeHtml(ref) + '"' + (ref === String(selectedRef || '') ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+          }).join('')
+        : '<option value="">No projects found</option>';
+    }
+
+    function applyServer(data) {
+      const server = data?.server ? { ...data, ...data.server } : (data || {});
+      serverDomainText.textContent = server.domain || '${escapeHtml(server.domain || getSystemDomain() || '')}';
+      serverStatusPill.className = 'pill ' + statusClass(server.source, server.active);
+      serverStatusPill.textContent = server.label || 'n/a';
+      serverSourceText.textContent = server.source || 'missing';
+      serverCertPathText.textContent = server.certPath || 'n/a';
+      serverKeyPathText.textContent = server.keyPath || 'n/a';
+      if (!serverCertPem.value) {
+        serverCertPem.placeholder = server.source === 'custom' ? 'Current custom cert exists on disk' : '-----BEGIN CERTIFICATE-----';
+      }
+      if (!serverKeyPem.value) {
+        serverKeyPem.placeholder = server.source === 'custom' ? 'Current custom key exists on disk' : '-----BEGIN PRIVATE KEY-----';
+      }
+    }
+
+    function applyDefaultApp(data) {
+      const tls = data?.tls ? { ...data, ...data.tls } : (data || {});
+      const domain = tls.domain || defaultAppDomainInput.value || initialDefaultAppDomain || '';
+      if (domain && !defaultAppDomainInput.value) {
+        defaultAppDomainInput.value = domain;
+      }
+      defaultAppStatusPill.className = 'pill ' + statusClass(tls.source, tls.active);
+      defaultAppStatusPill.textContent = tls.label || 'n/a';
+      defaultAppSourceText.textContent = tls.source || 'missing';
+      defaultAppCertPathText.textContent = tls.certPath || 'n/a';
+      defaultAppKeyPathText.textContent = tls.keyPath || 'n/a';
+      if (!defaultAppCertPem.value) {
+        defaultAppCertPem.placeholder = tls.source === 'custom' ? 'Current custom cert exists on disk' : '-----BEGIN CERTIFICATE-----';
+      }
+      if (!defaultAppKeyPem.value) {
+        defaultAppKeyPem.placeholder = tls.source === 'custom' ? 'Current custom key exists on disk' : '-----BEGIN PRIVATE KEY-----';
+      }
+    }
+
+    function findProject(ref) {
+      return currentProjects.find((project) => String(project.repo || project.slug || '') === String(ref || '')) || null;
+    }
+
+    function applyProject(data) {
+      const project = data?.tls ? { ...data, ...data.tls } : (data || {});
+      projectTitleText.textContent = project.project || project.domain || 'n/a';
+      projectDomainText.textContent = project.domain || 'n/a';
+      projectStatusPill.className = 'pill ' + (project.statusClass || 'neutral');
+      projectStatusPill.textContent = project.statusLabel || 'n/a';
+      projectSourceText.textContent = project.source || 'missing';
+      projectCertPathText.textContent = project.certPath || 'n/a';
+      projectKeyPathText.textContent = project.keyPath || 'n/a';
+      if (!projectCertPem.value) {
+        projectCertPem.placeholder = project.source === 'custom' ? 'Current custom cert exists on disk' : '-----BEGIN CERTIFICATE-----';
+      }
+      if (!projectKeyPem.value) {
+        projectKeyPem.placeholder = project.source === 'custom' ? 'Current custom key exists on disk' : '-----BEGIN PRIVATE KEY-----';
+      }
+    }
+
+    async function loadProject(ref) {
+      if (!ref) return;
+      const data = await api('/tls/projects/' + encodeURIComponent(ref));
+      applyProject(data);
+    }
+
+    async function loadServer() {
+      const data = await api('/tls/server');
+      applyServer(data);
+    }
+
+    async function loadDefaultApp(domain = '') {
+      const requested = String(domain || defaultAppDomainInput.value || initialDefaultAppDomain || '').trim();
+      if (!requested) {
+        applyDefaultApp({ scope: 'server', key: '', label: 'no default domain', source: 'missing', active: false, certPath: '', keyPath: '', dir: '' });
+        return;
+      }
+      const data = await api('/tls/default-domain?domain=' + encodeURIComponent(requested));
+      applyDefaultApp(data);
+    }
+
+    async function refresh() {
+      const data = await api('/tls');
+      if (data.server) applyServer(data.server);
+      if (Array.isArray(data.projects)) {
+        currentProjects.splice(0, currentProjects.length, ...data.projects);
+      }
+      const selected = projectSelect.value || initialSelectedRef || (currentProjects[0] && (currentProjects[0].repo || currentProjects[0].slug || '')) || '';
+      projectSelect.innerHTML = renderProjectOptions(currentProjects, selected);
+      if (selected) {
+        projectSelect.value = selected;
+        await loadProject(selected);
+      }
+      await loadDefaultApp();
+    }
+
+    async function saveServer() {
+      const payload = {
+        certificatePem: serverCertPem.value.trim(),
+        privateKeyPem: serverKeyPem.value.trim(),
+      };
+      const res = await api('/tls/server', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      showMessage(serverFlash, res.message || 'Server certificate saved');
+      serverCertPem.value = '';
+      serverKeyPem.value = '';
+      await loadServer();
+    }
+
+    async function deleteServer() {
+      const ok = confirm('Delete the custom server certificate and fall back to Let\\'s Encrypt/HTTP?');
+      if (!ok) return;
+      const res = await api('/tls/server', { method: 'DELETE' });
+      showMessage(serverFlash, res.message || 'Server certificate removed');
+      await loadServer();
+    }
+
+    async function saveDefaultApp() {
+      const domain = String(defaultAppDomainInput.value || '').trim();
+      if (!domain) throw new Error('Enter a default domain first');
+      const payload = {
+        domain,
+        certificatePem: defaultAppCertPem.value.trim(),
+        privateKeyPem: defaultAppKeyPem.value.trim(),
+      };
+      const res = await api('/tls/default-domain', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      showMessage(defaultAppFlash, res.message || 'Default app certificate saved');
+      defaultAppCertPem.value = '';
+      defaultAppKeyPem.value = '';
+      await loadDefaultApp(domain);
+    }
+
+    async function deleteDefaultApp() {
+      const domain = String(defaultAppDomainInput.value || '').trim();
+      if (!domain) throw new Error('Enter a default domain first');
+      const ok = confirm('Delete the custom certificate for ' + domain + '?');
+      if (!ok) return;
+      const res = await api('/tls/default-domain?domain=' + encodeURIComponent(domain), { method: 'DELETE' });
+      showMessage(defaultAppFlash, res.message || 'Default app certificate removed');
+      await loadDefaultApp(domain);
+    }
+
+    async function saveProject() {
+      const ref = projectSelect.value;
+      if (!ref) throw new Error('Choose a project first');
+      const payload = {
+        certificatePem: projectCertPem.value.trim(),
+        privateKeyPem: projectKeyPem.value.trim(),
+      };
+      const res = await api('/tls/projects/' + encodeURIComponent(ref), {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      showMessage(projectFlash, res.message || 'Project certificate saved');
+      projectCertPem.value = '';
+      projectKeyPem.value = '';
+      await loadProject(ref);
+    }
+
+    async function deleteProject() {
+      const ref = projectSelect.value;
+      if (!ref) return;
+      const ok = confirm('Delete the custom certificate for ' + ref + '?');
+      if (!ok) return;
+      const res = await api('/tls/projects/' + encodeURIComponent(ref), { method: 'DELETE' });
+      showMessage(projectFlash, res.message || 'Project certificate removed');
+      await loadProject(ref);
+    }
+
+    projectSelect.addEventListener('change', async () => {
+      const ref = projectSelect.value;
+      if (!ref) return;
+      await loadProject(ref);
+    });
+    saveServerBtn.addEventListener('click', async () => {
+      saveServerBtn.disabled = true;
+      try {
+        await saveServer();
+      } catch (error) {
+        showMessage(serverFlash, error.message, false);
+      } finally {
+        saveServerBtn.disabled = false;
+      }
+    });
+    deleteServerBtn.addEventListener('click', async () => {
+      deleteServerBtn.disabled = true;
+      try {
+        await deleteServer();
+      } catch (error) {
+        showMessage(serverFlash, error.message, false);
+      } finally {
+        deleteServerBtn.disabled = false;
+      }
+    });
+    defaultAppDomainInput.addEventListener('change', async () => {
+      try {
+        await loadDefaultApp(defaultAppDomainInput.value);
+      } catch (error) {
+        showMessage(defaultAppFlash, error.message, false);
+      }
+    });
+    saveDefaultAppBtn.addEventListener('click', async () => {
+      saveDefaultAppBtn.disabled = true;
+      try {
+        await saveDefaultApp();
+      } catch (error) {
+        showMessage(defaultAppFlash, error.message, false);
+      } finally {
+        saveDefaultAppBtn.disabled = false;
+      }
+    });
+    deleteDefaultAppBtn.addEventListener('click', async () => {
+      deleteDefaultAppBtn.disabled = true;
+      try {
+        await deleteDefaultApp();
+      } catch (error) {
+        showMessage(defaultAppFlash, error.message, false);
+      } finally {
+        deleteDefaultAppBtn.disabled = false;
+      }
+    });
+    saveProjectBtn.addEventListener('click', async () => {
+      saveProjectBtn.disabled = true;
+      try {
+        await saveProject();
+      } catch (error) {
+        showMessage(projectFlash, error.message, false);
+      } finally {
+        saveProjectBtn.disabled = false;
+      }
+    });
+    deleteProjectBtn.addEventListener('click', async () => {
+      deleteProjectBtn.disabled = true;
+      try {
+        await deleteProject();
+      } catch (error) {
+        showMessage(projectFlash, error.message, false);
+      } finally {
+        deleteProjectBtn.disabled = false;
+      }
+    });
+    refreshBtn.addEventListener('click', async () => {
+      refreshBtn.disabled = true;
+      try {
+        await refresh();
+      } catch (error) {
+        showMessage(projectFlash, error.message, false);
+      } finally {
+        refreshBtn.disabled = false;
+      }
+    });
+
+    applyServer(initialServer);
+    if (projectSelect.value || initialSelectedRef) {
+      const ref = projectSelect.value || initialSelectedRef;
+      if (ref) {
+        loadProject(ref).catch((error) => showMessage(projectFlash, error.message, false));
+      }
+    }
+  </script>
+</body>
+</html>`;
+}
+
+function renderPage() {
+  const projects = projectView();
+  const initialProjects = JSON.stringify(projects).replace(/</g, '\\u003c');
+  const initialProjectsRows = renderProjectRows(projects);
+  const dbMachines = readDbMachines();
+  const dbMachineOptions = renderDbMachineOptions(dbMachines, LOCAL_DB_MACHINE_ID, true);
+  const manageBuild = readManageBuildInfo();
+  const manageBuildDate = manageBuild.commitDate ? new Date(manageBuild.commitDate).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }) : 'n/a';
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -2080,6 +5092,21 @@ function renderPage() {
     .pill.neutral { background: #1f2937; border-color: #334155; color: #cbd5e1; }
     .table-wrap { overflow: auto; }
     .flash { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: #0b1220; border: 1px solid #22304a; white-space: pre-wrap; }
+    .install-warning {
+      margin-top: 8px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(127, 29, 29, 0.22);
+      border: 1px solid rgba(248, 113, 113, 0.4);
+      color: #fecaca;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .install-warning code {
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid rgba(248, 113, 113, 0.25);
+      color: #fff1f2;
+    }
     .scripts-panel { background: #08111f; border: 1px solid #22304a; border-radius: 18px; box-shadow: 0 30px 80px rgba(0,0,0,0.35); margin: 0 24px 24px; }
     .modal-panel {
       position: fixed;
@@ -2120,6 +5147,7 @@ function renderPage() {
     .kv-list { display: grid; gap: 10px; }
     .kv-item { display: grid; gap: 4px; padding: 12px; border: 1px solid #22304a; border-radius: 12px; background: #0b1220; }
     .kv-item code { white-space: pre-wrap; word-break: break-word; }
+    .env-editor { min-height: 280px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; line-height: 1.5; }
     .copy-actions { display: flex; flex-wrap: wrap; gap: 6px; }
     .copy-actions .btn, .copy-actions button { padding: 8px 10px; font-size: 12px; }
     .hinbit-brand {
@@ -2163,9 +5191,13 @@ function renderPage() {
       <h1>MultiDev Manage</h1>
       <div class="muted">Projects, PM2 controls, logs, and per-domain protection from one page.</div>
       <div id="systemStats" class="small">Loading machine stats...</div>
+      <div class="small">Dashboard version: <code>${escapeHtml(manageBuild.commitShort || 'n/a')}</code> · ${escapeHtml(manageBuildDate)} · ${escapeHtml(manageBuild.repo || 'hinbit/hinbit-MultiDevVPSSettings')}</div>
     </div>
     <div class="actions">
       <a class="btn ghost" href="/">Portal</a>
+      <a class="btn ghost" href="/manage/tls/">Manage SSL</a>
+      <a class="btn ghost" href="/manage/tls/">TLS / Certificates</a>
+      <a class="btn ghost" href="/manage/proxy/">Proxy Service</a>
       <a class="btn ghost" href="/phpmyadmin/">phpMyAdmin</a>
       <button class="secondary" id="refreshBtn" type="button">Refresh</button>
     </div>
@@ -2175,7 +5207,8 @@ function renderPage() {
       <h2>New Project</h2>
       <div class="grid two">
         <label>GitHub repo
-          <input id="repo" placeholder="shaykid/RepoName">
+          <input id="repo" placeholder="shaykid/RepoName" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          <div id="installRepoWarning" class="install-warning">Repo to install: <code>(none)</code></div>
         </label>
         <label>Domain
           <input id="domain" placeholder="example.com">
@@ -2190,10 +5223,23 @@ function renderPage() {
           <input id="port" placeholder="auto">
         </label>
         <label>Entrypoint
-          <input id="entrypoint" placeholder="server/index.js">
+          <input id="entrypoint" placeholder="auto-detect" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          <div class="small">Leave blank to auto-detect. The install flow will still remap nginx and app-map to the chosen port.</div>
+        </label>
+        <label>Deploy runtime
+          <select id="deployRuntime">
+            <option value="auto" selected>Auto</option>
+            <option value="node">Node / PM2</option>
+            <option value="docker">Docker</option>
+          </select>
+          <div class="small">Docker runs the app in a host-network container so local MySQL on 127.0.0.1 still works.</div>
         </label>
         <label>DB machine
           <select id="dbMachineId">${dbMachineOptions}</select>
+        </label>
+        <label>VPN profile
+          <input id="vpnProfile" placeholder="CyberGhost / wireguard-prod / none" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          <div class="small">Optional per-project egress profile. Leave blank or use <code>none</code> for no VPN. If a hook exists at <code>/etc/vps-vpn-profiles/&lt;profile&gt;.sh</code>, install/update will run it.</div>
         </label>
       </div>
       <div class="space"></div>
@@ -2204,20 +5250,42 @@ function renderPage() {
         <div class="password-field">
           <label for="accessPassword">Project access password</label>
           <div class="password-wrap">
-            <input id="accessPassword" type="password" placeholder="Optional: set a password for the project domain after install">
+            <input id="accessPassword" type="password" placeholder="Optional: set a password after install" autocomplete="new-password" autocorrect="off" autocapitalize="off" spellcheck="false" data-lpignore="true">
             <button id="toggleAccessPasswordBtn" class="ghost" type="button" aria-label="Show password">👁</button>
           </div>
+          <div class="small">Leave blank if you do not want project access protection. The field clears after a successful install.</div>
         </div>
       </div>
       <div class="space"></div>
-      <button id="installBtn" type="button">Install project</button>
+      <div class="copy-actions">
+        <button id="installBtn" type="button">Install project</button>
+        <button id="installMerge2Btn" class="secondary" type="button">Install + Merge*2</button>
+      </div>
       <div id="installResult" class="flash" hidden></div>
+      <div id="installDbScriptsPanel" class="kv-item" hidden style="margin-top: 12px;">
+        <div class="small">DB scripts found during install</div>
+        <div id="installDbScriptsSubtitle" class="small"></div>
+        <div id="installDbScriptsList" class="script-list"></div>
+      </div>
     </section>
 
     <section class="panel">
       <h2>Running Projects</h2>
       <div class="table-wrap">
         <table>
+          <colgroup>
+            <col style="width: 19%">
+            <col style="width: 16%">
+            <col style="width: 11%">
+            <col style="width: 6%">
+            <col style="width: 6%">
+            <col style="width: 12%">
+            <col style="width: 7%">
+            <col style="width: 4%">
+            <col style="width: 7%">
+            <col style="width: 7%">
+            <col style="width: 15%">
+          </colgroup>
           <thead>
             <tr>
               <th>Repo</th>
@@ -2233,7 +5301,7 @@ function renderPage() {
               <th>Details</th>
             </tr>
           </thead>
-          <tbody id="projectsBody"></tbody>
+          <tbody id="projectsBody">${initialProjectsRows}</tbody>
         </table>
       </div>
       <div id="listResult" class="flash" hidden></div>
@@ -2281,13 +5349,45 @@ function renderPage() {
           <label>DB machine
             <select id="mysqlMachineSelect"></select>
           </label>
+          <div id="mysqlCustomFields" class="stack" hidden>
+            <div class="small">Custom / manual DB machine values are saved only for this project in <code>.env.machine</code>.</div>
+            <div class="small">Project DB name, user, and password update the project&apos;s <code>.env</code> values for this connection.</div>
+            <label>Project DB name
+              <input id="mysqlCustomDbName" type="text" placeholder="project_db">
+            </label>
+            <label>Project DB user
+              <input id="mysqlCustomDbUser" type="text" placeholder="project_user">
+            </label>
+            <label>Project DB password
+              <input id="mysqlCustomDbPassword" type="password" placeholder="••••••••">
+            </label>
+            <label>Custom DB machine name
+              <input id="mysqlCustomName" type="text" placeholder="Custom DB machine">
+            </label>
+            <label>Custom DB host
+              <input id="mysqlCustomHost" type="text" placeholder="10.0.0.5">
+            </label>
+            <label>Custom DB port
+              <input id="mysqlCustomPort" type="number" min="1" max="65535" placeholder="3306">
+            </label>
+            <label>Custom DB root user <span class="muted">(optional)</span>
+              <input id="mysqlCustomRootUser" type="text" placeholder="root">
+            </label>
+            <label>Custom DB root password <span class="muted">(optional)</span>
+              <input id="mysqlCustomRootPassword" type="password" placeholder="••••••••">
+            </label>
+            <label>Custom DB notes
+              <textarea id="mysqlCustomNotes" placeholder="Optional notes for this project only"></textarea>
+            </label>
+          </div>
           <label>Allowed IPs / CIDRs
             <textarea id="mysqlIpsInput" placeholder="198.51.100.10,203.0.113.0/24"></textarea>
           </label>
           <div class="actions">
             <a id="mysqlPhpMyAdminBtn" class="btn ghost" href="/phpmyadmin/" target="_blank" rel="noreferrer">phpMyAdmin</a>
-            <button id="mysqlSaveBtn" class="secondary" type="button">Save & move</button>
+            <button id="mysqlSaveBtn" class="secondary" type="button">Save connection</button>
           </div>
+          <div class="small muted">Saving updates the selected DB machine access for this project. It does not move existing data.</div>
           <div id="mysqlAccounts" class="kv-list"></div>
         </div>
       </div>
@@ -2343,13 +5443,136 @@ function renderPage() {
         <button id="closeEnvBtn" class="ghost" type="button">Close</button>
       </div>
     </header>
-    <div class="body">
+      <div class="body">
       <div id="envFlash" class="flash" hidden></div>
+      <div class="kv-item">
+        <div class="row spread" style="gap: 12px; align-items: flex-start;">
+          <div>
+            <div class="small">Editable env file</div>
+            <div class="small">Choose a file to edit. The summary below shows the effective merged env used by the app.</div>
+            <div class="small">Saved to <code id="envSaveTarget">(n/a)</code> as shell-safe quoted assignments.</div>
+            <div class="small">Editing: <code id="envCurrentFileLabel">(n/a)</code></div>
+          </div>
+          <div class="copy-actions">
+            <button id="envReloadBtn" class="ghost" type="button">Reload</button>
+            <button id="envSaveBtn" class="secondary" type="button">Save env</button>
+          </div>
+        </div>
+        <div style="margin: 8px 0 10px;">
+          <label class="small" for="envFileSelect">Env file</label>
+          <select id="envFileSelect" class="secondary" style="width: 100%; margin-top: 4px;"></select>
+        </div>
+        <textarea id="envEditor" class="env-editor" spellcheck="false" placeholder="KEY=&quot;value&quot;"></textarea>
+      </div>
+      <div id="envMergeBox" class="kv-item" hidden>
+        <div class="small">Merge overlay</div>
+        <div class="small">Paste extra .env keys here to merge them on top of the current env result, then save.</div>
+        <textarea id="envMergeOverlay" class="env-editor" spellcheck="false" placeholder="KEY=&quot;extra-value&quot;"></textarea>
+        <div class="copy-actions" style="margin-top: 8px;">
+          <button id="envMergeSaveBtn" class="secondary" type="button">Merge overlay &amp; save</button>
+        </div>
+      </div>
+      <div class="kv-item">
+        <div class="small">Merged summary legend</div>
+        <div class="copy-actions" style="flex-wrap: wrap;">
+          <span class="pill neutral">Source label shows the file and line that supplied the value</span>
+          <span class="pill warn">Red means the key appears more than once in the same file or across files</span>
+          <span class="pill">Editing always happens in the selected file only</span>
+        </div>
+      </div>
       <div class="kv-item">
         <div class="small">Saved backups</div>
         <div id="envBackupsList" class="stack"></div>
       </div>
       <div id="envList" class="kv-list"></div>
+    </div>
+  </div>
+  <div id="domainsPanel" class="scripts-panel modal-panel" hidden>
+    <header>
+      <div>
+        <h2 id="domainsTitle">Project Domains</h2>
+        <div id="domainsSubtitle" class="muted"></div>
+      </div>
+      <button id="closeDomainsBtn" class="ghost" type="button">Close</button>
+    </header>
+    <div class="body">
+      <div id="domainsFlash" class="flash" hidden></div>
+      <div class="kv-item">
+        <div class="small">Primary domain</div>
+        <div id="domainsPrimaryLabel" class="small"></div>
+        <div class="small">Add extra domains that should point to the same project. Each alias can point at a different env file for management and editing.</div>
+      </div>
+      <div id="domainsList" class="stack"></div>
+      <div class="kv-item">
+        <div class="small">Add alias</div>
+        <div class="grid two">
+          <label>Domain
+            <input id="domainsAliasInput" type="text" placeholder="alias.example.com">
+          </label>
+          <label>Env file
+            <select id="domainsEnvSelect"></select>
+          </label>
+          <label>Port
+            <input id="domainsPortInput" type="number" min="1" max="65535" placeholder="same as project">
+          </label>
+          <label>HTTPS
+            <select id="domainsHttpsSelect">
+              <option value="yes">yes</option>
+              <option value="no">no</option>
+            </select>
+          </label>
+        </div>
+        <div class="copy-actions" style="margin-top: 8px;">
+          <button id="domainsAddBtn" class="secondary" type="button">Add alias</button>
+          <button id="domainsSaveBtn" class="secondary" type="button">Save domains</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="duplicatePanel" class="scripts-panel modal-panel" hidden>
+    <header>
+      <div>
+        <h2 id="duplicateTitle">Duplicate Project</h2>
+        <div id="duplicateSubtitle" class="muted"></div>
+      </div>
+      <div class="actions">
+        <button id="duplicateCancelBtn" class="ghost" type="button">Cancel</button>
+        <button id="duplicateCreateBtn" class="secondary" type="button">Duplicate</button>
+      </div>
+    </header>
+    <div class="body">
+      <div id="duplicateFlash" class="flash" hidden></div>
+      <div class="kv-item">
+        <div class="small">Create a copy of this project under a new domain. The duplicate will stay tied to the original source and can be refreshed from it instead of pulling Git directly.</div>
+      </div>
+      <div class="grid two">
+        <label>New domain
+          <input id="duplicateDomainInput" type="text" placeholder="copy.example.com">
+        </label>
+        <label>PM2 config
+          <select id="duplicatePm2ModeSelect">
+            <option value="auto">Auto / generated name</option>
+            <option value="custom">Custom PM2 name</option>
+          </select>
+        </label>
+        <label id="duplicatePm2InputLabel">PM2 name <span class="muted">(optional)</span>
+          <input id="duplicatePm2Input" type="text" placeholder="copy-example">
+        </label>
+        <label>Env mode
+          <select id="duplicateEnvModeSelect">
+            <option value="copy">Copy env and allow edits</option>
+            <option value="share">Share env with original</option>
+          </select>
+        </label>
+        <label>DB mode
+          <select id="duplicateDbModeSelect">
+            <option value="same">Use same DB</option>
+            <option value="separate">Create separate DB</option>
+          </select>
+        </label>
+      </div>
+      <div class="small muted">PM2 config is copied from the original app by default. Use a custom PM2 name only when you need a separate process label for the duplicate.</div>
+      <div class="small muted">When you pull a duplicate, Multidev recopies it from the original source project. When the original is pulled, all duplicates are recopied and restarted automatically.</div>
     </div>
   </div>
   <div id="progressPanel" class="scripts-panel modal-panel" hidden>
@@ -2373,13 +5596,33 @@ function renderPage() {
       </div>
       <div class="actions">
         <button id="pullConfirmNoBtn" class="ghost" type="button">Cancel</button>
-        <button id="pullConfirmYesBtn" class="secondary" type="button" autofocus>Yes, stash and pull</button>
+        <button id="pullConfirmMergeBtn" class="secondary" type="button" autofocus>Merge .env (default)</button>
+        <button id="pullConfirmStashBtn" class="ghost" type="button">Stash all</button>
       </div>
     </header>
     <div class="body">
       <div id="pullConfirmFlash" class="flash" hidden></div>
       <div id="pullConfirmSummary" class="kv-item"></div>
       <pre id="pullConfirmBody" class="kv-item" style="margin:0; max-height: 60vh; overflow:auto; white-space: pre-wrap;"></pre>
+    </div>
+  </div>
+  <div id="uninstallPanel" class="scripts-panel modal-panel" hidden>
+    <header>
+      <div>
+        <h2 id="uninstallTitle">Remove Project</h2>
+        <div id="uninstallSubtitle" class="muted"></div>
+      </div>
+      <div class="actions">
+        <button id="uninstallCancelBtn" class="ghost" type="button">Cancel</button>
+        <button id="uninstallKeepDbBtn" class="secondary" type="button">Kill without deleting DB</button>
+        <button id="uninstallDropDbBtn" class="danger" type="button">Delete DB records and kill</button>
+      </div>
+    </header>
+    <div class="body">
+      <div id="uninstallFlash" class="flash" hidden></div>
+      <div id="uninstallSummary" class="kv-item"></div>
+      <div id="uninstallDbSummary" class="kv-item"></div>
+      <div id="uninstallDomainsSummary" class="kv-item"></div>
     </div>
   </div>
   <div id="logPanel" class="scripts-panel modal-panel" hidden>
@@ -2404,9 +5647,14 @@ function renderPage() {
   </div>
   <script>
     const API = '/manage/api';
+    const initialProjects = ${initialProjects};
+    const CUSTOM_DB_MACHINE_ID = '${CUSTOM_DB_MACHINE_ID}';
     const projectsBody = document.getElementById('projectsBody');
     const listResult = document.getElementById('listResult');
     const installResult = document.getElementById('installResult');
+    const installDbScriptsPanel = document.getElementById('installDbScriptsPanel');
+    const installDbScriptsSubtitle = document.getElementById('installDbScriptsSubtitle');
+    const installDbScriptsList = document.getElementById('installDbScriptsList');
     const systemStats = document.getElementById('systemStats');
     const dbMachineSelect = document.getElementById('dbMachineId');
     const toggleAccessPasswordBtn = document.getElementById('toggleAccessPasswordBtn');
@@ -2428,10 +5676,21 @@ function renderPage() {
     const mysqlDetails = document.getElementById('mysqlDetails');
     const mysqlFlash = document.getElementById('mysqlFlash');
     const mysqlMachineSelect = document.getElementById('mysqlMachineSelect');
+    const mysqlCustomFields = document.getElementById('mysqlCustomFields');
+    const mysqlCustomDbName = document.getElementById('mysqlCustomDbName');
+    const mysqlCustomDbUser = document.getElementById('mysqlCustomDbUser');
+    const mysqlCustomDbPassword = document.getElementById('mysqlCustomDbPassword');
+    const mysqlCustomName = document.getElementById('mysqlCustomName');
+    const mysqlCustomHost = document.getElementById('mysqlCustomHost');
+    const mysqlCustomPort = document.getElementById('mysqlCustomPort');
+    const mysqlCustomRootUser = document.getElementById('mysqlCustomRootUser');
+    const mysqlCustomRootPassword = document.getElementById('mysqlCustomRootPassword');
+    const mysqlCustomNotes = document.getElementById('mysqlCustomNotes');
     const mysqlIpsInput = document.getElementById('mysqlIpsInput');
     const mysqlAccounts = document.getElementById('mysqlAccounts');
     const mysqlPhpMyAdminBtn = document.getElementById('mysqlPhpMyAdminBtn');
     const mysqlSaveBtn = document.getElementById('mysqlSaveBtn');
+    const mysqlMoveBtn = document.getElementById('mysqlMoveBtn');
     const closeMysqlBtn = document.getElementById('closeMysqlBtn');
     const sshPanel = document.getElementById('sshPanel');
     const sshTitle = document.getElementById('sshTitle');
@@ -2442,6 +5701,13 @@ function renderPage() {
     const sshCopyUserBtn = document.getElementById('sshCopyUserBtn');
     const sshCopyPassBtn = document.getElementById('sshCopyPassBtn');
     const sshCopyAllBtn = document.getElementById('sshCopyAllBtn');
+    let currentMysqlDetails = null;
+    let currentEnvFiles = [];
+    let currentEnvFilePath = '';
+    let currentDomainsRef = '';
+    let currentDomainBindings = [];
+    let currentDomainEnvFiles = [];
+    let currentDuplicateRef = '';
     const envPanel = document.getElementById('envPanel');
     const envTitle = document.getElementById('envTitle');
     const envSubtitle = document.getElementById('envSubtitle');
@@ -2455,8 +5721,41 @@ function renderPage() {
     const envUploadInput = document.getElementById('envUploadInput');
     const envUploadBtn = document.getElementById('envUploadBtn');
     const envDownloadZipBtn = document.getElementById('envDownloadZipBtn');
+    const envFileSelect = document.getElementById('envFileSelect');
+    const envEditor = document.getElementById('envEditor');
+    const envSaveBtn = document.getElementById('envSaveBtn');
+    const envReloadBtn = document.getElementById('envReloadBtn');
+    const envSaveTarget = document.getElementById('envSaveTarget');
+    const envCurrentFileLabel = document.getElementById('envCurrentFileLabel');
+    const envMergeBox = document.getElementById('envMergeBox');
+    const envMergeOverlay = document.getElementById('envMergeOverlay');
+    const envMergeSaveBtn = document.getElementById('envMergeSaveBtn');
     const closeEnvBtn = document.getElementById('closeEnvBtn');
     const envBackupsList = document.getElementById('envBackupsList');
+    const domainsPanel = document.getElementById('domainsPanel');
+    const domainsTitle = document.getElementById('domainsTitle');
+    const domainsSubtitle = document.getElementById('domainsSubtitle');
+    const domainsFlash = document.getElementById('domainsFlash');
+    const domainsPrimaryLabel = document.getElementById('domainsPrimaryLabel');
+    const domainsList = document.getElementById('domainsList');
+    const domainsAliasInput = document.getElementById('domainsAliasInput');
+    const domainsEnvSelect = document.getElementById('domainsEnvSelect');
+    const domainsPortInput = document.getElementById('domainsPortInput');
+    const domainsHttpsSelect = document.getElementById('domainsHttpsSelect');
+    const domainsAddBtn = document.getElementById('domainsAddBtn');
+    const domainsSaveBtn = document.getElementById('domainsSaveBtn');
+    const closeDomainsBtn = document.getElementById('closeDomainsBtn');
+    const duplicatePanel = document.getElementById('duplicatePanel');
+    const duplicateTitle = document.getElementById('duplicateTitle');
+    const duplicateSubtitle = document.getElementById('duplicateSubtitle');
+    const duplicateFlash = document.getElementById('duplicateFlash');
+    const duplicateCancelBtn = document.getElementById('duplicateCancelBtn');
+    const duplicateCreateBtn = document.getElementById('duplicateCreateBtn');
+    const duplicateDomainInput = document.getElementById('duplicateDomainInput');
+    const duplicatePm2Input = document.getElementById('duplicatePm2Input');
+    const duplicatePm2ModeSelect = document.getElementById('duplicatePm2ModeSelect');
+    const duplicateEnvModeSelect = document.getElementById('duplicateEnvModeSelect');
+    const duplicateDbModeSelect = document.getElementById('duplicateDbModeSelect');
     const progressPanel = document.getElementById('progressPanel');
     const progressTitle = document.getElementById('progressTitle');
     const progressSubtitle = document.getElementById('progressSubtitle');
@@ -2469,8 +5768,20 @@ function renderPage() {
     const pullConfirmFlash = document.getElementById('pullConfirmFlash');
     const pullConfirmSummary = document.getElementById('pullConfirmSummary');
     const pullConfirmBody = document.getElementById('pullConfirmBody');
-    const pullConfirmYesBtn = document.getElementById('pullConfirmYesBtn');
+    const pullConfirmMergeBtn = document.getElementById('pullConfirmMergeBtn');
+    const pullConfirmMerge2Btn = document.getElementById('pullConfirmMerge2Btn');
+    const pullConfirmStashBtn = document.getElementById('pullConfirmStashBtn');
     const pullConfirmNoBtn = document.getElementById('pullConfirmNoBtn');
+    const uninstallPanel = document.getElementById('uninstallPanel');
+    const uninstallTitle = document.getElementById('uninstallTitle');
+    const uninstallSubtitle = document.getElementById('uninstallSubtitle');
+    const uninstallFlash = document.getElementById('uninstallFlash');
+    const uninstallSummary = document.getElementById('uninstallSummary');
+    const uninstallDbSummary = document.getElementById('uninstallDbSummary');
+    const uninstallDomainsSummary = document.getElementById('uninstallDomainsSummary');
+    const uninstallCancelBtn = document.getElementById('uninstallCancelBtn');
+    const uninstallKeepDbBtn = document.getElementById('uninstallKeepDbBtn');
+    const uninstallDropDbBtn = document.getElementById('uninstallDropDbBtn');
     const logPanel = document.getElementById('logPanel');
     const logTitle = document.getElementById('logTitle');
     const logSubtitle = document.getElementById('logSubtitle');
@@ -2482,16 +5793,22 @@ function renderPage() {
     const logClearErrBtn = document.getElementById('logClearErrBtn');
     const logRefreshBtn = document.getElementById('logRefreshBtn');
     const closeLogBtn = document.getElementById('closeLogBtn');
+    const installRepoWarning = document.getElementById('installRepoWarning');
     let currentScriptsRef = '';
+    let currentInstallScriptsRef = '';
     let currentDbRef = '';
     let currentMysqlRef = '';
     let currentSshRef = '';
     let currentEnvRef = '';
+    let currentEnvDetails = null;
+    let currentEnvMergeMode = false;
     let currentLogRef = '';
     let currentLogType = 'out';
     let currentPullRef = '';
     let pullConfirmResolve = null;
-    let currentProjects = [];
+    let currentUninstallRef = '';
+    let currentUninstallPreview = null;
+    let currentProjects = initialProjects.slice();
     let currentDbMachines = [];
     let progressAbort = null;
     let logTimer = null;
@@ -2529,21 +5846,110 @@ function renderPage() {
       return (size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)) + ' ' + units[unit];
     }
 
-    function renderDbMachineSelectOptions(machines, selectedId) {
+    function shellQuoteEnvValue(value) {
+      const raw = String(value ?? '');
+      const backslash = String.fromCharCode(92);
+      const quote = String.fromCharCode(34);
+      const backtick = String.fromCharCode(96);
+      const newline = String.fromCharCode(10);
+      const carriageReturn = String.fromCharCode(13);
+      const tab = String.fromCharCode(9);
+      return quote
+        + raw.split(backslash).join(backslash + backslash)
+          .split(quote).join(backslash + quote)
+          .split('$').join(backslash + '$')
+          .split(backtick).join(backslash + backtick)
+          .split(newline).join(backslash + 'n')
+          .split(carriageReturn).join(backslash + 'r')
+          .split(tab).join(backslash + 't')
+        + quote;
+    }
+
+    function serializeEnvTextFromObject(env) {
+      const entries = Object.entries(env || {})
+        .filter(([key]) => String(key || '').trim())
+        .sort(([a], [b]) => a.localeCompare(b));
+      const newline = String.fromCharCode(10);
+      return entries.map(([key, value]) => key + '=' + shellQuoteEnvValue(value)).join(newline) + (entries.length ? newline : '');
+    }
+
+    function renderDbMachineSelectOptions(machines, selectedId, includeCustom = false) {
       const list = Array.isArray(machines) && machines.length ? machines : [{ id: '${LOCAL_DB_MACHINE_ID}', name: 'localhost (current)', host: '127.0.0.1' }];
-      return list.map((machine) => {
+      const items = includeCustom
+        ? [{ id: CUSTOM_DB_MACHINE_ID, name: 'Custom / manual DB machine', host: '', notes: 'Saved per project only' }, ...list]
+        : list;
+      return items.map((machine) => {
         const id = String(machine.id || '');
-        const label = (machine.name || id) + (machine.host ? ' · ' + machine.host : '');
+        const name = (machine.name || id).trim() || id;
+        const host = String(machine.host || '').trim();
+        const originHost = String(machine.originHost || '').trim();
+        const port = String(machine.port || '').trim();
+        const notes = String(machine.notes || '').trim();
+        const labelParts = [name];
+        if (originHost && originHost !== host) {
+          labelParts.push((originHost + ' via ' + host + (port ? ':' + port : '')).trim());
+        } else if (host) {
+          labelParts.push(port ? (host + ':' + port) : host);
+        }
+        if (notes) labelParts.push(notes);
+        const label = labelParts.filter(Boolean).join(' · ');
         return '<option value="' + escapeHtml(id) + '"' + (id === String(selectedId || '') ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
       }).join('');
     }
 
+    function isCustomMysqlMachine(details) {
+      if (!details) return false;
+      if (String(details.dbMachineId || '') === CUSTOM_DB_MACHINE_ID) return true;
+      if (details.dbMachineCustom) return true;
+      const selectedId = String(details.dbMachineId || '');
+      if (!selectedId) return false;
+      return !Array.isArray(currentDbMachines) || !currentDbMachines.some((machine) => String(machine.id || '') === selectedId);
+    }
+
+    function setMysqlCustomFieldsVisible(visible) {
+      if (!mysqlCustomFields) return;
+      mysqlCustomFields.hidden = !visible;
+    }
+
+    function fillMysqlCustomFields(details) {
+      const custom = details?.dbMachineCustom || {};
+      const db = details?.db || {};
+      if (mysqlCustomDbName) mysqlCustomDbName.value = db.DB_NAME || db.DB_DATABASE || db.MYSQL_DATABASE || db.POSTGRES_DB || '';
+      if (mysqlCustomDbUser) mysqlCustomDbUser.value = db.DB_USER || db.MYSQL_USER || db.POSTGRES_USER || '';
+      if (mysqlCustomDbPassword) mysqlCustomDbPassword.value = db.DB_PASSWORD || db.MYSQL_PASSWORD || db.POSTGRES_PASSWORD || '';
+      if (mysqlCustomName) mysqlCustomName.value = custom.name || details?.dbMachineLabel || '';
+      if (mysqlCustomHost) mysqlCustomHost.value = custom.host || details?.dbMachineHost || '';
+      if (mysqlCustomPort) mysqlCustomPort.value = custom.port || '';
+      if (mysqlCustomRootUser) mysqlCustomRootUser.value = custom.rootUser || '';
+      if (mysqlCustomRootPassword) mysqlCustomRootPassword.value = custom.rootPassword || '';
+      if (mysqlCustomNotes) mysqlCustomNotes.value = custom.notes || details?.dbMachineNotes || '';
+      syncMysqlCustomPreview();
+    }
+
+    function syncMysqlCustomPreview() {
+      if (!mysqlDetails) return;
+      const current = currentMysqlDetails || {};
+      const customMode = mysqlMachineSelect ? String(mysqlMachineSelect.value || '') === CUSTOM_DB_MACHINE_ID : false;
+      const customHost = mysqlCustomHost ? mysqlCustomHost.value.trim() : '';
+      const customPort = mysqlCustomPort ? mysqlCustomPort.value.trim() : '';
+      const hostValue = customMode ? (customHost || current.dbMachineHost || 'n/a') : (current.dbMachineHost || 'n/a');
+      const portValue = customMode ? (customPort || current.db?.DB_PORT || current.db?.MYSQL_PORT || current.db?.POSTGRES_PORT || '3306') : (current.db?.DB_PORT || current.db?.MYSQL_PORT || current.db?.POSTGRES_PORT || 'n/a');
+      const dbHostValue = customMode ? hostValue : (current.db?.DB_HOST || current.db?.MYSQL_HOST || current.db?.POSTGRES_HOST || 'n/a');
+      const dbPortValue = customMode ? portValue : (current.db?.DB_PORT || current.db?.MYSQL_PORT || current.db?.POSTGRES_PORT || 'n/a');
+      const hostEl = document.getElementById('mysqlDbMachineHostValue');
+      const dbHostEl = document.getElementById('mysqlDatabaseHostValue');
+      const dbPortEl = document.getElementById('mysqlDatabasePortValue');
+      if (hostEl) hostEl.textContent = hostValue;
+      if (dbHostEl) dbHostEl.textContent = dbHostValue;
+      if (dbPortEl) dbPortEl.textContent = dbPortValue;
+    }
+
     function syncDbMachineSelects(selectedId) {
       if (dbMachineSelect) {
-        dbMachineSelect.innerHTML = renderDbMachineSelectOptions(currentDbMachines, selectedId || dbMachineSelect.value || '${LOCAL_DB_MACHINE_ID}');
+        dbMachineSelect.innerHTML = renderDbMachineSelectOptions(currentDbMachines, selectedId || dbMachineSelect.value || '${LOCAL_DB_MACHINE_ID}', true);
       }
       if (mysqlMachineSelect) {
-        mysqlMachineSelect.innerHTML = renderDbMachineSelectOptions(currentDbMachines, selectedId || mysqlMachineSelect.value || '${LOCAL_DB_MACHINE_ID}');
+        mysqlMachineSelect.innerHTML = renderDbMachineSelectOptions(currentDbMachines, selectedId || mysqlMachineSelect.value || '${LOCAL_DB_MACHINE_ID}', true);
       }
     }
 
@@ -2568,7 +5974,8 @@ function renderPage() {
       }
       const cpuLoad = Number(stats.cpuLoadPercent || 0).toFixed(1) + '%';
       const memory = formatBytes(stats.memoryUsed || 0) + ' / ' + formatBytes(stats.memoryTotal || 0) + ' (' + Number(stats.memoryPercent || 0).toFixed(1) + '%)';
-      systemStats.textContent = 'CPU load: ' + Number(stats.load1 || 0).toFixed(2) + ' (' + cpuLoad + ') · Memory: ' + memory;
+      const disk = formatBytes(stats.diskUsed || 0) + ' / ' + formatBytes(stats.diskTotal || 0) + ' (' + Number(stats.diskPercent || 0).toFixed(1) + '%)';
+      systemStats.textContent = 'CPU load: ' + Number(stats.load1 || 0).toFixed(2) + ' (' + cpuLoad + ') · Memory: ' + memory + ' · Disk: ' + disk + ' @ ' + (stats.diskMount || '/');
     }
 
     async function api(path, options = {}) {
@@ -2623,10 +6030,13 @@ function renderPage() {
     }
 
     function rowActions(project) {
-      const ref = encodeURIComponent(project.repo);
+      const ref = encodeURIComponent(project.ref || project.slug || project.repo || '');
       return \`
         <div class="actions">
           \${project.domain ? '<a class="btn ghost" href="https://' + escapeHtml(project.domain) + '/" target="_blank" rel="noreferrer">Open</a>' : ''}
+          <a class="btn ghost" href="/manage/tls/?ref=\${ref}">SSL</a>
+          <button class="secondary" data-action="domains" data-ref="\${ref}">Domains</button>
+          <button class="secondary" data-action="duplicate" data-ref="\${ref}">Duplicate</button>
           <button class="secondary" data-action="update" data-ref="\${ref}">Pull</button>
           <button class="secondary" data-action="restart" data-ref="\${ref}">Restart</button>
           <button class="secondary" data-action="stop" data-ref="\${ref}">Stop</button>
@@ -2660,11 +6070,14 @@ function renderPage() {
       projectsBody.innerHTML = projects.map((project) => \`
         <tr>
           <td>
-            <div><strong>\${escapeHtml(project.repo || project.slug || '')}</strong></div>
+            <div><strong>\${escapeHtml(project.repo || project.slug || '')}</strong>\${project.duplicate ? ' <span class="pill warn">duplicate</span>' : ''}</div>
             <div class="small">\${escapeHtml(project.path || '')}</div>
+            \${project.duplicateSourceRepoRef ? '<div class="small">source: <code>' + escapeHtml(project.duplicateSourceRepoRef) + '</code></div>' : ''}
           </td>
           <td>
             <div>\${project.domain ? \`<a href="https://\${escapeHtml(project.domain)}/" target="_blank" rel="noreferrer">\${escapeHtml(project.domain)}</a>\` : '<span class="muted">n/a</span>'}</div>
+            <div class="small">domains: \${escapeHtml(String(project.domainCount || (project.domain ? 1 : 0)))}</div>
+            \${Array.isArray(project.aliasBindings) && project.aliasBindings.length ? '<div class="small">aliases: ' + escapeHtml(project.aliasBindings.map((item) => item.domain).join(', ')) + '</div>' : ''}
             <div class="small">\${project.https === 'yes' ? 'HTTPS' : 'HTTP only'} · <span class="pill \${escapeHtml(project.sslStatusClass || 'neutral')}">\${escapeHtml(project.sslStatus || 'n/a')}</span></div>
           </td>
           <td>
@@ -2697,6 +6110,8 @@ function renderPage() {
       \`).join('');
     }
 
+    renderProjects(currentProjects);
+
     function openScriptsModal(ref, scripts, subtitle) {
       closeDbPanel();
       closeMysqlPanel();
@@ -2712,11 +6127,11 @@ function renderPage() {
           <div class="script-row">
             <div>
               <div><strong>\${escapeHtml(script.name || '')}</strong></div>
-              <div class="small"><code>\${escapeHtml(script.command || '')}</code></div>
+              <div class="small">\${script.dir ? \`<span class="pill">from \${escapeHtml(script.dir || 'root')}</span> \` : ''}<code>\${escapeHtml(script.command || '')}</code></div>
             </div>
             <div class="actions">
-              <button class="secondary" data-script-run="\${escapeHtml(script.name || '')}" type="button">Run</button>
-              <button class="ghost" data-script-activate="\${escapeHtml(script.name || '')}" type="button">Activate in PM2</button>
+              <button class="secondary" data-script-run="\${escapeHtml(script.name || '')}" data-script-dir="\${escapeHtml(script.dir || '')}" type="button">Run</button>
+              <button class="ghost" data-script-activate="\${escapeHtml(script.name || '')}" data-script-dir="\${escapeHtml(script.dir || '')}" type="button">Activate in PM2</button>
             </div>
           </div>
         \`).join('')
@@ -2733,8 +6148,35 @@ function renderPage() {
       setModalLocked(false);
     }
 
+    function renderInstallDbScripts(ref, scripts, subtitle) {
+      currentInstallScriptsRef = ref || '';
+      if (!installDbScriptsPanel || !installDbScriptsList) return;
+      if (!ref || !Array.isArray(scripts) || !scripts.length) {
+        installDbScriptsPanel.hidden = true;
+        installDbScriptsSubtitle.textContent = '';
+        installDbScriptsList.innerHTML = '';
+        return;
+      }
+
+      installDbScriptsSubtitle.textContent = subtitle || '';
+      installDbScriptsList.innerHTML = scripts.map((script) => \`
+        <div class="script-row">
+          <div>
+            <div><strong>\${escapeHtml(script.name || '')}</strong></div>
+            <div class="small">\${script.dir ? \`<span class="pill">from \${escapeHtml(script.dir || 'root')}</span> \` : ''}<code>\${escapeHtml(script.command || '')}</code></div>
+          </div>
+          <div class="actions">
+            <button class="secondary" data-install-script-run="\${escapeHtml(script.name || '')}" data-install-script-dir="\${escapeHtml(script.dir || '')}" type="button">Run</button>
+            <button class="ghost" data-install-script-activate="\${escapeHtml(script.name || '')}" data-install-script-dir="\${escapeHtml(script.dir || '')}" type="button">Activate in PM2</button>
+          </div>
+        </div>
+      \`).join('');
+      installDbScriptsPanel.hidden = false;
+    }
+
     function openDbPanel(ref, details, subtitle) {
       closeScriptsModal();
+      closeDomainsPanel();
       closeMysqlPanel();
       closeEnvPanel();
       closeProgressPanel();
@@ -2780,36 +6222,45 @@ function renderPage() {
     function openMysqlPanel(ref, details, subtitle) {
       closeScriptsModal();
       closeDbPanel();
+      closeDomainsPanel();
       closeEnvPanel();
       closeProgressPanel();
       closeLogPanel();
       currentMysqlRef = ref;
+      currentMysqlDetails = details || {};
       mysqlTitle.textContent = 'MySQL Access';
       mysqlSubtitle.textContent = subtitle || '';
       mysqlFlash.hidden = true;
       mysqlPhpMyAdminBtn.href = '/phpmyadmin/';
       mysqlIpsInput.value = details.allowedIps || '';
       currentDbMachines = Array.isArray(details.machines) && details.machines.length ? details.machines : currentDbMachines;
+      const customMode = isCustomMysqlMachine(details);
+      const selectedMachineId = customMode ? CUSTOM_DB_MACHINE_ID : (details.dbMachineId || '${LOCAL_DB_MACHINE_ID}');
       if (mysqlMachineSelect) {
-        mysqlMachineSelect.innerHTML = renderDbMachineSelectOptions(currentDbMachines, details.dbMachineId || '${LOCAL_DB_MACHINE_ID}');
-        mysqlMachineSelect.value = details.dbMachineId || '${LOCAL_DB_MACHINE_ID}';
+        mysqlMachineSelect.innerHTML = renderDbMachineSelectOptions(currentDbMachines, selectedMachineId, true);
+        mysqlMachineSelect.value = selectedMachineId;
       }
+      setMysqlCustomFieldsVisible(customMode);
+      fillMysqlCustomFields(details);
       const rows = [
-        ['DB supplier', details.db?.DB_SUPPLIER || 'n/a'],
-        ['Database name', details.db?.DB_NAME || details.db?.DB_DATABASE || details.db?.MYSQL_DATABASE || details.db?.POSTGRES_DB || 'n/a'],
-        ['Database user', details.db?.DB_USER || details.db?.MYSQL_USER || details.db?.POSTGRES_USER || 'n/a'],
-        ['Database password', details.db?.DB_PASSWORD || details.db?.MYSQL_PASSWORD || details.db?.POSTGRES_PASSWORD || 'n/a'],
-        ['DB machine', details.dbMachineId || 'local-current'],
-        ['Database host', details.db?.DB_HOST || details.db?.MYSQL_HOST || details.db?.POSTGRES_HOST || 'n/a'],
-        ['Database port', details.db?.DB_PORT || details.db?.MYSQL_PORT || details.db?.POSTGRES_PORT || 'n/a'],
-        ['Allowed IPs', details.allowedIps || 'local only'],
+        { label: 'DB supplier', value: details.db?.DB_SUPPLIER || 'n/a' },
+        { label: 'Database name', value: details.db?.DB_NAME || details.db?.DB_DATABASE || details.db?.MYSQL_DATABASE || details.db?.POSTGRES_DB || 'n/a' },
+        { label: 'Database user', value: details.db?.DB_USER || details.db?.MYSQL_USER || details.db?.POSTGRES_USER || 'n/a' },
+        { label: 'Database password', value: details.db?.DB_PASSWORD || details.db?.MYSQL_PASSWORD || details.db?.POSTGRES_PASSWORD || 'n/a' },
+        { label: 'DB machine', value: details.dbMachineLabel || details.dbMachineId || 'local-current' },
+        { label: 'DB machine host', value: '<code id="mysqlDbMachineHostValue">' + escapeHtml(details.dbMachineHost || 'n/a') + '</code>', html: true },
+        { label: 'DB machine root user', value: details.dbMachineRootUser || 'n/a' },
+        { label: 'DB machine root password', value: details.dbMachineRootPassword || 'n/a' },
+        { label: 'Database host', value: '<code id="mysqlDatabaseHostValue">' + escapeHtml(details.db?.DB_HOST || details.db?.MYSQL_HOST || details.db?.POSTGRES_HOST || 'n/a') + '</code>', html: true },
+        { label: 'Database port', value: '<code id="mysqlDatabasePortValue">' + escapeHtml(details.db?.DB_PORT || details.db?.MYSQL_PORT || details.db?.POSTGRES_PORT || 'n/a') + '</code>', html: true },
+        { label: 'Allowed IPs', value: details.allowedIps || 'local only' },
       ];
       const sources = (details.files || []).map((file) => escapeHtml(file)).join('<br>');
       mysqlDetails.innerHTML = \`
-        \${rows.map(([label, value]) => \`
+        \${rows.map(({ label, value, html }) => \`
           <div class="kv-item">
             <div class="small">\${escapeHtml(label)}</div>
-            <code>\${escapeHtml(value)}</code>
+            \${html ? value : '<code>' + escapeHtml(value) + '</code>'}
           </div>
         \`).join('')}
         <div class="kv-item">
@@ -2827,11 +6278,13 @@ function renderPage() {
         : '<div class="muted">No MySQL account rows found.</div>';
       mysqlPanel.hidden = false;
       setModalLocked(true);
+      syncMysqlCustomPreview();
     }
 
     function closeMysqlPanel() {
       mysqlPanel.hidden = true;
       currentMysqlRef = '';
+      currentMysqlDetails = null;
       mysqlDetails.innerHTML = '';
       mysqlAccounts.innerHTML = '';
       mysqlIpsInput.value = '';
@@ -2844,6 +6297,7 @@ function renderPage() {
       closeDbPanel();
       closeMysqlPanel();
       closeEnvPanel();
+      closeDomainsPanel();
       closeProgressPanel();
       closeLogPanel();
       currentSshRef = ref;
@@ -2889,6 +6343,40 @@ function renderPage() {
         : '<div class="muted">No values found.</div>';
     }
 
+    function renderEnvSummaryList(listEl, entries) {
+      const list = Array.isArray(entries) ? entries : [];
+      if (!list.length) {
+        listEl.innerHTML = '<div class="muted">No env values found.</div>';
+        return;
+      }
+      listEl.innerHTML = list.map((entry) => {
+        const sources = Array.isArray(entry.sources) ? entry.sources : [];
+        const sourceLabels = sources.map((source) => {
+          const label = source.relativePath || source.path || 'n/a';
+          const line = source.lineNumber ? ':' + source.lineNumber : '';
+          return label + line;
+        });
+        const firstSource = sourceLabels[0] || entry.source || 'n/a';
+        const duplicateCount = entry.duplicateCount || sourceLabels.length || 0;
+        const duplicateTag = entry.duplicate
+          ? '<span class="pill warn">duplicate ×' + escapeHtml(String(duplicateCount || 2)) + '</span>'
+          : '';
+        const extraSources = sourceLabels.length > 1
+          ? '<div class="small">Also in: ' + escapeHtml(sourceLabels.slice(1).join(', ')) + '</div>'
+          : '';
+        return '<div class="kv-item' + (entry.duplicate ? ' env-duplicate' : '') + '">' +
+          '<div class="row spread" style="gap: 10px; align-items: flex-start;">' +
+            '<div>' +
+              '<div><strong>' + escapeHtml(entry.key || '') + '</strong> ' + duplicateTag + '</div>' +
+              '<div class="small">Source: <code>' + escapeHtml(firstSource) + '</code></div>' +
+              extraSources +
+            '</div>' +
+            '<code>' + escapeHtml(String(entry.value ?? '')) + '</code>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+    }
+
     function renderBackupList(listEl, backups) {
       if (!Array.isArray(backups) || !backups.length) {
         listEl.innerHTML = '<div class="muted">No saved backups yet.</div>';
@@ -2924,27 +6412,233 @@ function renderPage() {
       selectEl.disabled = !list.length;
     }
 
-    function openEnvPanel(ref, details, subtitle) {
+    function renderEnvFileSelect(selectEl, envFiles, selectedPath = '') {
+      if (!selectEl) return;
+      const list = Array.isArray(envFiles) ? envFiles : [];
+      if (!list.length) {
+        const value = selectedPath || '.env';
+        const label = String(value || '.env').split(/[\\/]/).pop() || '.env';
+        selectEl.innerHTML = '<option value="' + escapeHtml(value) + '" selected>' + escapeHtml(label) + '</option>';
+        selectEl.disabled = false;
+        selectEl.value = value;
+        return;
+      }
+      selectEl.innerHTML = list.map((file) => \`
+        <option value="\${escapeHtml(file.path || '')}"\${String(file.path || '') === String(selectedPath || '') ? ' selected' : ''}>
+          \${escapeHtml(file.relativePath || file.name || file.path || '.env')}
+        </option>
+      \`).join('');
+      selectEl.disabled = false;
+      if (selectedPath) {
+        selectEl.value = selectedPath;
+      } else if (list[0]) {
+        selectEl.value = list[0].path || '';
+      }
+    }
+
+    function getEnvFileByPath(envFiles, filePath) {
+      const list = Array.isArray(envFiles) ? envFiles : [];
+      const normalized = String(filePath || '').trim();
+      if (!normalized) return null;
+      return list.find((file) => String(file.path || '') === normalized || String(file.relativePath || '') === normalized || String(file.name || '') === normalized) || null;
+    }
+
+    function renderDomainBindings(listEl, bindings, envFiles) {
+      const list = Array.isArray(bindings) ? bindings : [];
+      if (!list.length) {
+        listEl.innerHTML = '<div class="muted">No extra domain aliases yet.</div>';
+        return;
+      }
+      const renderEnvOptions = (selectedPath) => {
+        const selected = String(selectedPath || '').trim();
+        if (Array.isArray(envFiles) && envFiles.length) {
+          return envFiles.map((file) => {
+            const value = String(file.path || '');
+            const label = file.relativePath || file.name || file.path || '.env';
+            const isSelected = String(value) === selected ? ' selected' : '';
+            return '<option value="' + escapeHtml(value) + '"' + isSelected + '>' + escapeHtml(label) + '</option>';
+          }).join('');
+        }
+        return '<option value=".env"' + (selected === '.env' || !selected ? ' selected' : '') + '>.env</option>';
+      };
+      listEl.innerHTML = list.filter((binding) => !binding.primary).map((binding, index) => {
+        const selectedEnv = getEnvFileByPath(envFiles, binding.envFile);
+        const envLabel = selectedEnv ? (selectedEnv.relativePath || selectedEnv.path || binding.envFile || '.env') : (binding.envFile || '.env');
+        return \`
+          <div class="kv-item">
+            <div class="row spread" style="gap: 12px; align-items: flex-start;">
+              <div>
+                <div><strong>\${escapeHtml(binding.domain || '')}</strong></div>
+                <div class="small">port: <code>\${escapeHtml(String(binding.port || ''))}</code> · https: <code>\${escapeHtml(String(binding.https || 'yes'))}</code></div>
+                <div class="small">env file: <code>\${escapeHtml(envLabel)}</code></div>
+                <div class="small" style="margin-top: 8px;">
+                  <label class="small" style="display:block; margin-bottom: 4px;">Alias env file</label>
+                  <select data-domain-envfile="\${escapeHtml(binding.domain || '')}" style="min-width: 280px;">
+                    \${renderEnvOptions(binding.envFile)}
+                  </select>
+                </div>
+              </div>
+              <div class="copy-actions">
+                <button class="secondary" type="button" data-domain-env="\${escapeHtml(binding.domain || '')}">Edit env</button>
+                <button class="danger" type="button" data-domain-delete="\${escapeHtml(binding.domain || '')}">Delete</button>
+              </div>
+            </div>
+          </div>
+        \`;
+      }).join('');
+    }
+
+    function openDomainsPanel(ref, details, subtitle) {
       closeScriptsModal();
       closeDbPanel();
       closeMysqlPanel();
+      closeEnvPanel();
+      closeProgressPanel();
+      closeLogPanel();
+      currentDomainsRef = ref;
+      const primary = details.primary ? { ...details.primary, primary: true } : null;
+      const aliases = Array.isArray(details.bindings) ? details.bindings.map((binding) => ({ ...binding, primary: false })) : [];
+      currentDomainBindings = [primary, ...aliases].filter(Boolean);
+      currentDomainEnvFiles = Array.isArray(details.envFiles) ? details.envFiles : [];
+      domainsTitle.textContent = 'Project Domains';
+      domainsSubtitle.textContent = subtitle || '';
+      domainsFlash.hidden = true;
+      const primaryBinding = currentDomainBindings.find((binding) => binding.primary) || null;
+      domainsPrimaryLabel.innerHTML = primaryBinding
+        ? '<code>' + escapeHtml(primaryBinding.domain || '') + '</code> · port <code>' + escapeHtml(String(primaryBinding.port || '')) + '</code> · env <code>' + escapeHtml(primaryBinding.envFile || '.env') + '</code>'
+        : '<span class="muted">No primary domain</span>';
+      renderDomainBindings(domainsList, currentDomainBindings, currentDomainEnvFiles);
+      renderEnvFileSelect(domainsEnvSelect, currentDomainEnvFiles, currentDomainEnvFiles[0]?.path || '.env');
+      domainsAliasInput.value = '';
+      domainsPortInput.value = '';
+      domainsHttpsSelect.value = 'yes';
+      domainsPanel.hidden = false;
+      setModalLocked(true);
+    }
+
+    function closeDomainsPanel() {
+      domainsPanel.hidden = true;
+      currentDomainsRef = '';
+      currentDomainBindings = [];
+      currentDomainEnvFiles = [];
+      domainsFlash.hidden = true;
+      domainsPrimaryLabel.textContent = '';
+      domainsList.innerHTML = '';
+      domainsAliasInput.value = '';
+      domainsPortInput.value = '';
+      setModalLocked(false);
+    }
+
+    function findProjectByRef(ref) {
+      const needle = String(ref || '').trim();
+      if (!needle) return null;
+      return (currentProjects || []).find((project) => String(project.ref || project.slug || project.repo || '') === needle) || null;
+    }
+
+    function openDuplicatePanel(ref, details, subtitle) {
+      closeScriptsModal();
+      closeDbPanel();
+      closeMysqlPanel();
+      closeDomainsPanel();
+      closeEnvPanel();
+      closeProgressPanel();
+      closeLogPanel();
+      currentDuplicateRef = ref;
+      duplicateTitle.textContent = 'Duplicate Project';
+      duplicateSubtitle.textContent = subtitle || '';
+      duplicateFlash.hidden = true;
+      duplicateDomainInput.value = '';
+      duplicatePm2ModeSelect.value = 'auto';
+      duplicatePm2Input.value = details?.pm2 || '';
+      duplicateEnvModeSelect.value = 'copy';
+      duplicateDbModeSelect.value = 'same';
+      duplicatePm2Input.disabled = true;
+      duplicatePm2Input.placeholder = details?.pm2 || 'auto-generated';
+      if (details && details.domain) {
+        const base = String(details.domain).replace(/^[^.]+\./, '');
+        const left = String(details.domain).split('.')[0] || '';
+        duplicateDomainInput.placeholder = left ? left + '-copy.' + base : 'copy.example.com';
+      } else {
+        duplicateDomainInput.placeholder = 'copy.example.com';
+      }
+      syncDuplicatePm2Ui();
+      duplicatePanel.hidden = false;
+      setModalLocked(true);
+      duplicateDomainInput.focus();
+    }
+
+    function closeDuplicatePanel() {
+      duplicatePanel.hidden = true;
+      currentDuplicateRef = '';
+      duplicateFlash.hidden = true;
+      duplicateDomainInput.value = '';
+      duplicatePm2ModeSelect.value = 'auto';
+      duplicatePm2Input.value = '';
+      duplicateEnvModeSelect.value = 'copy';
+      duplicateDbModeSelect.value = 'same';
+      duplicatePm2Input.disabled = true;
+      duplicatePm2Input.placeholder = 'auto-generated';
+      setModalLocked(false);
+    }
+
+    function openEnvPanel(ref, details, subtitle, options = {}) {
+      closeScriptsModal();
+      closeDbPanel();
+      closeMysqlPanel();
+      closeDomainsPanel();
       closeProgressPanel();
       closeLogPanel();
       currentEnvRef = ref;
-      envTitle.textContent = 'Environment Values';
-      envSubtitle.textContent = subtitle || '';
+      currentEnvDetails = details || null;
+      currentEnvFiles = Array.isArray(details.envFiles) ? details.envFiles : [];
+      currentEnvMergeMode = Boolean(options.mergeMode);
+      envTitle.textContent = currentEnvMergeMode ? 'Merge Environment Values' : 'Environment Values';
+      envSubtitle.textContent = currentEnvMergeMode
+        ? (subtitle || 'Paste extra .env keys in the overlay and save the merged result.')
+        : (subtitle || '');
       envFlash.hidden = true;
       const backups = Array.isArray(details.backups) ? details.backups : [];
-      const entries = Object.entries(details.env || {})
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([key, value]) => [key, String(value)]);
-      renderKeyValueList(envList, entries);
+      currentEnvFilePath = String(options.selectedFile || details.selectedFile || details.saveTarget || currentEnvFiles[0]?.path || '').trim();
+      const selectedEnvFile = getEnvFileByPath(currentEnvFiles, currentEnvFilePath);
+      const envSummaryEntries = Array.isArray(details.envEntries) && details.envEntries.length
+        ? details.envEntries
+        : Object.entries(details.env || {})
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([key, value]) => ({
+            key,
+            value: String(value),
+            source: currentEnvFilePath || 'n/a',
+            duplicate: false,
+            duplicateCount: 1,
+            sources: [{ relativePath: currentEnvFilePath || 'n/a', path: currentEnvFilePath || '', lineNumber: 0, value: String(value) }],
+          }));
+      renderEnvSummaryList(envList, envSummaryEntries);
+      if (envEditor) {
+        envEditor.value = selectedEnvFile ? String(selectedEnvFile.content || '') : '';
+      }
+      renderEnvFileSelect(envFileSelect, currentEnvFiles, currentEnvFilePath);
+      if (envMergeBox) {
+        envMergeBox.hidden = !currentEnvMergeMode;
+      }
+      if (envMergeOverlay) {
+        envMergeOverlay.value = '';
+        envMergeOverlay.placeholder = currentEnvMergeMode ? 'KEY="extra-value"' : 'KEY="value"';
+      }
+      if (envMergeSaveBtn) {
+        envMergeSaveBtn.hidden = !currentEnvMergeMode;
+      }
       renderBackupList(envBackupsList, backups);
       renderBackupSelect(envRestoreSelect, backups, details.latestBackup?.name || 'latest.zip');
       envRestoreBtn.disabled = !backups.length;
       envRestoreSelectedBtn.disabled = !backups.length;
       envDownloadBtn.href = \`\${API}/projects/\${ref}/env/download\`;
       if (envDownloadZipBtn) envDownloadZipBtn.href = \`\${API}/projects/\${ref}/env/download\`;
+      if (envSaveTarget) {
+        envSaveTarget.textContent = selectedEnvFile?.relativePath || selectedEnvFile?.path || currentEnvFilePath || '(n/a)';
+      }
+      if (envCurrentFileLabel) {
+        envCurrentFileLabel.textContent = selectedEnvFile?.relativePath || selectedEnvFile?.path || currentEnvFilePath || '(n/a)';
+      }
       envPanel.hidden = false;
       setModalLocked(true);
     }
@@ -2952,21 +6646,33 @@ function renderPage() {
     function closeEnvPanel() {
       envPanel.hidden = true;
       currentEnvRef = '';
+      currentEnvDetails = null;
+      currentEnvFiles = [];
+      currentEnvFilePath = '';
+      currentEnvMergeMode = false;
       envList.innerHTML = '';
       envBackupsList.innerHTML = '';
+      if (envFileSelect) envFileSelect.innerHTML = '';
       if (envRestoreSelect) envRestoreSelect.innerHTML = '';
       envFlash.hidden = true;
       envUploadInput.value = '';
+      if (envEditor) envEditor.value = '';
+      if (envMergeOverlay) envMergeOverlay.value = '';
+      if (envMergeBox) envMergeBox.hidden = true;
+      if (envMergeSaveBtn) envMergeSaveBtn.hidden = true;
+      if (envSaveTarget) envSaveTarget.textContent = '(n/a)';
+      if (envCurrentFileLabel) envCurrentFileLabel.textContent = '(n/a)';
       setModalLocked(false);
     }
 
-    function openProgressPanel(ref, subtitle) {
+    function openProgressPanel(ref, subtitle, title = 'Pull Progress') {
       closeScriptsModal();
       closeDbPanel();
       closeEnvPanel();
       closeMysqlPanel();
+      closeDomainsPanel();
       closeLogPanel();
-      progressTitle.textContent = 'Pull Progress';
+      progressTitle.textContent = title;
       progressSubtitle.textContent = subtitle || ref || '';
       progressBody.textContent = '';
       progressFlash.hidden = true;
@@ -2997,15 +6703,17 @@ function renderPage() {
       closeDbPanel();
       closeEnvPanel();
       closeMysqlPanel();
+      closeDomainsPanel();
       closeProgressPanel();
       closeLogPanel();
       currentPullRef = ref;
       pullConfirmTitle.textContent = 'Local changes detected';
       const changes = Array.isArray(preflight?.changes) ? preflight.changes.length : 0;
-      pullConfirmSubtitle.textContent = decodeURIComponent(ref) + ' · ' + changes + ' local change' + (changes === 1 ? '' : 's') + ' · stash before pull';
+      pullConfirmSubtitle.textContent = decodeURIComponent(ref) + ' · ' + changes + ' local change' + (changes === 1 ? '' : 's') + ' · merge .env values, merge*2, or stash all before pull';
       pullConfirmFlash.hidden = true;
-      pullConfirmSummary.innerHTML = '<div class="small">' + escapeHtml(preflight?.message || 'Git reported local changes in this project. Stash them first, then pull the remote branch.') + '</div>' +
-        '<div class="small">Default action: Yes, stash and pull.</div>';
+      pullConfirmSummary.innerHTML = '<div class="small">' + escapeHtml(preflight?.message || 'Git reported local changes in this project. Merge .env values first, or stash everything, then pull the remote branch.') + '</div>' +
+        '<div class="small">Default action: Merge .env and keep current VPS values, then append any new upstream env keys.</div>' +
+        '<div class="small">Merge*2 will open the env editor so you can paste extra keys and merge them on top of the pulled result.</div>';
       pullConfirmBody.textContent = Array.isArray(preflight?.changes) && preflight.changes.length
         ? preflight.changes.map((line) => '  ' + line).join('\\n')
         : '(no change list available)';
@@ -3013,17 +6721,118 @@ function renderPage() {
       setModalLocked(true);
     }
 
-    function closePullConfirmPanel(accept = false) {
+    function closePullConfirmPanel(mode = '') {
       pullConfirmPanel.hidden = true;
       currentPullRef = '';
       pullConfirmBody.textContent = '';
       pullConfirmSummary.innerHTML = '';
       pullConfirmFlash.hidden = true;
-      resolvePullConfirm(accept);
+      resolvePullConfirm(mode);
       setModalLocked(false);
     }
 
-    function confirmPullStash(ref, preflight) {
+    function renderUninstallDomains(domains) {
+      const list = Array.isArray(domains) ? domains.filter(Boolean) : [];
+      if (!list.length) {
+        return '<div class="muted">No mapped domains found.</div>';
+      }
+      return list.map((domain) => '<div class="kv-item"><code>' + escapeHtml(domain) + '</code></div>').join('');
+    }
+
+    function renderUninstallDbSummary(db) {
+      if (!db) {
+        return '<div class="muted">Database summary unavailable.</div>';
+      }
+      const tables = Array.isArray(db.tables) ? db.tables : [];
+      const tableRows = tables.length
+        ? tables.map((table) => '<div class="kv-item"><div class="row spread" style="gap: 12px;"><div><strong>' + escapeHtml(table.name || '') + '</strong></div><code>' + escapeHtml(String(table.rows ?? 0)) + ' rows</code></div></div>').join('')
+        : '<div class="muted">No tables found.</div>';
+      return [
+        db.available === false && db.error ? '<div class="kv-item"><div class="small">DB preview</div><div class="small" style="color:#fca5a5;">' + escapeHtml(db.error) + '</div></div>' : '',
+        '<div class="kv-item"><div class="small">Database</div><code>' + escapeHtml(db.dbName || 'n/a') + '</code></div>',
+        '<div class="kv-item"><div class="small">DB user</div><code>' + escapeHtml(db.dbUser || 'n/a') + '</code></div>',
+        '<div class="kv-item"><div class="small">Table count</div><code>' + escapeHtml(String(db.tableCount ?? 0)) + '</code></div>',
+        '<div class="kv-item"><div class="small">Total rows</div><code>' + escapeHtml(String(db.rowCountTotal ?? 0)) + '</code></div>',
+        '<div class="kv-item"><div class="small">Tables</div>' + tableRows + '</div>',
+      ].join('');
+    }
+
+    function openUninstallPanel(ref, preview) {
+      closeScriptsModal();
+      closeDbPanel();
+      closeMysqlPanel();
+      closeEnvPanel();
+      closeDomainsPanel();
+      closeProgressPanel();
+      closeLogPanel();
+      currentUninstallRef = ref;
+      currentUninstallPreview = preview || null;
+      uninstallTitle.textContent = 'Remove Project';
+      uninstallSubtitle.textContent = decodeURIComponent(ref) + ' · choose whether to delete the DB or keep it';
+      uninstallFlash.hidden = true;
+      const domains = Array.isArray(preview?.domains) ? preview.domains : [];
+      uninstallSummary.innerHTML = [
+        ['Project', preview?.project || decodeURIComponent(ref)],
+        ['App dir', preview?.appDir || 'n/a'],
+        ['PM2', preview?.pm2Name || 'n/a'],
+        ['Primary domain', preview?.primaryDomain || 'n/a'],
+        ['SSH user', preview?.sshUploadUser || 'n/a'],
+        ['Keep DB', 'Yes unless you choose Delete DB records and kill'],
+      ].map(([label, value]) => (
+        '<div class="kv-item"><div class="small">' + escapeHtml(label) + '</div><code>' + escapeHtml(String(value ?? '')) + '</code></div>'
+      )).join('');
+      uninstallDbSummary.innerHTML = renderUninstallDbSummary(preview?.db || null);
+      uninstallDomainsSummary.innerHTML = '<div class="small">Domains to remove</div><div style="display:grid; gap:8px; margin-top:8px;">' + renderUninstallDomains(domains) + '</div>';
+      uninstallPanel.hidden = false;
+      setModalLocked(true);
+    }
+
+    function closeUninstallPanel() {
+      uninstallPanel.hidden = true;
+      currentUninstallRef = '';
+      currentUninstallPreview = null;
+      uninstallFlash.hidden = true;
+      uninstallSummary.innerHTML = '';
+      uninstallDbSummary.innerHTML = '';
+      uninstallDomainsSummary.innerHTML = '';
+      setModalLocked(false);
+    }
+
+    async function loadUninstallPreview(ref) {
+      return api('/projects/' + ref + '/uninstall-preview');
+    }
+
+    async function runUninstall(ref, dropDb) {
+      const res = await api('/projects/' + ref + '/uninstall', {
+        method: 'POST',
+        body: JSON.stringify({ dropDb: Boolean(dropDb) }),
+      });
+      showMessage(listResult, res.message || 'Project removed');
+      closeUninstallPanel();
+      await refresh();
+    }
+
+    function syncDuplicatePm2Ui() {
+      if (!duplicatePm2ModeSelect || !duplicatePm2Input) return;
+      const custom = duplicatePm2ModeSelect.value === 'custom';
+      duplicatePm2Input.disabled = !custom;
+      duplicatePm2Input.placeholder = custom ? 'copy-example' : 'auto-generated';
+      if (!custom && !duplicatePm2Input.value.trim()) {
+        duplicatePm2Input.value = '';
+      }
+    }
+
+    async function runDuplicate(ref, payload) {
+      const res = await api('/projects/' + ref + '/duplicate', {
+        method: 'POST',
+        body: JSON.stringify(payload || {}),
+      });
+      showMessage(listResult, res.message || 'Project duplicated');
+      closeDuplicatePanel();
+      await refresh();
+    }
+
+    function confirmPullMode(ref, preflight) {
       return new Promise((resolve) => {
         pullConfirmResolve = resolve;
         openPullConfirmPanel(ref, preflight);
@@ -3035,6 +6844,7 @@ function renderPage() {
       closeDbPanel();
       closeEnvPanel();
       closeMysqlPanel();
+      closeDomainsPanel();
       closeProgressPanel();
       currentLogRef = ref;
       currentLogType = type || 'out';
@@ -3076,19 +6886,22 @@ function renderPage() {
       await loadLog(ref, currentLogType);
     }
 
-    async function runPullWithProgress(ref, stash = false) {
+    async function runPullWithProgress(ref, mode = 'merge-env') {
       if (progressAbort) {
         progressAbort.abort();
       }
       progressAbort = new AbortController();
       openProgressPanel(
         decodeURIComponent(ref),
-        stash
-          ? 'Pulling ' + decodeURIComponent(ref) + ' with auto-stash'
-          : 'Pulling ' + decodeURIComponent(ref),
+        mode === 'stash-all'
+          ? 'Pulling ' + decodeURIComponent(ref) + ' with stash-all'
+          : mode === 'merge-env2'
+            ? 'Pulling ' + decodeURIComponent(ref) + ' with merge*2'
+            : 'Pulling ' + decodeURIComponent(ref),
+        'Pull Progress',
       );
       try {
-        const res = await fetch(API + '/projects/' + ref + '/update-stream?stash=' + (stash ? '1' : '0'), {
+        const res = await fetch(API + '/projects/' + ref + '/update-stream?mode=' + encodeURIComponent(mode), {
           method: 'POST',
           credentials: 'same-origin',
           signal: progressAbort.signal,
@@ -3119,6 +6932,51 @@ function renderPage() {
       }
     }
 
+    async function runBuildWithProgress(ref, mode = 'root') {
+      if (progressAbort) {
+        progressAbort.abort();
+      }
+      progressAbort = new AbortController();
+      openProgressPanel(
+        decodeURIComponent(ref),
+        mode === 'all'
+          ? 'Building all scripts for ' + decodeURIComponent(ref)
+          : 'Building root script for ' + decodeURIComponent(ref),
+        'Build Progress',
+      );
+      try {
+        const res = await fetch(API + '/projects/' + ref + '/build-stream?mode=' + encodeURIComponent(mode), {
+          method: 'POST',
+          credentials: 'same-origin',
+          signal: progressAbort.signal,
+        });
+        if (!res.ok || !res.body) {
+          const text = await res.text();
+          throw new Error(text || 'Request failed: ' + res.status);
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          progressBody.textContent = buffer;
+          progressBody.scrollTop = progressBody.scrollHeight;
+        }
+        buffer += decoder.decode();
+        if (buffer.trim()) {
+          progressBody.textContent = buffer;
+        }
+      } catch (error) {
+        showMessage(progressFlash, error.message, false);
+        progressFlash.hidden = false;
+        throw error;
+      } finally {
+        progressAbort = null;
+      }
+    }
+
     async function loadPullPreflight(ref) {
       return api('/projects/' + ref + '/pull-preflight');
     }
@@ -3143,9 +7001,46 @@ function renderPage() {
       openSshPanel(ref, data, data.project || ref);
     }
 
-    async function loadEnv(ref) {
+    async function loadEnv(ref, options = {}) {
       const data = await api(\`/projects/\${ref}/env\`);
-      openEnvPanel(ref, data, data.project || ref);
+      openEnvPanel(ref, data, data.project || ref, {
+        ...options,
+        selectedFile: options.selectedFile || currentEnvFilePath || data.selectedFile || data.saveTarget,
+      });
+    }
+
+    async function loadDomains(ref) {
+      const data = await api(\`/projects/\${ref}/domains\`);
+      openDomainsPanel(ref, data, data.project || ref);
+    }
+
+    async function saveDomains(ref) {
+      const payload = {
+        bindings: currentDomainBindings.filter((binding) => binding && !binding.primary),
+      };
+      const data = await api(\`/projects/\${ref}/domains\`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      showMessage(domainsFlash, data.message || 'Domains saved');
+      await refresh();
+      await loadDomains(ref);
+    }
+
+    async function saveEnv(ref, options = {}) {
+      const envText = envEditor ? envEditor.value : '';
+      const overlayText = envMergeOverlay ? envMergeOverlay.value : '';
+      const data = await api(\`/projects/\${ref}/env/save\`, {
+        method: 'POST',
+        body: JSON.stringify({
+          envText,
+          overlayText: currentEnvMergeMode ? overlayText : '',
+          targetFile: currentEnvFilePath,
+        }),
+      });
+      showMessage(envFlash, data.message || 'Environment values saved');
+      await refresh();
+      await loadEnv(ref, { ...options, selectedFile: currentEnvFilePath });
     }
 
     async function backupEnv(ref) {
@@ -3154,7 +7049,7 @@ function renderPage() {
         body: JSON.stringify({}),
       });
       showMessage(envFlash, data.message || 'Environment backup saved');
-      await loadEnv(ref);
+      await loadEnv(ref, { selectedFile: currentEnvFilePath });
       await refresh();
     }
 
@@ -3165,7 +7060,7 @@ function renderPage() {
       });
       showMessage(envFlash, data.message || 'Environment backup restored');
       await refresh();
-      await loadEnv(ref);
+      await loadEnv(ref, { selectedFile: currentEnvFilePath });
     }
 
     async function deleteEnvBackup(ref, backupName) {
@@ -3174,7 +7069,7 @@ function renderPage() {
       });
       showMessage(envFlash, data.message || 'Environment backup deleted');
       await refresh();
-      await loadEnv(ref);
+      await loadEnv(ref, { selectedFile: currentEnvFilePath });
     }
 
     async function uploadEnv(ref, file) {
@@ -3195,24 +7090,57 @@ function renderPage() {
       await refresh();
     }
 
-    async function saveMysql(ref, ips) {
+    async function saveMysql(ref, ips, moveData = false) {
       const machineId = mysqlMachineSelect ? mysqlMachineSelect.value : '';
+      const useCustom = String(machineId || '') === CUSTOM_DB_MACHINE_ID;
+      const projectDbName = mysqlCustomDbName ? mysqlCustomDbName.value.trim() : '';
+      const projectDbUser = mysqlCustomDbUser ? mysqlCustomDbUser.value.trim() : '';
+      const projectDbPassword = mysqlCustomDbPassword ? mysqlCustomDbPassword.value : '';
+      const customMachine = useCustom ? {
+        id: CUSTOM_DB_MACHINE_ID,
+        name: mysqlCustomName ? mysqlCustomName.value.trim() : '',
+        host: mysqlCustomHost ? mysqlCustomHost.value.trim() : '',
+        port: mysqlCustomPort ? mysqlCustomPort.value.trim() : '',
+        rootUser: mysqlCustomRootUser ? mysqlCustomRootUser.value.trim() : '',
+        rootPassword: mysqlCustomRootPassword ? mysqlCustomRootPassword.value : '',
+        notes: mysqlCustomNotes ? mysqlCustomNotes.value.trim() : '',
+      } : null;
+      if (moveData) {
+        const ok = window.confirm(
+          'Move the current database to the selected DB machine and switch this project over? This copies the current database contents and may overwrite the target database.'
+        );
+        if (!ok) return;
+      }
       const res = await api(\`/projects/\${ref}/mysql\`, {
         method: 'POST',
-        body: JSON.stringify({ ips, machineId }),
+        body: JSON.stringify(useCustom ? {
+          ips,
+          machineId: CUSTOM_DB_MACHINE_ID,
+          customMachine,
+          customMachineHost: customMachine ? customMachine.host : '',
+          customMachineName: customMachine ? customMachine.name : '',
+          customMachinePort: customMachine ? customMachine.port : '',
+          customMachineRootUser: customMachine ? customMachine.rootUser : '',
+          customMachineRootPassword: customMachine ? customMachine.rootPassword : '',
+          customMachineNotes: customMachine ? customMachine.notes : '',
+          dbName: projectDbName,
+          dbUser: projectDbUser,
+          dbPassword: projectDbPassword,
+          moveData,
+        } : { ips, machineId, moveData }),
       });
       await loadMysql(ref);
-      showMessage(mysqlFlash, res.message || 'MySQL permissions updated');
+      showMessage(mysqlFlash, res.message || (moveData ? 'MySQL data moved' : 'MySQL permissions updated'));
       await refresh();
     }
 
-    async function runScript(ref, script, mode) {
+    async function runScript(ref, script, mode, dir = '', flashEl = scriptsFlash) {
       const action = mode === 'activate' ? 'activate' : 'run';
       const res = await api(\`/projects/\${ref}/scripts/\${action}\`, {
         method: 'POST',
-        body: JSON.stringify({ script }),
+        body: JSON.stringify({ script, dir }),
       });
-      showMessage(scriptsFlash, res.message || 'Done');
+      showMessage(flashEl || scriptsFlash, res.message || 'Done');
       await refresh();
     }
 
@@ -3274,6 +7202,41 @@ function renderPage() {
         }
         return;
       }
+      if (action === 'domains') {
+        btn.disabled = true;
+        try {
+          await loadDomains(ref);
+        } catch (error) {
+          showMessage(listResult, error.message, false);
+        } finally {
+          btn.disabled = false;
+        }
+        return;
+      }
+      if (action === 'duplicate') {
+        btn.disabled = true;
+        try {
+          const project = findProjectByRef(decodeURIComponent(ref));
+          openDuplicatePanel(ref, project || {}, project ? (project.repo || project.slug || decodeURIComponent(ref)) : decodeURIComponent(ref));
+        } catch (error) {
+          showMessage(listResult, error.message, false);
+        } finally {
+          btn.disabled = false;
+        }
+        return;
+      }
+      if (action === 'uninstall') {
+        btn.disabled = true;
+        try {
+          const preview = await loadUninstallPreview(ref);
+          openUninstallPanel(ref, preview);
+        } catch (error) {
+          showMessage(listResult, error.message, false);
+        } finally {
+          btn.disabled = false;
+        }
+        return;
+      }
       if (action === 'update') {
         btn.disabled = true;
         try {
@@ -3281,15 +7244,21 @@ function renderPage() {
           if (preflight && preflight.exists === false) {
             throw new Error(preflight.message || 'Git repository not found');
           }
-          let stash = false;
+          let mode = 'merge-env';
           if (preflight && preflight.dirty) {
-            stash = await confirmPullStash(ref, preflight);
-            if (!stash) {
+            mode = await confirmPullMode(ref, preflight);
+            if (!mode) {
               showMessage(listResult, 'Pull cancelled', false);
               return;
             }
           }
-          await runPullWithProgress(ref, stash || Boolean(preflight && preflight.dirty));
+          const pullMode = mode === 'merge-env2' ? 'merge-env' : mode;
+          await runPullWithProgress(ref, pullMode);
+          showMessage(progressFlash, 'Pull completed and build all ran for ' + decodeURIComponent(ref));
+          if (mode === 'merge-env2') {
+            await loadEnv(ref, { mergeMode: true });
+            showMessage(envFlash, 'Paste extra .env keys in the overlay and click Merge overlay & save.');
+          }
         } catch (error) {
           showMessage(progressFlash, error.message, false);
           progressPanel.hidden = false;
@@ -3329,8 +7298,51 @@ function renderPage() {
     closeSshBtn.addEventListener('click', closeSshPanel);
     closeEnvBtn.addEventListener('click', closeEnvPanel);
     closeProgressBtn.addEventListener('click', closeProgressPanel);
-    pullConfirmNoBtn.addEventListener('click', () => closePullConfirmPanel(false));
-    pullConfirmYesBtn.addEventListener('click', () => closePullConfirmPanel(true));
+    pullConfirmNoBtn.addEventListener('click', () => closePullConfirmPanel(''));
+    pullConfirmMergeBtn.addEventListener('click', () => closePullConfirmPanel('merge-env'));
+    if (pullConfirmMerge2Btn) {
+      pullConfirmMerge2Btn.addEventListener('click', () => closePullConfirmPanel('merge-env2'));
+    }
+    pullConfirmStashBtn.addEventListener('click', () => closePullConfirmPanel('stash-all'));
+    if (uninstallCancelBtn) {
+      uninstallCancelBtn.addEventListener('click', closeUninstallPanel);
+    }
+    if (uninstallKeepDbBtn) {
+      uninstallKeepDbBtn.addEventListener('click', async () => {
+        if (!currentUninstallRef) return;
+        uninstallKeepDbBtn.disabled = true;
+        uninstallDropDbBtn.disabled = true;
+        try {
+          showMessage(uninstallFlash, 'Removing project and keeping the database...');
+          await runUninstall(currentUninstallRef, false);
+        } catch (error) {
+          showMessage(uninstallFlash, error.message, false);
+          uninstallPanel.hidden = false;
+        } finally {
+          uninstallKeepDbBtn.disabled = false;
+          uninstallDropDbBtn.disabled = false;
+        }
+      });
+    }
+    if (uninstallDropDbBtn) {
+      uninstallDropDbBtn.addEventListener('click', async () => {
+        if (!currentUninstallRef) return;
+        const ok = window.confirm('Delete the database records too? This will remove the project mapping, auth files, app leftovers, and drop the database.');
+        if (!ok) return;
+        uninstallKeepDbBtn.disabled = true;
+        uninstallDropDbBtn.disabled = true;
+        try {
+          showMessage(uninstallFlash, 'Removing project and deleting database records...');
+          await runUninstall(currentUninstallRef, true);
+        } catch (error) {
+          showMessage(uninstallFlash, error.message, false);
+          uninstallPanel.hidden = false;
+        } finally {
+          uninstallKeepDbBtn.disabled = false;
+          uninstallDropDbBtn.disabled = false;
+        }
+      });
+    }
     closeLogBtn.addEventListener('click', closeLogPanel);
     sshCopyUserBtn.addEventListener('click', async () => {
       const user = sshDetails.querySelector('code');
@@ -3411,11 +7423,29 @@ function renderPage() {
       const script = btn.dataset.scriptRun || btn.dataset.scriptActivate;
       if (!script) return;
       const mode = btn.dataset.scriptActivate ? 'activate' : 'run';
+      const dir = btn.dataset.scriptDir || '';
       btn.disabled = true;
       try {
-        await runScript(currentScriptsRef, script, mode);
+        await runScript(currentScriptsRef, script, mode, dir, scriptsFlash);
       } catch (error) {
         showMessage(scriptsFlash, error.message, false);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-install-script-run], button[data-install-script-activate]');
+      if (!btn || !currentInstallScriptsRef) return;
+      const script = btn.dataset.installScriptRun || btn.dataset.installScriptActivate;
+      if (!script) return;
+      const mode = btn.dataset.installScriptActivate ? 'activate' : 'run';
+      const dir = btn.dataset.installScriptDir || '';
+      btn.disabled = true;
+      try {
+        await runScript(currentInstallScriptsRef, script, mode, dir, installResult);
+      } catch (error) {
+        showMessage(installResult, error.message, false);
       } finally {
         btn.disabled = false;
       }
@@ -3507,6 +7537,106 @@ function renderPage() {
       }
     });
 
+    document.addEventListener('click', async (event) => {
+      const btn = event.target.closest('button[data-domain-delete], button[data-domain-env]');
+      if (!btn || !currentDomainsRef) return;
+      const domain = btn.dataset.domainDelete || btn.dataset.domainEnv || '';
+      if (!domain) return;
+      if (btn.dataset.domainDelete) {
+        currentDomainBindings = currentDomainBindings.filter((binding) => !binding || !binding.domain || binding.domain !== domain || binding.primary);
+        renderDomainBindings(domainsList, currentDomainBindings, currentDomainEnvFiles);
+        showMessage(domainsFlash, 'Removed alias ' + domain + ' from the pending list');
+        return;
+      }
+      const binding = currentDomainBindings.find((item) => item && item.domain === domain);
+      if (!binding) return;
+      await loadEnv(currentDomainsRef, { selectedFile: binding.envFile || '.env' });
+    });
+
+    if (duplicatePm2ModeSelect) {
+      duplicatePm2ModeSelect.addEventListener('change', syncDuplicatePm2Ui);
+    }
+    if (duplicateCancelBtn) {
+      duplicateCancelBtn.addEventListener('click', closeDuplicatePanel);
+    }
+    if (duplicateCreateBtn) {
+      duplicateCreateBtn.addEventListener('click', async () => {
+        if (!currentDuplicateRef) return;
+        const domain = String(duplicateDomainInput?.value || '').trim().toLowerCase();
+        if (!domain) {
+          showMessage(duplicateFlash, 'New domain is required', false);
+          return;
+        }
+        const envMode = String(duplicateEnvModeSelect?.value || 'copy').trim().toLowerCase();
+        const dbMode = String(duplicateDbModeSelect?.value || 'same').trim().toLowerCase();
+        const pm2Mode = String(duplicatePm2ModeSelect?.value || 'auto').trim().toLowerCase();
+        const pm2Name = pm2Mode === 'custom' ? String(duplicatePm2Input?.value || '').trim() : '';
+        if (pm2Mode === 'custom' && !pm2Name) {
+          showMessage(duplicateFlash, 'Custom PM2 name is required when PM2 config is custom', false);
+          return;
+        }
+        duplicateCreateBtn.disabled = true;
+        try {
+          await runDuplicate(currentDuplicateRef, { domain, envMode, dbMode, pm2Name });
+        } catch (error) {
+          showMessage(duplicateFlash, error.message, false);
+          duplicatePanel.hidden = false;
+        } finally {
+          duplicateCreateBtn.disabled = false;
+        }
+      });
+    }
+
+    if (closeDomainsBtn) {
+      closeDomainsBtn.addEventListener('click', closeDomainsPanel);
+    }
+    if (domainsAddBtn) {
+      domainsAddBtn.addEventListener('click', () => {
+        if (!currentDomainsRef) return;
+        const domain = String(domainsAliasInput?.value || '').trim();
+        if (!domain) {
+          showMessage(domainsFlash, 'Domain is required', false);
+          return;
+        }
+        if (currentDomainBindings.some((binding) => binding && binding.domain === domain)) {
+          showMessage(domainsFlash, 'Domain already exists in this project', false);
+          return;
+        }
+        const envFile = String(domainsEnvSelect?.value || '.env').trim() || '.env';
+        const port = String(domainsPortInput?.value || '').trim();
+        const https = String(domainsHttpsSelect?.value || 'yes').trim() || 'yes';
+        currentDomainBindings.push({ domain, envFile, port, https, primary: false, type: currentDomainBindings[0]?.type || 'project' });
+        renderDomainBindings(domainsList, currentDomainBindings, currentDomainEnvFiles);
+        domainsAliasInput.value = '';
+        domainsPortInput.value = '';
+        domainsHttpsSelect.value = 'yes';
+      });
+    }
+    document.addEventListener('change', (event) => {
+      const select = event.target.closest('select[data-domain-envfile]');
+      if (!select || !currentDomainsRef) return;
+      const domain = select.dataset.domainEnvfile || '';
+      const binding = currentDomainBindings.find((item) => item && item.domain === domain);
+      if (!binding) return;
+      binding.envFile = String(select.value || '.env').trim() || '.env';
+      renderDomainBindings(domainsList, currentDomainBindings, currentDomainEnvFiles);
+      showMessage(domainsFlash, 'Updated env file for ' + domain + ' (save domains to persist)');
+    });
+    if (domainsSaveBtn) {
+      domainsSaveBtn.addEventListener('click', async () => {
+        if (!currentDomainsRef) return;
+        domainsSaveBtn.disabled = true;
+        try {
+          await saveDomains(currentDomainsRef);
+        } catch (error) {
+          showMessage(domainsFlash, error.message, false);
+          domainsPanel.hidden = false;
+        } finally {
+          domainsSaveBtn.disabled = false;
+        }
+      });
+    }
+
     envUploadBtn.addEventListener('click', async () => {
       if (!currentEnvRef) return;
       const file = envUploadInput.files && envUploadInput.files[0];
@@ -3538,6 +7668,68 @@ function renderPage() {
         envBackupBtn.disabled = false;
       }
     });
+
+    if (envFileSelect) {
+      envFileSelect.addEventListener('change', async () => {
+        if (!currentEnvRef) return;
+        currentEnvFilePath = envFileSelect.value || currentEnvFilePath;
+        const selectedEnvFile = getEnvFileByPath(currentEnvFiles, currentEnvFilePath);
+        if (envEditor) {
+          envEditor.value = selectedEnvFile ? String(selectedEnvFile.content || '') : '';
+        }
+        if (envSaveTarget) {
+          envSaveTarget.textContent = selectedEnvFile?.relativePath || selectedEnvFile?.path || currentEnvFilePath || '(n/a)';
+        }
+        if (envCurrentFileLabel) {
+          envCurrentFileLabel.textContent = selectedEnvFile?.relativePath || selectedEnvFile?.path || currentEnvFilePath || '(n/a)';
+        }
+      });
+    }
+
+    if (envSaveBtn) {
+      envSaveBtn.addEventListener('click', async () => {
+        if (!currentEnvRef) return;
+        envSaveBtn.disabled = true;
+        try {
+          await saveEnv(currentEnvRef, { mergeMode: currentEnvMergeMode });
+        } catch (error) {
+          showMessage(envFlash, error.message, false);
+          envPanel.hidden = false;
+        } finally {
+          envSaveBtn.disabled = false;
+        }
+      });
+    }
+
+    if (envReloadBtn) {
+      envReloadBtn.addEventListener('click', async () => {
+        if (!currentEnvRef) return;
+        envReloadBtn.disabled = true;
+        try {
+          await loadEnv(currentEnvRef, { mergeMode: currentEnvMergeMode, selectedFile: currentEnvFilePath });
+        } catch (error) {
+          showMessage(envFlash, error.message, false);
+          envPanel.hidden = false;
+        } finally {
+          envReloadBtn.disabled = false;
+        }
+      });
+    }
+
+    if (envMergeSaveBtn) {
+      envMergeSaveBtn.addEventListener('click', async () => {
+        if (!currentEnvRef) return;
+        envMergeSaveBtn.disabled = true;
+        try {
+          await saveEnv(currentEnvRef, { mergeMode: true });
+        } catch (error) {
+          showMessage(envFlash, error.message, false);
+          envPanel.hidden = false;
+        } finally {
+          envMergeSaveBtn.disabled = false;
+        }
+      });
+    }
 
     envRestoreBtn.addEventListener('click', async () => {
       if (!currentEnvRef) return;
@@ -3618,11 +7810,24 @@ function renderPage() {
       }
     });
 
+    if (mysqlMachineSelect) {
+      mysqlMachineSelect.addEventListener('change', () => {
+        setMysqlCustomFieldsVisible(String(mysqlMachineSelect.value || '') === CUSTOM_DB_MACHINE_ID);
+        syncMysqlCustomPreview();
+      });
+    }
+    if (mysqlCustomHost) {
+      mysqlCustomHost.addEventListener('input', syncMysqlCustomPreview);
+    }
+    if (mysqlCustomPort) {
+      mysqlCustomPort.addEventListener('input', syncMysqlCustomPreview);
+    }
+
     mysqlSaveBtn.addEventListener('click', async () => {
       if (!currentMysqlRef) return;
       mysqlSaveBtn.disabled = true;
       try {
-        await saveMysql(currentMysqlRef, mysqlIpsInput.value.trim());
+        await saveMysql(currentMysqlRef, mysqlIpsInput.value.trim(), false);
       } catch (error) {
         showMessage(mysqlFlash, error.message, false);
         mysqlPanel.hidden = false;
@@ -3631,17 +7836,64 @@ function renderPage() {
       }
     });
 
-    document.getElementById('installBtn').addEventListener('click', async () => {
+    if (mysqlMoveBtn) {
+      mysqlMoveBtn.addEventListener('click', async () => {
+        if (!currentMysqlRef) return;
+        mysqlMoveBtn.disabled = true;
+        try {
+          await saveMysql(currentMysqlRef, mysqlIpsInput.value.trim(), true);
+        } catch (error) {
+          showMessage(mysqlFlash, error.message, false);
+          mysqlPanel.hidden = false;
+        } finally {
+          mysqlMoveBtn.disabled = false;
+        }
+      });
+    }
+
+    async function submitInstall(openMergeMode = false) {
+      currentInstallScriptsRef = '';
+      renderInstallDbScripts('', []);
+      const repo = document.getElementById('repo').value.trim();
+      const domain = document.getElementById('domain').value.trim();
+      const branch = document.getElementById('branch').value.trim();
+      const pm2Name = document.getElementById('pm2Name').value.trim();
+      const port = document.getElementById('port').value.trim();
+      const deployRuntime = document.getElementById('deployRuntime').value.trim() || 'auto';
+      const dbMachineId = dbMachineSelect ? dbMachineSelect.value : '${LOCAL_DB_MACHINE_ID}';
+      const entrypoint = document.getElementById('entrypoint').value.trim();
+      const envText = document.getElementById('envText').value;
+      const accessPassword = document.getElementById('accessPassword').value;
+      const summary = [
+        'Repo: ' + (repo || '(empty)'),
+        'Domain: ' + (domain || '(none)'),
+        'Branch: ' + (branch || '(default)'),
+        'PM2: ' + (pm2Name || '(default)'),
+        'Port: ' + (port || '(auto)'),
+        'Port mapping: app-map + nginx will be synced to this port',
+        'Port safety: occupied Multidev ports will be auto-reassigned',
+        'Runtime: ' + (deployRuntime || '(auto)'),
+        'DB machine: ' + (dbMachineId || '(local-current)'),
+        'Entrypoint: ' + (entrypoint || '(auto-detect)'),
+      ].join('\\n');
+      if (!repo) {
+        showMessage(installResult, 'GitHub repo is required', false);
+        return;
+      }
+      if (!window.confirm('Install project with these settings?\\n\\n' + summary)) {
+        return;
+      }
       const payload = {
-        repo: document.getElementById('repo').value.trim(),
-        domain: document.getElementById('domain').value.trim(),
-        branch: document.getElementById('branch').value.trim(),
-        pm2Name: document.getElementById('pm2Name').value.trim(),
-        port: document.getElementById('port').value.trim(),
-        dbMachineId: dbMachineSelect ? dbMachineSelect.value : '${LOCAL_DB_MACHINE_ID}',
-        entrypoint: document.getElementById('entrypoint').value.trim(),
-        envText: document.getElementById('envText').value,
-        accessPassword: document.getElementById('accessPassword').value,
+        repo,
+        domain,
+        branch,
+        pm2Name,
+        port,
+        deployRuntime,
+        dbMachineId,
+        entrypoint,
+        envText,
+        accessPassword,
       };
       try {
         const result = await api('/projects', {
@@ -3649,11 +7901,51 @@ function renderPage() {
           body: JSON.stringify(payload),
         });
         showMessage(installResult, result.message || 'Installed');
+        renderInstallDbScripts(result.repo || payload.repo, result.dbScripts || [], result.project || result.repo || payload.repo);
+        for (const id of ['repo', 'domain', 'branch', 'pm2Name', 'port', 'entrypoint']) {
+          const el = document.getElementById(id);
+          if (el) el.value = '';
+        }
+        const deployRuntimeEl = document.getElementById('deployRuntime');
+        if (deployRuntimeEl) deployRuntimeEl.value = 'auto';
+        const envText = document.getElementById('envText');
+        if (envText) envText.value = '';
+        const accessPassword = document.getElementById('accessPassword');
+        if (accessPassword) accessPassword.value = '';
         await refresh();
+        if (openMergeMode) {
+          await loadEnv(result.repo || payload.repo, { mergeMode: true });
+          showMessage(envFlash, 'Paste extra .env keys in the overlay and click Merge overlay & save.');
+        }
       } catch (error) {
+        renderInstallDbScripts('', []);
         showMessage(installResult, error.message, false);
       }
-    });
+    }
+
+    const installBtn = document.getElementById('installBtn');
+    if (installBtn) {
+      installBtn.addEventListener('click', async () => {
+        installBtn.disabled = true;
+        try {
+          await submitInstall(false);
+        } finally {
+          installBtn.disabled = false;
+        }
+      });
+    }
+
+    const installMerge2Btn = document.getElementById('installMerge2Btn');
+    if (installMerge2Btn) {
+      installMerge2Btn.addEventListener('click', async () => {
+        installMerge2Btn.disabled = true;
+        try {
+          await submitInstall(true);
+        } finally {
+          installMerge2Btn.disabled = false;
+        }
+      });
+    }
 
     function escapeHtml(value) {
       return String(value ?? '')
@@ -3661,6 +7953,29 @@ function renderPage() {
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
+    }
+
+    function updateInstallRepoWarning() {
+      if (!installRepoWarning) return;
+      const repoInput = document.getElementById('repo');
+      const repo = repoInput ? repoInput.value.trim() : '';
+      installRepoWarning.innerHTML = repo
+        ? 'Repo to install: <code>' + escapeHtml(repo) + '</code>'
+        : 'Repo to install: <code>(none)</code>';
+    }
+
+    function resetInstallForm() {
+      for (const id of ['repo', 'domain', 'branch', 'pm2Name', 'port', 'entrypoint']) {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+      }
+      const deployRuntimeEl = document.getElementById('deployRuntime');
+      if (deployRuntimeEl) deployRuntimeEl.value = 'auto';
+      const envText = document.getElementById('envText');
+      if (envText) envText.value = '';
+      const accessPassword = document.getElementById('accessPassword');
+      if (accessPassword) accessPassword.value = '';
+      updateInstallRepoWarning();
     }
 
     if (toggleAccessPasswordBtn) {
@@ -3673,6 +7988,31 @@ function renderPage() {
         toggleAccessPasswordBtn.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
       });
     }
+
+    const repoInput = document.getElementById('repo');
+    if (repoInput) {
+      repoInput.value = '';
+      repoInput.addEventListener('input', updateInstallRepoWarning);
+      repoInput.addEventListener('change', updateInstallRepoWarning);
+    }
+    updateInstallRepoWarning();
+
+    const domainInput = document.getElementById('domain');
+    if (domainInput) {
+      const normalizeDomainInput = () => {
+        const value = String(domainInput.value || '').trim().toLowerCase();
+        if (domainInput.value !== value) {
+          domainInput.value = value;
+        }
+      };
+      domainInput.addEventListener('blur', normalizeDomainInput);
+      domainInput.addEventListener('change', normalizeDomainInput);
+    }
+
+    window.addEventListener('pageshow', () => {
+      resetInstallForm();
+    });
+    window.setTimeout(resetInstallForm, 0);
 
     refresh().catch((error) => showMessage(listResult, error.message, false));
     setInterval(async () => {
@@ -3696,7 +8036,25 @@ function basicAuth(req, res) {
   if (colon === -1) return false;
   const user = decoded.slice(0, colon);
   const pass = decoded.slice(colon + 1);
-  return user === BASIC_USER && pass === (process.env.MANAGE_PASSWORD || PASSWORD);
+  const allowed = new Map();
+  const legacyPassword = String(process.env.MANAGE_PASSWORD || PASSWORD || '').trim();
+  if (legacyPassword) {
+    allowed.set(BASIC_USER, legacyPassword);
+  }
+  const rawUsers = String(process.env.MANAGE_USERS || '').trim();
+  if (rawUsers) {
+    for (const entry of rawUsers.split(/[\n,]/)) {
+      const trimmed = String(entry || '').trim();
+      if (!trimmed) continue;
+      const sep = trimmed.indexOf(':');
+      if (sep === -1) continue;
+      const name = trimmed.slice(0, sep).trim();
+      const secret = trimmed.slice(sep + 1).trim();
+      if (!name || !secret) continue;
+      allowed.set(name, secret);
+    }
+  }
+  return allowed.has(user) && allowed.get(user) === pass;
 }
 
 function requireAuth(req, res) {
@@ -3731,9 +8089,14 @@ async function handleRequest(req, res) {
 
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const pathname = url.pathname.replace(/\/+$/, '') || '/';
+  const routePath = pathname === '/manage'
+    ? '/manage'
+    : pathname.startsWith('/manage/')
+      ? pathname.slice('/manage'.length)
+      : pathname;
 
   try {
-    if (req.method === 'GET' && (pathname === '/vault' || pathname === '/manage/vault')) {
+    if (req.method === 'GET' && routePath === '/vault') {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-store',
@@ -3742,7 +8105,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    if (req.method === 'GET' && (pathname === '/db-machines' || pathname === '/manage/db-machines')) {
+    if (req.method === 'GET' && routePath === '/db-machines') {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-store',
@@ -3751,7 +8114,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    if (req.method === 'GET' && (pathname === '/ssh-keys' || pathname === '/manage/ssh-keys')) {
+    if (req.method === 'GET' && routePath === '/ssh-keys') {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-store',
@@ -3760,7 +8123,34 @@ async function handleRequest(req, res) {
       return;
     }
 
-    if (req.method === 'GET' && (pathname === '/' || pathname === '/manage')) {
+    if (req.method === 'GET' && (routePath === '/tls' || routePath === '/ssl')) {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(renderTlsPage(url.searchParams.get('ref') || ''));
+      return;
+    }
+
+    if (req.method === 'GET' && routePath === '/proxy') {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(renderProxyPage());
+      return;
+    }
+
+    if (req.method === 'GET' && routePath === '/') {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(renderPortalPage());
+      return;
+    }
+
+    if (req.method === 'GET' && routePath === '/manage') {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-store',
@@ -3769,17 +8159,357 @@ async function handleRequest(req, res) {
       return;
     }
 
-    if (req.method === 'GET' && pathname === '/api/projects') {
+    if (req.method === 'GET' && routePath === '/api/projects') {
       sendJson(res, 200, { projects: projectView() });
       return;
     }
 
-    if (req.method === 'GET' && pathname === '/api/system') {
+    if (req.method === 'GET' && routePath === '/api/system') {
       sendJson(res, 200, { system: getSystemStats() });
       return;
     }
 
-    if (pathname === '/api/db-machines') {
+    if (req.method === 'GET' && routePath === '/api/tls') {
+      sendJson(res, 200, {
+        systemDomain: getSystemDomain(),
+        server: readSystemTlsStatus(),
+        projects: projectView(),
+      });
+      return;
+    }
+
+    if (req.method === 'GET' && routePath === '/api/proxy') {
+      sendJson(res, 200, {
+        proxy: readProxyServiceStatus(),
+      });
+      return;
+    }
+
+    if (req.method === 'GET' && routePath === '/api/proxy/pool') {
+      const proxy = readProxyServiceStatus();
+      sendJson(res, 200, {
+        proxy,
+        proxy_pool: proxy.proxy_pool,
+        selected_proxy: proxy.selected_proxy,
+      });
+      return;
+    }
+
+    if (routePath === '/api/proxy/pool/import' && req.method === 'POST') {
+      const body = await readBody(req);
+      const rawEntries = Array.isArray(body)
+        ? body
+        : Array.isArray(body.proxies)
+          ? body.proxies
+          : Array.isArray(body.entries)
+            ? body.entries
+            : Array.isArray(body.proxy_pool?.entries)
+              ? body.proxy_pool.entries
+              : [];
+      if (!rawEntries.length) {
+        throw new Error('No proxies found in the uploaded JSON');
+      }
+      const normalizedEntries = rawEntries.map((entry, index) => normalizeProxyPoolEntry(entry, index));
+      const testedEntries = [];
+      let selectedId = '';
+      let poolCheckedAt = new Date().toISOString();
+      for (const entry of normalizedEntries) {
+        const result = testProxyEntry(entry);
+        const checkedEntry = markProxyPoolEntryResult(entry, result);
+        testedEntries.push(checkedEntry);
+        poolCheckedAt = checkedEntry.checked_at;
+        if (result.ok) {
+          selectedId = checkedEntry.id;
+          break;
+        }
+      }
+      const selectedEntry = testedEntries.find((entry) => String(entry.id) === String(selectedId)) || null;
+      const selectedSummary = selectedEntry
+        ? [selectedEntry.exit_ip || '', selectedEntry.exit_location || ''].filter(Boolean).join(' · ')
+        : '';
+      if (testedEntries.length < normalizedEntries.length) {
+        testedEntries.push(...normalizedEntries.slice(testedEntries.length).map((entry) => ({ ...entry })));
+      }
+      const saved = saveProxyPool({
+        ...readProxyServiceConfig(),
+        proxy_pool: {
+          source_file: String(body.source_file || body.file_name || body.fileName || 'uploaded.json').trim() || 'uploaded.json',
+          selected_id: selectedId || testedEntries[0]?.id || '',
+          checked_at: poolCheckedAt,
+          entries: testedEntries,
+        },
+      });
+      sendJson(res, 200, {
+        ok: true,
+        message: selectedId
+          ? `Proxy list imported and first working proxy selected${selectedSummary ? `: ${selectedSummary}` : ''}`
+          : 'Proxy list imported, but no working proxy was found',
+        proxy: saved,
+        proxy_pool: saved.proxy_pool,
+        selected_proxy: saved.selected_proxy,
+      });
+      return;
+    }
+
+    if (routePath === '/api/proxy/pool/check' && req.method === 'POST') {
+      const body = await readBody(req);
+      const config = readProxyServiceConfig();
+      const pool = config.proxy_pool || normalizeProxyPool({});
+      const entryId = String(body.id || pool.selected_id || '').trim();
+      const target = pool.entries.find((entry) => String(entry.id) === entryId);
+      if (!target) throw new Error('Selected proxy not found');
+      const result = testProxyEntry(target);
+      const resultSummary = result.ok ? [result.exit_ip || '', result.exit_location || ''].filter(Boolean).join(' · ') : '';
+      const nextPool = {
+        ...pool,
+        selected_id: target.id,
+        checked_at: result.checked_at,
+        entries: pool.entries.map((entry) => (String(entry.id) === String(target.id) ? markProxyPoolEntryResult(entry, result) : entry)),
+      };
+      const saved = saveProxyPool({ ...config, proxy_pool: nextPool });
+      sendJson(res, 200, {
+        ok: result.ok,
+        message: result.ok
+          ? `Selected proxy is working${resultSummary ? `: ${resultSummary}` : ''}`
+          : `Selected proxy check failed: ${result.error}`,
+        proxy: saved,
+        proxy_pool: saved.proxy_pool,
+        selected_proxy: saved.selected_proxy,
+      });
+      return;
+    }
+
+    if (routePath === '/api/proxy/pool/selected' && req.method === 'POST') {
+      const body = await readBody(req);
+      const config = readProxyServiceConfig();
+      const pool = config.proxy_pool || normalizeProxyPool({});
+      const entryId = String(body.id || pool.selected_id || '').trim();
+      if (!entryId) throw new Error('Selected proxy not found');
+      const target = pool.entries.find((entry) => String(entry.id) === entryId);
+      if (!target) throw new Error('Selected proxy not found');
+      const updatedEntry = normalizeProxyPoolEntry({
+        ...target,
+        protocol: body.protocol ?? target.protocol,
+        host: body.host ?? target.host,
+        port: body.port ?? target.port,
+        username: body.username ?? target.username,
+        password: body.password ?? target.password,
+        notes: body.notes ?? target.notes,
+        id: target.id,
+      }, pool.entries.findIndex((entry) => String(entry.id) === String(target.id)));
+      const result = testProxyEntry(updatedEntry);
+      const resultSummary = result.ok ? [result.exit_ip || '', result.exit_location || ''].filter(Boolean).join(' · ') : '';
+      const nextPool = {
+        ...pool,
+        selected_id: updatedEntry.id,
+        checked_at: result.checked_at,
+        entries: pool.entries.map((entry) => (String(entry.id) === String(updatedEntry.id) ? markProxyPoolEntryResult(updatedEntry, result) : entry)),
+      };
+      const saved = saveProxyPool({ ...config, proxy_pool: nextPool });
+      sendJson(res, 200, {
+        ok: result.ok,
+        message: result.ok
+          ? `Selected proxy saved and working${resultSummary ? `: ${resultSummary}` : ''}`
+          : `Selected proxy saved, but check failed: ${result.error}`,
+        proxy: saved,
+        proxy_pool: saved.proxy_pool,
+        selected_proxy: saved.selected_proxy,
+      });
+      return;
+    }
+
+    if (routePath === '/api/proxy') {
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        const payload = {
+          enabled: body.enabled !== undefined ? Boolean(body.enabled) : true,
+          listen_host: String(body.listen_host || body.listenHost || '').trim() || '127.0.0.1',
+          listen_port: body.listen_port !== undefined ? body.listen_port : body.listenPort,
+          allow: Array.isArray(body.allow) ? body.allow : [],
+          auth: {
+            enabled: Boolean(body.auth && body.auth.enabled),
+            username: String(body.auth && body.auth.username || body.proxy_username || body.proxyUsername || '').trim(),
+            password: String(body.auth && body.auth.password || body.proxy_password || body.proxyPassword || ''),
+          },
+          connect_ports: Array.isArray(body.connect_ports) ? body.connect_ports : [],
+          timeout: body.timeout,
+          max_clients: body.max_clients,
+          log_level: String(body.log_level || 'Info'),
+          disable_via_header: body.disable_via_header !== undefined ? Boolean(body.disable_via_header) : true,
+        };
+        const saved = saveProxyServiceConfig(payload);
+        sendJson(res, 200, {
+          ok: true,
+          message: saved.enabled ? 'Proxy service saved and applied' : 'Proxy service disabled',
+          proxy: readProxyServiceStatus(),
+        });
+        return;
+      }
+
+      if (req.method === 'DELETE') {
+        const saved = saveProxyServiceConfig({ ...readProxyServiceConfig(), enabled: false });
+        sendJson(res, 200, {
+          ok: true,
+          message: 'Proxy service disabled',
+          proxy: saved,
+        });
+        return;
+      }
+    }
+
+    if (routePath === '/api/tls/server') {
+      const domain = getSystemDomain();
+      if (!domain) {
+        throw new Error('System domain is not configured');
+      }
+
+      if (req.method === 'GET') {
+        sendJson(res, 200, {
+          systemDomain: domain,
+          server: readSystemTlsStatus(),
+        });
+        return;
+      }
+
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        const saved = saveTlsEntry('server', domain, body.certificatePem, body.privateKeyPem);
+        const output = runSyncScript('server');
+        sendJson(res, 200, {
+          ok: true,
+          message: output || `Saved server certificate for ${domain}`,
+          systemDomain: domain,
+          server: readSystemTlsStatus(),
+          saved,
+        });
+        return;
+      }
+
+      if (req.method === 'DELETE') {
+        const deleted = deleteTlsEntry('server', domain);
+        const output = runSyncScript('server');
+        sendJson(res, 200, {
+          ok: true,
+          message: output || `Deleted server certificate for ${domain}`,
+          systemDomain: domain,
+          deleted,
+          server: readSystemTlsStatus(),
+        });
+        return;
+      }
+    }
+
+    if (routePath === '/api/tls/default-domain') {
+      const requestedDomain = String(url.searchParams.get('domain') || '').trim();
+      const body = req.method === 'POST' ? await readBody(req) : null;
+      const domain = String((body && body.domain) || requestedDomain || '').trim();
+      if (!domain) {
+        throw new Error('Default domain is required');
+      }
+
+      if (req.method === 'GET') {
+        sendJson(res, 200, {
+          domain,
+          ...readTlsStatus('server', domain, domain),
+        });
+        return;
+      }
+
+      if (req.method === 'POST') {
+        const saved = saveTlsEntry('server', domain, body.certificatePem, body.privateKeyPem);
+        const output = runSyncScript('project');
+        sendJson(res, 200, {
+          ok: true,
+          message: output || `Saved default-domain certificate for ${domain}`,
+          domain,
+          ...readTlsStatus('server', domain, domain),
+          saved,
+        });
+        return;
+      }
+
+      if (req.method === 'DELETE') {
+        const deleted = deleteTlsEntry('server', domain);
+        const output = runSyncScript('project');
+        sendJson(res, 200, {
+          ok: true,
+          message: output || `Deleted default-domain certificate for ${domain}`,
+          domain,
+          ...readTlsStatus('server', domain, domain),
+          deleted,
+        });
+        return;
+      }
+    }
+
+    const tlsProjectMatch = routePath.match(/^\/api\/tls\/projects\/(.+)$/);
+    if (tlsProjectMatch) {
+      const ref = decodeURIComponent(tlsProjectMatch[1]);
+      const meta = parseEnvFile(metaPathForRef(ref));
+      const domain = String(meta.APP_DOMAIN || '').trim();
+      const tls = readProjectTlsStatus(meta);
+      touchProjectMeta(ref);
+
+      if (req.method === 'GET') {
+        sendJson(res, 200, {
+          ref,
+          project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
+          domain,
+          repo: meta.REPO_REF || '',
+          slug: meta.PROJECT_SLUG || '',
+          ...tls,
+          tls,
+        });
+        return;
+      }
+
+      if (!domain) {
+        throw new Error(`Project ${ref} has no domain configured`);
+      }
+
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        const saved = saveTlsEntry('project', domain, body.certificatePem, body.privateKeyPem);
+        const output = runSyncScript('project');
+        const refreshedMeta = parseEnvFile(metaPathForRef(ref));
+        const refreshedTls = readProjectTlsStatus(refreshedMeta);
+        sendJson(res, 200, {
+          ok: true,
+          message: output || `Saved certificate for ${domain}`,
+          ref,
+          project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
+          domain,
+          repo: meta.REPO_REF || '',
+          slug: meta.PROJECT_SLUG || '',
+          ...refreshedTls,
+          tls: refreshedTls,
+          saved,
+        });
+        return;
+      }
+
+      if (req.method === 'DELETE') {
+        const deleted = deleteTlsEntry('project', domain);
+        const output = runSyncScript('project');
+        const refreshedMeta = parseEnvFile(metaPathForRef(ref));
+        const refreshedTls = readProjectTlsStatus(refreshedMeta);
+        sendJson(res, 200, {
+          ok: true,
+          message: output || `Deleted certificate for ${domain}`,
+          ref,
+          project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
+          domain,
+          repo: meta.REPO_REF || '',
+          slug: meta.PROJECT_SLUG || '',
+          ...refreshedTls,
+          tls: refreshedTls,
+          deleted,
+        });
+        return;
+      }
+    }
+
+    if (routePath === '/api/db-machines') {
       if (req.method === 'GET') {
         sendJson(res, 200, { machines: readDbMachines() });
         return;
@@ -3798,7 +8528,7 @@ async function handleRequest(req, res) {
       }
     }
 
-    if (pathname === '/api/ssh-keys') {
+    if (routePath === '/api/ssh-keys') {
       if (req.method === 'GET') {
         sendJson(res, 200, { keys: readSshKeys() });
         return;
@@ -3817,7 +8547,7 @@ async function handleRequest(req, res) {
       }
     }
 
-    if (pathname === '/api/ssh-keys/export' && (req.method === 'GET' || req.method === 'HEAD')) {
+    if (routePath === '/api/ssh-keys/export' && (req.method === 'GET' || req.method === 'HEAD')) {
       const zipBuffer = createSshKeysZip();
       res.writeHead(200, {
         'Content-Type': 'application/zip',
@@ -3831,7 +8561,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    if (pathname === '/api/ssh-keys/import' && req.method === 'POST') {
+    if (routePath === '/api/ssh-keys/import' && req.method === 'POST') {
       const body = await readBinaryBody(req);
       if (!body || !body.length) {
         throw new Error('Missing zip upload body');
@@ -3845,7 +8575,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const sshKeyMatch = pathname.match(/^\/api\/ssh-keys\/(.+)$/);
+    const sshKeyMatch = routePath.match(/^\/api\/ssh-keys\/(.+)$/);
     if (sshKeyMatch && req.method === 'DELETE') {
       const keyId = decodeURIComponent(sshKeyMatch[1]);
       deleteSshKey(keyId);
@@ -3861,31 +8591,35 @@ async function handleRequest(req, res) {
       const body = await readBody(req);
       const memo = String(body.memo || '').trim();
       const name = String(body.name || '').trim();
-      const updated = saveSshKeyMemo({ id: keyId, memo, name });
+      const githubUser = Object.prototype.hasOwnProperty.call(body || {}, 'githubUser') ? body.githubUser : undefined;
+      const updated = saveSshKeyMemo({ id: keyId, memo, name, githubUser });
       sendJson(res, 200, {
         ok: true,
-        message: `Saved memo for ${updated.name}`,
+        message: `Saved SSH key ${updated.name}`,
         key: updated,
         keys: readSshKeys(),
       });
       return;
     }
 
-    const dbMachineDeleteMatch = pathname.match(/^\/api\/db-machines\/(.+)$/);
+    const dbMachineDeleteMatch = routePath.match(/^\/api\/db-machines\/(.+)$/);
     if (dbMachineDeleteMatch && req.method === 'DELETE') {
       deleteDbMachine(decodeURIComponent(dbMachineDeleteMatch[1]));
       sendJson(res, 200, { ok: true, message: 'DB machine deleted', machines: readDbMachines() });
       return;
     }
 
-    if (req.method === 'POST' && pathname === '/api/projects') {
+    if (req.method === 'POST' && routePath === '/api/projects') {
       const body = await readBody(req);
       const repo = repoRefFromArg(body.repo || '');
+      const domain = String(body.domain || '').trim().toLowerCase();
       const args = ['install'];
-      if (body.domain) args.push('--domain', String(body.domain).trim());
+      if (domain) args.push('--domain', domain);
       if (body.branch) args.push('--branch', String(body.branch).trim());
       if (body.pm2Name) args.push('--pm2-name', String(body.pm2Name).trim());
       if (body.port) args.push('--port', String(body.port).trim());
+      if (body.deployRuntime) args.push('--runtime', String(body.deployRuntime).trim());
+      if (body.vpnProfile) args.push('--vpn-profile', String(body.vpnProfile).trim());
       if (body.dbMachineId) args.push('--db-machine', String(body.dbMachineId).trim());
       if (body.entrypoint) args.push('--entrypoint', String(body.entrypoint).trim());
       let tempEnv = '';
@@ -3904,15 +8638,92 @@ async function handleRequest(req, res) {
       if (body.accessPassword && String(body.accessPassword).trim()) {
         runProjectCtl(['password', '--password', String(body.accessPassword).trim(), repo]);
       }
-      sendJson(res, 200, { ok: true, message: output || 'Installed project' });
+      const meta = parseEnvFile(metaPathForRef(repo));
+      const projectPath = meta.APP_DIR || '';
+      const scripts = readPackageScripts(projectPath);
+      const dbScripts = scripts.filter(isDbScript);
+      sendJson(res, 200, {
+        ok: true,
+        message: output || 'Installed project',
+        repo,
+        project: meta.APP_DOMAIN || meta.PROJECT_SLUG || repo,
+        port: meta.APP_PORT || body.port || '',
+        scripts,
+        dbScripts,
+      });
       return;
     }
 
-    const dbMatch = pathname.match(/^\/api\/projects\/(.+?)\/db$/);
+    const domainsMatch = routePath.match(/^\/api\/projects\/(.+?)\/domains$/);
+    if (domainsMatch) {
+      const ref = decodeURIComponent(domainsMatch[1]);
+      const metaPath = metaPathForRef(ref);
+      const meta = parseEnvFile(metaPath);
+      const projectPath = meta.APP_DIR || '';
+      const { envFiles } = pickEnvDetails(projectPath);
+      const currentBindings = parseProjectDomainBindings(meta);
+      const primary = currentBindings.find((binding) => binding.primary) || normalizeDomainBinding({
+        domain: meta.APP_DOMAIN || '',
+        port: meta.APP_PORT || '',
+        https: meta.APP_HTTPS || 'yes',
+        envFile: '.env',
+        primary: true,
+        type: meta.APP_TYPE || 'project',
+      });
+      if (req.method === 'GET') {
+        sendJson(res, 200, {
+          project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
+          domain: meta.APP_DOMAIN || '',
+          primary,
+          bindings: currentBindings.filter((binding) => !binding.primary),
+          envFiles,
+        });
+        return;
+      }
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        const incoming = Array.isArray(body.bindings) ? body.bindings : [];
+        const aliases = [];
+        const seen = new Set();
+        for (const item of incoming) {
+          const normalized = normalizeDomainBinding(item, {
+            port: meta.APP_PORT || '',
+            https: meta.APP_HTTPS || 'yes',
+            type: meta.APP_TYPE || 'project',
+          });
+          if (!normalized || normalized.primary) continue;
+          if (primary && normalized.domain === primary.domain) continue;
+          if (seen.has(normalized.domain)) continue;
+          seen.add(normalized.domain);
+          aliases.push(normalized);
+        }
+        updateEnvFileValue(metaPath, 'APP_DOMAIN_BINDINGS_JSON', JSON.stringify(aliases));
+        touchProjectMeta(ref);
+        runSyncScript('app');
+        const refreshedMeta = parseEnvFile(metaPath);
+        const refreshedBindings = parseProjectDomainBindings(refreshedMeta);
+        sendJson(res, 200, {
+          ok: true,
+          message: `Saved domains for ${ref}`,
+          project: refreshedMeta.APP_DOMAIN || refreshedMeta.PROJECT_SLUG || ref,
+          domain: refreshedMeta.APP_DOMAIN || '',
+          primary: refreshedBindings.find((binding) => binding.primary) || primary,
+          bindings: refreshedBindings.filter((binding) => !binding.primary),
+          envFiles,
+        });
+        return;
+      }
+      res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Method not allowed');
+      return;
+    }
+
+    const dbMatch = routePath.match(/^\/api\/projects\/(.+?)\/db$/);
     if (dbMatch) {
       const ref = decodeURIComponent(dbMatch[1]);
       const meta = parseEnvFile(metaPathForRef(ref));
       const { files, db } = pickDbDetails(meta.APP_DIR || '');
+      touchProjectMeta(ref);
       sendJson(res, 200, {
         project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
         files,
@@ -3921,7 +8732,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const mysqlMatch = pathname.match(/^\/api\/projects\/(.+?)\/mysql$/);
+    const mysqlMatch = routePath.match(/^\/api\/projects\/(.+?)\/mysql$/);
     if (mysqlMatch) {
       const ref = decodeURIComponent(mysqlMatch[1]);
       const meta = parseEnvFile(metaPathForRef(ref));
@@ -3932,8 +8743,18 @@ async function handleRequest(req, res) {
       const dbPassword = db.DB_PASSWORD || db.MYSQL_PASSWORD || db.POSTGRES_PASSWORD || '';
       const allowedIps = meta.MYSQL_ALLOWED_IPS || '';
       const projectMachineId = meta.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID;
-      const accounts = readMysqlAccounts(dbUser, projectMachineId);
       const machines = readDbMachines();
+      const projectMachineContext = resolveProjectMysqlMachine(meta, projectPath);
+      const projectMachine = projectMachineContext.machine || machines.find((item) => String(item.id) === String(projectMachineId)) || null;
+      const projectMachineLabel = projectMachine
+        ? describeDbMachine(projectMachine)
+        : (projectMachineId === CUSTOM_DB_MACHINE_ID ? (meta.DB_MACHINE_NAME || 'Custom / manual DB machine') : projectMachineId);
+      const projectMachineHost = projectMachine?.originHost || projectMachine?.host || 'n/a';
+      const projectMachineRootUser = projectMachine?.rootUser || 'root';
+      const projectMachineRootPassword = projectMachine?.rootPassword || '';
+      const projectMachineNotes = projectMachine?.notes || '';
+      const accounts = readMysqlAccounts(dbUser, projectMachine || projectMachineId);
+      touchProjectMeta(ref);
 
       if (req.method === 'GET') {
         sendJson(res, 200, {
@@ -3944,7 +8765,14 @@ async function handleRequest(req, res) {
           dbUser,
           dbPassword,
           allowedIps,
-          dbMachineId: projectMachineId,
+          dbMachineId: projectMachineContext.isCustom && projectMachine ? CUSTOM_DB_MACHINE_ID : projectMachineId,
+          dbMachineLabel: projectMachineLabel,
+          dbMachineHost: projectMachineHost,
+          dbMachineRootUser: projectMachineRootUser,
+          dbMachineRootPassword: projectMachineRootPassword,
+          dbMachineNotes: projectMachineNotes,
+          dbMachineCustom: projectMachineContext.isCustom && projectMachine ? projectMachine : null,
+          dbMachineMode: projectMachineContext.isCustom ? 'custom' : 'global',
           machines,
           accounts,
         });
@@ -3955,15 +8783,59 @@ async function handleRequest(req, res) {
         const body = await readBody(req);
         const ips = String(body.ips || '').trim();
         const machineId = String(body.machineId || projectMachineId || LOCAL_DB_MACHINE_ID).trim();
+        const customMachineInput = body.customMachine && typeof body.customMachine === 'object' ? body.customMachine : null;
+        const customMachine = customMachineInput ? {
+          id: String(customMachineInput.id || CUSTOM_DB_MACHINE_ID).trim() || CUSTOM_DB_MACHINE_ID,
+          name: String(customMachineInput.name || body.customMachineName || '').trim(),
+          host: String(customMachineInput.host || body.customMachineHost || '').trim(),
+          port: String(customMachineInput.port || body.customMachinePort || '').trim(),
+          rootUser: String(customMachineInput.rootUser || body.customMachineRootUser || '').trim(),
+          rootPassword: String(customMachineInput.rootPassword || body.customMachineRootPassword || ''),
+          notes: String(customMachineInput.notes || body.customMachineNotes || '').trim(),
+        } : null;
+        const dbName = String(body.dbName || '').trim();
+        const dbUser = String(body.dbUser || '').trim();
+        const dbPassword = String(body.dbPassword || '');
+        const useCustomMachine = machineId === CUSTOM_DB_MACHINE_ID || Boolean(customMachine);
         const args = ['mysql'];
-        if (machineId) args.push('--machine', machineId);
+        if (useCustomMachine) {
+          const normalizedCustomMachine = normalizeDbMachine(customMachine || {
+            id: CUSTOM_DB_MACHINE_ID,
+            name: body.customMachineName || '',
+            host: body.customMachineHost || '',
+            port: body.customMachinePort || '',
+            rootUser: body.customMachineRootUser || '',
+            rootPassword: body.customMachineRootPassword || '',
+            notes: body.customMachineNotes || '',
+          }, { id: CUSTOM_DB_MACHINE_ID, name: 'Custom DB machine', host: '', rootUser: 'root', rootPassword: '', port: '3306', notes: '' }, { allowMissingRootCredentials: !body.moveData });
+          if (dbName) args.push('--db-name', dbName);
+          if (dbUser) args.push('--db-user', dbUser);
+          if (dbPassword) args.push('--db-password', dbPassword);
+          args.push(
+            '--machine', CUSTOM_DB_MACHINE_ID,
+            '--machine-name', normalizedCustomMachine.name,
+            '--machine-host', normalizedCustomMachine.host,
+            '--machine-port', normalizedCustomMachine.port,
+            '--machine-root-user', normalizedCustomMachine.rootUser,
+            '--machine-root-password', normalizedCustomMachine.rootPassword,
+            '--machine-notes', normalizedCustomMachine.notes,
+          );
+        } else if (machineId) {
+          args.push('--machine', machineId);
+        }
+        if (body.moveData) args.push('--move-data');
         args.push('--ips', ips, ref);
         const output = runProjectCtl(args);
         const refreshedMeta = parseEnvFile(metaPathForRef(ref));
         const refreshedDb = pickDbDetails(projectPath).db;
+        const refreshedMachineContext = resolveProjectMysqlMachine(refreshedMeta, projectPath);
+        const refreshedMachine = refreshedMachineContext.machine || readDbMachines().find((item) => String(item.id) === String(refreshedMeta.DB_MACHINE_ID || projectMachineId)) || null;
+        const message = body.moveData
+          ? (output || 'MySQL data moved')
+          : (useCustomMachine ? 'Custom connection saved for this project' : (output || 'MySQL permissions updated'));
         sendJson(res, 200, {
           ok: true,
-          message: output || 'MySQL permissions updated',
+          message,
           project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
           files,
           db: refreshedDb,
@@ -3971,18 +8843,26 @@ async function handleRequest(req, res) {
           dbUser: refreshedDb.DB_USER || refreshedDb.MYSQL_USER || refreshedDb.POSTGRES_USER || '',
           dbPassword: refreshedDb.DB_PASSWORD || refreshedDb.MYSQL_PASSWORD || refreshedDb.POSTGRES_PASSWORD || '',
           allowedIps: refreshedMeta.MYSQL_ALLOWED_IPS || ips,
-          dbMachineId: refreshedMeta.DB_MACHINE_ID || projectMachineId || LOCAL_DB_MACHINE_ID,
+          dbMachineId: refreshedMachineContext.isCustom && refreshedMachine ? CUSTOM_DB_MACHINE_ID : (refreshedMeta.DB_MACHINE_ID || projectMachineId || LOCAL_DB_MACHINE_ID),
+          dbMachineLabel: refreshedMachine ? describeDbMachine(refreshedMachine) : (refreshedMeta.DB_MACHINE_ID || projectMachineId || LOCAL_DB_MACHINE_ID),
+          dbMachineHost: refreshedMachine?.originHost || refreshedMachine?.host || 'n/a',
+          dbMachineRootUser: refreshedMachine?.rootUser || 'root',
+          dbMachineRootPassword: refreshedMachine?.rootPassword || '',
+          dbMachineNotes: refreshedMachine?.notes || '',
+          dbMachineCustom: refreshedMachineContext.isCustom && refreshedMachine ? refreshedMachine : null,
+          dbMachineMode: refreshedMachineContext.isCustom ? 'custom' : 'global',
           machines: readDbMachines(),
-          accounts: readMysqlAccounts(refreshedDb.DB_USER || refreshedDb.MYSQL_USER || refreshedDb.POSTGRES_USER || '', refreshedMeta.DB_MACHINE_ID || machineId || projectMachineId),
+          accounts: readMysqlAccounts(refreshedDb.DB_USER || refreshedDb.MYSQL_USER || refreshedDb.POSTGRES_USER || '', refreshedMachine || refreshedMeta.DB_MACHINE_ID || machineId || projectMachineId),
         });
         return;
       }
     }
 
-    const sshMatch = pathname.match(/^\/api\/projects\/(.+?)\/ssh$/);
+    const sshMatch = routePath.match(/^\/api\/projects\/(.+?)\/ssh$/);
     if (sshMatch) {
       const ref = decodeURIComponent(sshMatch[1]);
       const meta = parseEnvFile(metaPathForRef(ref));
+      touchProjectMeta(ref);
       sendJson(res, 200, {
         project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
         user: meta.SSH_UPLOAD_USER || '',
@@ -3995,20 +8875,25 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const envMatch = pathname.match(/^\/api\/projects\/(.+?)\/env(?:\/(download|upload|backup|restore|backups))?$/);
+    const envMatch = routePath.match(/^\/api\/projects\/(.+?)\/env(?:\/(download|upload|backup|restore|backups|save))?$/);
     if (envMatch) {
       const ref = decodeURIComponent(envMatch[1]);
       const mode = envMatch[2] || '';
       const meta = parseEnvFile(metaPathForRef(ref));
       const projectPath = meta.APP_DIR || '';
-      const { files, env } = pickEnvDetails(projectPath);
+      const { files, envFiles, envEntries, env, saveTarget, selectedFile } = pickEnvDetails(projectPath);
       const backups = listProjectEnvBackups(ref);
+      touchProjectMeta(ref);
 
       if (req.method === 'GET' && !mode) {
         sendJson(res, 200, {
           project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
           files,
+          envFiles,
+          envEntries,
           env,
+          saveTarget,
+          selectedFile,
           backups,
           latestBackup: backups[0] || null,
         });
@@ -4051,6 +8936,46 @@ async function handleRequest(req, res) {
         return;
       }
 
+      if (req.method === 'POST' && mode === 'save') {
+        if (!projectPath || !fs.existsSync(projectPath)) {
+          throw new Error(`Project path not found for ${ref}`);
+        }
+        const body = await readBody(req);
+        const parsedEnv = parseEnvText(body.envText || '');
+        const overlayEnv = parseEnvText(body.overlayText || '');
+        const finalEnv = (body.overlayText && String(body.overlayText).trim())
+          ? { ...parsedEnv, ...overlayEnv }
+          : parsedEnv;
+        const targetPath = resolveProjectEnvSaveTarget(projectPath, files, body.targetFile || body.targetPath || '');
+        if (!targetPath) {
+          throw new Error(`Unable to choose env save target for ${ref}`);
+        }
+        const autoBackup = createProjectEnvBackup(ref, projectPath);
+        fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+        fs.writeFileSync(targetPath, serializeEnvText(finalEnv), 'utf8');
+        fs.chmodSync(targetPath, 0o600);
+        runProjectCtl(['restart', ref]);
+        const refreshed = pickEnvDetails(projectPath);
+        const refreshedBackups = listProjectEnvBackups(ref);
+        sendJson(res, 200, {
+          ok: true,
+          message: body.overlayText && String(body.overlayText).trim()
+            ? `Merged overlay env values for ${ref} into ${path.basename(targetPath)}`
+            : `Environment values saved for ${ref} in ${path.basename(targetPath)}`,
+          autoBackup,
+          project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
+          files: refreshed.files,
+          envFiles: refreshed.envFiles || [],
+          envEntries: refreshed.envEntries || [],
+          env: refreshed.env,
+          saveTarget: refreshed.saveTarget,
+          selectedFile: targetPath,
+          backups: refreshedBackups,
+          latestBackup: refreshedBackups[0] || null,
+        });
+        return;
+      }
+
       if (req.method === 'POST' && mode === 'restore') {
         const body = await readBody(req);
         const backupName = String(body.backupName || 'latest.zip');
@@ -4080,7 +9005,7 @@ async function handleRequest(req, res) {
       }
     }
 
-    const envBackupDeleteMatch = pathname.match(/^\/api\/projects\/(.+?)\/env\/backups\/([^/]+)$/);
+    const envBackupDeleteMatch = routePath.match(/^\/api\/projects\/(.+?)\/env\/backups\/([^/]+)$/);
     if (envBackupDeleteMatch && req.method === 'DELETE') {
       const ref = decodeURIComponent(envBackupDeleteMatch[1]);
       const backupName = decodeURIComponent(envBackupDeleteMatch[2]);
@@ -4096,12 +9021,32 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const pullPreflightMatch = pathname.match(/^\/api\/projects\/(.+?)\/pull-preflight$/);
+    const uninstallPreviewMatch = routePath.match(/^\/api\/projects\/(.+?)\/uninstall-preview$/);
+    if (uninstallPreviewMatch) {
+      const ref = decodeURIComponent(uninstallPreviewMatch[1]);
+      if (req.method !== 'GET') {
+        res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Method not allowed');
+        return;
+      }
+      const output = runProjectCtl(['uninstall', '--preview', ref]);
+      let data;
+      try {
+        data = output ? JSON.parse(output) : {};
+      } catch {
+        data = { ok: false, error: output || 'Invalid uninstall preview response' };
+      }
+      sendJson(res, 200, data);
+      return;
+    }
+
+    const pullPreflightMatch = routePath.match(/^\/api\/projects\/(.+?)\/pull-preflight$/);
     if (pullPreflightMatch) {
       const ref = decodeURIComponent(pullPreflightMatch[1]);
       const meta = parseEnvFile(metaPathForRef(ref));
       const projectPath = meta.APP_DIR || '';
       const gitStatus = readProjectGitStatus(projectPath);
+      touchProjectMeta(ref);
       sendJson(res, 200, {
         project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
         repo: meta.REPO_REF || ref,
@@ -4112,14 +9057,14 @@ async function handleRequest(req, res) {
         changes: gitStatus.lines || [],
         message: gitStatus.exists
           ? (gitStatus.dirty
-            ? `Local changes detected in ${ref}. Stash them before pulling?`
+            ? `Local changes detected in ${ref}. Merge .env values or stash all changes before pulling?`
             : `Repository is clean for ${ref}.`)
           : `Git repository not found for ${ref}.`,
       });
       return;
     }
 
-    const updateStreamMatch = pathname.match(/^\/api\/projects\/(.+?)\/update-stream$/);
+    const updateStreamMatch = routePath.match(/^\/api\/projects\/(.+?)\/update-stream$/);
     if (updateStreamMatch) {
       const ref = decodeURIComponent(updateStreamMatch[1]);
       if (req.method !== 'POST') {
@@ -4127,12 +9072,67 @@ async function handleRequest(req, res) {
         res.end('Method not allowed');
         return;
       }
-      const stash = url.searchParams.get('stash') === '1';
-      streamProjectCtl(res, ['update', ref], stash ? { PROJECTCTL_PULL_STASH: 'yes' } : {});
+      const legacyStash = url.searchParams.get('stash') === '1';
+      const requestedMode = String(url.searchParams.get('mode') || '').toLowerCase();
+      const pullMode = requestedMode === 'stash-all' || requestedMode === 'stash'
+        ? 'stash-all'
+        : requestedMode === 'merge-env' || requestedMode === 'merge' || requestedMode === 'env'
+          ? 'merge-env'
+          : legacyStash
+            ? 'merge-env'
+            : 'merge-env';
+      touchProjectMeta(ref);
+      streamProjectCtl(res, ['update', ref], { PROJECTCTL_PULL_MODE: pullMode, PROJECTCTL_BUILD_MODE: 'all' });
       return;
     }
 
-    const logClearMatch = pathname.match(/^\/api\/projects\/(.+?)\/logs\/clear$/);
+    const buildStreamMatch = routePath.match(/^\/api\/projects\/(.+?)\/build-stream$/);
+    if (buildStreamMatch) {
+      const ref = decodeURIComponent(buildStreamMatch[1]);
+      if (req.method !== 'POST') {
+        res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Method not allowed');
+        return;
+      }
+
+      const requestedMode = String(url.searchParams.get('mode') || '').toLowerCase();
+      const buildMode = requestedMode === 'all' ? 'all' : 'root';
+      const buildArgs = buildMode === 'all' ? ['build', '--all', ref] : ['build', ref];
+      touchProjectMeta(ref);
+      streamProjectCtl(res, buildArgs, { PROJECTCTL_BUILD_MODE: buildMode });
+      return;
+    }
+
+    const duplicateMatch = routePath.match(/^\/api\/projects\/(.+?)\/duplicate$/);
+    if (duplicateMatch) {
+      const ref = decodeURIComponent(duplicateMatch[1]);
+      if (req.method !== 'POST') {
+        res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Method not allowed');
+        return;
+      }
+      const body = await readBody(req);
+      const domain = String(body.domain || '').trim();
+      const envMode = String(body.envMode || 'copy').trim().toLowerCase();
+      const dbMode = String(body.dbMode || 'same').trim().toLowerCase();
+      const pm2Name = String(body.pm2Name || '').trim();
+      const port = String(body.port || '').trim();
+      const args = ['duplicate', '--domain', domain];
+      if (envMode) args.push('--env-mode', envMode);
+      if (dbMode) args.push('--db-mode', dbMode);
+      if (pm2Name) args.push('--pm2-name', pm2Name);
+      if (port) args.push('--port', port);
+      args.push(ref);
+      const output = runProjectCtl(args);
+      touchProjectMeta(ref);
+      sendJson(res, 200, {
+        ok: true,
+        message: output || `Duplicated ${ref}`,
+      });
+      return;
+    }
+
+    const logClearMatch = routePath.match(/^\/api\/projects\/(.+?)\/logs\/clear$/);
     if (logClearMatch) {
       const ref = decodeURIComponent(logClearMatch[1]);
       if (req.method !== 'POST') {
@@ -4158,11 +9158,12 @@ async function handleRequest(req, res) {
         clearLogFile(outLog);
       }
 
+      touchProjectMeta(ref);
       sendJson(res, 200, { ok: true, message: `${ref} log(s) cleared` });
       return;
     }
 
-    const scriptsMatch = pathname.match(/^\/api\/projects\/(.+?)\/scripts(?:\/(run|activate))?$/);
+    const scriptsMatch = routePath.match(/^\/api\/projects\/(.+?)\/scripts(?:\/(run|activate))?$/);
     if (scriptsMatch) {
       const ref = decodeURIComponent(scriptsMatch[1]);
       const scriptAction = scriptsMatch[2] || '';
@@ -4170,9 +9171,11 @@ async function handleRequest(req, res) {
       const scripts = readPackageScripts(meta.APP_DIR || '');
 
       if (req.method === 'GET' && !scriptAction) {
+        touchProjectMeta(ref);
         sendJson(res, 200, {
           project: meta.APP_DOMAIN || meta.PROJECT_SLUG || ref,
           scripts,
+          dbScripts: scripts.filter(isDbScript),
         });
         return;
       }
@@ -4180,21 +9183,30 @@ async function handleRequest(req, res) {
       if (req.method === 'POST' && scriptAction) {
         const body = await readBody(req);
         const script = String(body.script || '').trim();
+        const dir = String(body.dir || '').trim();
         if (!script) {
           throw new Error('Missing script name');
         }
         if (scriptAction === 'activate') {
-          const output = runProjectCtl(['script', '--pm2', ref, script]);
+          const args = ['script', '--pm2'];
+          if (dir) args.push('--dir', dir);
+          args.push(ref, script);
+          const output = runProjectCtl(args);
+          touchProjectMeta(ref);
           sendJson(res, 200, { ok: true, message: output || `Activated ${script}` });
         } else {
-          const output = runProjectCtl(['script', ref, script]);
+          const args = ['script'];
+          if (dir) args.push('--dir', dir);
+          args.push(ref, script);
+          const output = runProjectCtl(args);
+          touchProjectMeta(ref);
           sendJson(res, 200, { ok: true, message: output || `Ran ${script}` });
         }
         return;
       }
     }
 
-    const actionMatch = pathname.match(/^\/api\/projects\/(.+?)\/(restart|update|stop|uninstall|password|logs)$/);
+    const actionMatch = routePath.match(/^\/api\/projects\/(.+?)\/(restart|update|stop|uninstall|password|logs)$/);
     if (actionMatch) {
       const ref = decodeURIComponent(actionMatch[1]);
       const action = actionMatch[2];
@@ -4210,6 +9222,7 @@ async function handleRequest(req, res) {
           : target?.pm2_env?.pm_out_log_path;
         const content = logTail(logFile, lines) || '';
         const download = url.searchParams.get('download') === '1';
+        touchProjectMeta(ref);
         sendText(res, 200, content || `(no log data for ${ref})\n`, download ? {
           'Content-Disposition': `attachment; filename="${slugFromRef(ref)}-${stream}.log"`,
         } : {});
@@ -4223,11 +9236,22 @@ async function handleRequest(req, res) {
         } else {
           runProjectCtl(['password', '--password', String(body.password || '').trim(), ref]);
         }
+      } else if (action === 'uninstall') {
+        const dropDb = Boolean(body?.dropDb === true || body?.dropDb === 'true' || body?.dropDb === 1 || body?.dropDb === '1');
+        runProjectCtl(['uninstall', ...(dropDb ? ['--drop-db'] : []), ref]);
       } else {
         runProjectCtl([action, ref]);
       }
 
-      sendJson(res, 200, { ok: true, message: `${action} complete for ${ref}` });
+      if (action !== 'uninstall') {
+        touchProjectMeta(ref);
+      }
+      sendJson(res, 200, {
+        ok: true,
+        message: action === 'uninstall'
+          ? `Project removed for ${ref}`
+          : `${action} complete for ${ref}`,
+      });
       return;
     }
 
@@ -4249,6 +9273,12 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`manage server listening on 127.0.0.1:${PORT}`);
+try {
+  syncGithubSshConfig();
+} catch (error) {
+  console.warn('[manage] failed to sync GitHub SSH config on startup:', error.message || error);
+}
+
+server.listen(PORT, BIND_HOST, () => {
+  console.log(`manage server listening on ${BIND_HOST}:${PORT}`);
 });
