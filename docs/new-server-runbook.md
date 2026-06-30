@@ -113,6 +113,7 @@ What the installer does:
 - creates a per-project SSH upload user
 - creates or wires the project DB on the selected DB machine
 - exports the correct domain-related env values for the runtime
+- strips `NODE_ENV` from deployed `.env` files so Vite and other frontend builds do not warn about production mode being set in config files
 
 ## 5. Verify the project
 
@@ -170,6 +171,7 @@ Restores now create an automatic backup first.
 ## 9. What to avoid
 
 - Do not commit `.env.machine` to GitHub
+- Do not put `NODE_ENV` in a repo `.env`; use `APP_ENV` or `ENVIRONMENT` if you need to record deployment mode
 - Do not assume the DB machine is always local
 - Do not skip the DB machine registration step if the project uses a remote DB
 - Do not rely on browser localhost values in production env files
@@ -184,4 +186,3 @@ Check these first:
 - `projectctl mysql owner/repo`
 - PM2 logs for the project
 - nginx config and TLS status for the domain
-

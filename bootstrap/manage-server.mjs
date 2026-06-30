@@ -856,15 +856,23 @@ function pickEnvDetails(projectPath) {
 
 function readProjectGitStatus(projectPath) {
   if (!projectPath || !fs.existsSync(path.join(projectPath, '.git'))) {
-    return { exists: false, dirty: false, lines: [] };
+    return { exists: false, dirty: false, lines: [], conflicts: [], unmerged: false };
   }
 
   try {
     const output = execFileSync('git', ['-C', projectPath, 'status', '--porcelain'], { encoding: 'utf8' }).trim();
     const lines = output ? output.split(/\r?\n/).filter(Boolean) : [];
-    return { exists: true, dirty: lines.length > 0, lines };
+    const conflicts = [];
+    for (const line of lines) {
+      const status = line.slice(0, 2);
+      const file = line.slice(3).replace(/^\s+/, '');
+      if (['UU', 'AA', 'DD', 'AU', 'UA', 'DU', 'UD'].includes(status) && file) {
+        conflicts.push(file);
+      }
+    }
+    return { exists: true, dirty: lines.length > 0, lines, conflicts, unmerged: conflicts.length > 0 };
   } catch (error) {
-    return { exists: true, dirty: false, lines: [], error: error.message || String(error) };
+    return { exists: true, dirty: false, lines: [], conflicts: [], unmerged: false, error: error.message || String(error) };
   }
 }
 
@@ -5610,6 +5618,7 @@ function renderPage() {
       <div class="actions">
         <button id="pullConfirmNoBtn" class="ghost" type="button">Cancel</button>
         <button id="pullConfirmMergeBtn" class="secondary" type="button" autofocus>Merge .env (default)</button>
+        <button id="pullConfirmForceBtn" class="danger" type="button" hidden>Delete files & repull</button>
         <button id="pullConfirmStashBtn" class="ghost" type="button">Stash all</button>
       </div>
     </header>
@@ -5782,6 +5791,7 @@ function renderPage() {
     const pullConfirmSummary = document.getElementById('pullConfirmSummary');
     const pullConfirmBody = document.getElementById('pullConfirmBody');
     const pullConfirmMergeBtn = document.getElementById('pullConfirmMergeBtn');
+    const pullConfirmForceBtn = document.getElementById('pullConfirmForceBtn');
     const pullConfirmMerge2Btn = document.getElementById('pullConfirmMerge2Btn');
     const pullConfirmStashBtn = document.getElementById('pullConfirmStashBtn');
     const pullConfirmNoBtn = document.getElementById('pullConfirmNoBtn');
@@ -5818,6 +5828,7 @@ function renderPage() {
     let currentLogRef = '';
     let currentLogType = 'out';
     let currentPullRef = '';
+    let currentPullIsConflict = false;
     let pullConfirmResolve = null;
     let currentUninstallRef = '';
     let currentUninstallPreview = null;
@@ -6722,15 +6733,28 @@ function renderPage() {
       closeProgressPanel();
       closeLogPanel();
       currentPullRef = ref;
-      pullConfirmTitle.textContent = 'Local changes detected';
+      currentPullIsConflict = Boolean(preflight?.unmerged);
+      pullConfirmTitle.textContent = currentPullIsConflict ? 'Unmerged files detected' : 'Local changes detected';
       const changes = Array.isArray(preflight?.changes) ? preflight.changes.length : 0;
-      pullConfirmSubtitle.textContent = decodeURIComponent(ref) + ' · ' + changes + ' local change' + (changes === 1 ? '' : 's') + ' · merge .env values, merge*2, or stash all before pull';
+      const conflictCount = Array.isArray(preflight?.conflicts) ? preflight.conflicts.length : 0;
+      pullConfirmSubtitle.textContent = currentPullIsConflict
+        ? decodeURIComponent(ref) + ' · ' + conflictCount + ' unmerged file' + (conflictCount === 1 ? '' : 's') + ' · delete them and repull'
+        : decodeURIComponent(ref) + ' · ' + changes + ' local change' + (changes === 1 ? '' : 's') + ' · merge .env values, merge*2, or stash all before pull';
       pullConfirmFlash.hidden = true;
-      pullConfirmSummary.innerHTML = '<div class="small">' + escapeHtml(preflight?.message || 'Git reported local changes in this project. Merge .env values first, or stash everything, then pull the remote branch.') + '</div>' +
-        '<div class="small">Default action: Merge .env and keep current VPS values, then append any new upstream env keys.</div>' +
-        '<div class="small">Merge*2 will open the env editor so you can paste extra keys and merge them on top of the pulled result.</div>';
-      pullConfirmBody.textContent = Array.isArray(preflight?.changes) && preflight.changes.length
-        ? preflight.changes.map((line) => '  ' + line).join('\\n')
+      pullConfirmMergeBtn.textContent = currentPullIsConflict ? 'Delete files & repull' : 'Merge .env (default)';
+      pullConfirmForceBtn.hidden = !currentPullIsConflict;
+      pullConfirmStashBtn.hidden = currentPullIsConflict;
+      pullConfirmSummary.innerHTML = currentPullIsConflict
+        ? '<div class="small">Git has unresolved merge conflicts. Delete the conflicting files and repull the remote branch.</div>' +
+          '<div class="small">This will remove the conflicted paths, then fetch and reset to the latest upstream commit.</div>'
+        : '<div class="small">' + escapeHtml(preflight?.message || 'Git reported local changes in this project. Merge .env values first, or stash everything, then pull the remote branch.') + '</div>' +
+          '<div class="small">Default action: Merge .env and keep current VPS values, then append any new upstream env keys.</div>' +
+          '<div class="small">Merge*2 will open the env editor so you can paste extra keys and merge them on top of the pulled result.</div>';
+      const detailLines = currentPullIsConflict
+        ? (Array.isArray(preflight?.conflicts) && preflight.conflicts.length ? preflight.conflicts : [])
+        : (Array.isArray(preflight?.changes) && preflight.changes.length ? preflight.changes : []);
+      pullConfirmBody.textContent = detailLines.length
+        ? detailLines.map((line) => '  ' + line).join('\\n')
         : '(no change list available)';
       pullConfirmPanel.hidden = false;
       setModalLocked(true);
@@ -6739,9 +6763,13 @@ function renderPage() {
     function closePullConfirmPanel(mode = '') {
       pullConfirmPanel.hidden = true;
       currentPullRef = '';
+      currentPullIsConflict = false;
       pullConfirmBody.textContent = '';
       pullConfirmSummary.innerHTML = '';
       pullConfirmFlash.hidden = true;
+      pullConfirmMergeBtn.textContent = 'Merge .env (default)';
+      pullConfirmForceBtn.hidden = true;
+      pullConfirmStashBtn.hidden = false;
       resolvePullConfirm(mode);
       setModalLocked(false);
     }
@@ -6910,6 +6938,8 @@ function renderPage() {
         decodeURIComponent(ref),
         mode === 'stash-all'
           ? 'Pulling ' + decodeURIComponent(ref) + ' with stash-all'
+          : mode === 'force-clean'
+            ? 'Deleting unresolved files and repulling ' + decodeURIComponent(ref)
           : mode === 'merge-env2'
             ? 'Pulling ' + decodeURIComponent(ref) + ' with merge*2'
             : 'Pulling ' + decodeURIComponent(ref),
@@ -7260,7 +7290,7 @@ function renderPage() {
             throw new Error(preflight.message || 'Git repository not found');
           }
           let mode = 'merge-env';
-          if (preflight && preflight.dirty) {
+          if (preflight && (preflight.unmerged || preflight.dirty)) {
             mode = await confirmPullMode(ref, preflight);
             if (!mode) {
               showMessage(listResult, 'Pull cancelled', false);
@@ -7269,7 +7299,9 @@ function renderPage() {
           }
           const pullMode = mode === 'merge-env2' ? 'merge-env' : mode;
           await runPullWithProgress(ref, pullMode);
-          showMessage(progressFlash, 'Pull completed, build all ran, and PM2 restarted for ' + decodeURIComponent(ref));
+          showMessage(progressFlash, mode === 'force-clean'
+            ? 'Deleted unresolved files, repulled, built all, and restarted PM2 for ' + decodeURIComponent(ref)
+            : 'Pull completed, build all ran, and PM2 restarted for ' + decodeURIComponent(ref));
           if (mode === 'merge-env2') {
             await loadEnv(ref, { mergeMode: true });
             showMessage(envFlash, 'Paste extra .env keys in the overlay and click Merge overlay & save.');
@@ -7314,7 +7346,10 @@ function renderPage() {
     closeEnvBtn.addEventListener('click', closeEnvPanel);
     closeProgressBtn.addEventListener('click', closeProgressPanel);
     pullConfirmNoBtn.addEventListener('click', () => closePullConfirmPanel(''));
-    pullConfirmMergeBtn.addEventListener('click', () => closePullConfirmPanel('merge-env'));
+    pullConfirmMergeBtn.addEventListener('click', () => closePullConfirmPanel(currentPullIsConflict ? 'force-clean' : 'merge-env'));
+    if (pullConfirmForceBtn) {
+      pullConfirmForceBtn.addEventListener('click', () => closePullConfirmPanel('force-clean'));
+    }
     if (pullConfirmMerge2Btn) {
       pullConfirmMerge2Btn.addEventListener('click', () => closePullConfirmPanel('merge-env2'));
     }
@@ -9069,9 +9104,13 @@ async function handleRequest(req, res) {
         projectPath,
         exists: gitStatus.exists,
         dirty: gitStatus.dirty,
+        unmerged: gitStatus.unmerged,
+        conflicts: gitStatus.conflicts || [],
         changes: gitStatus.lines || [],
         message: gitStatus.exists
-          ? (gitStatus.dirty
+          ? (gitStatus.unmerged
+            ? `Unmerged files detected in ${ref}. Delete the conflicting files and repull the remote branch?`
+            : gitStatus.dirty
             ? `Local changes detected in ${ref}. Merge .env values or stash all changes before pulling?`
             : `Repository is clean for ${ref}.`)
           : `Git repository not found for ${ref}.`,
@@ -9091,6 +9130,8 @@ async function handleRequest(req, res) {
       const requestedMode = String(url.searchParams.get('mode') || '').toLowerCase();
       const pullMode = requestedMode === 'stash-all' || requestedMode === 'stash'
         ? 'stash-all'
+        : requestedMode === 'force-clean' || requestedMode === 'clean' || requestedMode === 'delete'
+          ? 'force-clean'
         : requestedMode === 'merge-env' || requestedMode === 'merge' || requestedMode === 'env'
           ? 'merge-env'
           : legacyStash

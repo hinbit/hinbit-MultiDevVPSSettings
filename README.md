@@ -69,6 +69,7 @@ Optional environment variables:
 - `--env-file` to inject a repo `.env` before build/start
 - `--entrypoint` to force the PM2-managed runtime file or command when auto-detection is not enough
 - when a domain is set, `VITE_ALLOWED_HOSTS` and `CORS_ORIGIN` are exported into the PM2 runtime
+- `projectctl` removes `NODE_ENV` from deployed `.env` files automatically; use `APP_ENV` or `ENVIRONMENT` if your app needs a deployment label
 
 ## Runtime layout
 

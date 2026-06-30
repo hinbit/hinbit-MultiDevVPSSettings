@@ -938,6 +938,12 @@ normalize_project_deployment_env_file() {
 
   for key in NODE_ENV APP_ENV ENVIRONMENT MODE DEPLOYMENT RUNTIME_ENV BUILD_ENV STAGE; do
     value="$(env_file_value_exact "${env_file}" "${key}" 2>/dev/null || true)"
+    if [[ "${key}" == "NODE_ENV" ]]; then
+      if [[ -n "${value}" ]]; then
+        delete_meta_key "${env_file}" "${key}"
+      fi
+      continue
+    fi
     if is_localish_value "${value}"; then
       update_meta_value "${env_file}" "${key}" "production"
     fi
@@ -1070,6 +1076,10 @@ confirm_pull_mode_before_pull() {
       printf '%s' 'stash-all'
       return 0
       ;;
+    force-clean|clean|delete)
+      printf '%s' 'force-clean'
+      return 0
+      ;;
   esac
 
   case "${PROJECTCTL_PULL_STASH:-}" in
@@ -1089,11 +1099,16 @@ confirm_pull_mode_before_pull() {
     fi
     printf '[projectctl]   1) Merge .env (default; keep current VPS env values after pull)\n'
     printf '[projectctl]   2) Stash all local changes before pulling\n'
+    printf '[projectctl]   3) Force clean repull (delete conflicting files, then repull)\n'
     read -r -p "[projectctl] Choose [M]erge .env/[s]tash all/[c]ancel? [M/s/c] " answer || answer=""
     answer="${answer:-M}"
     case "${answer,,}" in
       s|stash|stash-all|2)
         printf '%s' 'stash-all'
+        return 0
+        ;;
+      3|f|force|force-clean|clean|delete|d)
+        printf '%s' 'force-clean'
         return 0
         ;;
       c|cancel|n|no)
@@ -1114,6 +1129,7 @@ pull_repo_with_optional_stash() {
   local repo_url="${3:-${REPO_URL}}"
   local dirty_status=""
   local dirty_paths=()
+  local conflict_paths=()
   local did_stash=0
   local pull_mode=""
   local env_backup_dir=""
@@ -1136,6 +1152,11 @@ pull_repo_with_optional_stash() {
     path="${line:3}"
     [[ -n "${path}" ]] || continue
     dirty_paths+=("${path}")
+    case "${line:0:2}" in
+      UU|AA|DD|AU|UA|DU|UD)
+        conflict_paths+=("${path}")
+        ;;
+    esac
     if ! is_preserved_env_file "${path}"; then
       non_env_dirty_paths+=("${path}")
     fi
@@ -1146,6 +1167,14 @@ pull_repo_with_optional_stash() {
 
   env_backup_dir="$(mktemp -d)"
 
+  if [[ "${pull_mode:-merge-env}" == "force-clean" ]]; then
+    for file in "${ENV_CANDIDATES[@]}"; do
+      [[ -f "${repo_dir}/${file}" ]] || continue
+      mkdir -p "${env_backup_dir}/$(dirname "${file}")"
+      cp -p "${repo_dir}/${file}" "${env_backup_dir}/${file}"
+    done
+  fi
+
   if [[ "${pull_mode:-merge-env}" == "merge-env" ]]; then
     for file in "${ENV_CANDIDATES[@]}"; do
       [[ -f "${repo_dir}/${file}" ]] || continue
@@ -1155,7 +1184,7 @@ pull_repo_with_optional_stash() {
         git -C "${repo_dir}" checkout -- "${file}" >/dev/null 2>&1 || true
       fi
     done
-  else
+  elif [[ "${pull_mode:-merge-env}" != "force-clean" ]]; then
     all_dirty_status="${dirty_status}"
     if [[ -n "${all_dirty_status}" ]]; then
       git -C "${repo_dir}" stash push -u -m "projectctl auto-stash before pull ${REPO_REF:-${PROJECT_SLUG:-project}} $(date -u +%Y-%m-%dT%H:%M:%SZ)" -- "${dirty_paths[@]}"
@@ -1166,12 +1195,19 @@ pull_repo_with_optional_stash() {
   set +e
   git -C "${repo_dir}" remote set-url origin "${repo_url}" >/dev/null 2>&1
   git -C "${repo_dir}" fetch origin "${branch}" >/dev/null 2>&1
-  git -C "${repo_dir}" checkout "${branch}" >/dev/null 2>&1
-  if [[ $? -ne 0 ]]; then
-    git -C "${repo_dir}" checkout -B "${branch}" "origin/${branch}" >/dev/null 2>&1
+  if [[ "${pull_mode:-merge-env}" == "force-clean" ]]; then
+    git -C "${repo_dir}" merge --abort >/dev/null 2>&1 || true
+    git -C "${repo_dir}" reset --hard "origin/${branch}" >/dev/null 2>&1 || git -C "${repo_dir}" reset --hard >/dev/null 2>&1
+    git -C "${repo_dir}" clean -fd >/dev/null 2>&1 || true
+    pull_rc=$?
+  else
+    git -C "${repo_dir}" checkout "${branch}" >/dev/null 2>&1
+    if [[ $? -ne 0 ]]; then
+      git -C "${repo_dir}" checkout -B "${branch}" "origin/${branch}" >/dev/null 2>&1
+    fi
+    git -C "${repo_dir}" pull --ff-only origin "${branch}"
+    pull_rc=$?
   fi
-  git -C "${repo_dir}" pull --ff-only origin "${branch}"
-  pull_rc=$?
   set -e
 
   if [[ "${did_stash}" -eq 1 ]]; then
@@ -1180,7 +1216,7 @@ pull_repo_with_optional_stash() {
     fi
   fi
 
-  if [[ "${pull_mode:-merge-env}" == "merge-env" ]]; then
+  if [[ "${pull_mode:-merge-env}" == "merge-env" || "${pull_mode:-merge-env}" == "force-clean" ]]; then
     for file in "${ENV_CANDIDATES[@]}"; do
       [[ -f "${env_backup_dir}/${file}" ]] || continue
       mkdir -p "${repo_dir}/$(dirname "${file}")"
@@ -2083,6 +2119,29 @@ update_meta_value() {
   fi
 }
 
+delete_meta_key() {
+  local meta="$1"
+  local key="$2"
+  local tmp
+  tmp="$(mktemp)"
+  awk -v key="${key}" '
+    {
+      line = $0
+      split(line, parts, "=")
+      current = parts[1]
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", current)
+      if (current == key) {
+        next
+      }
+      print line
+    }
+  ' "${meta}" > "${tmp}"
+  mv "${tmp}" "${meta}"
+  if [[ "${meta}" == /var/www/* ]]; then
+    normalize_env_file_shell_safe "${meta}"
+  fi
+}
+
 touch_meta_file() {
   local meta="$1"
   [[ -f "${meta}" ]] || return 0
@@ -2648,22 +2707,27 @@ run_package_build_in_dir() {
   local dir="$1"
   local label="$2"
   local pm="${PACKAGE_MANAGER:-npm}"
+  local script_name="build"
 
   [[ -d "${dir}" ]] || { printf '[projectctl] skipping %s build (missing directory)\n' "${label}" >&2; return 0; }
-  if ! (cd "${dir}" && package_has_script build); then
-    printf '[projectctl] skipping %s build (no build script)\n' "${label}" >&2
+  if (cd "${dir}" && package_has_script build); then
+    script_name="build"
+  elif (cd "${dir}" && package_has_script check); then
+    script_name="check"
+  else
+    printf '[projectctl] skipping %s build (no build/check script)\n' "${label}" >&2
     return 0
   fi
 
-  printf '[projectctl] running %s build in %s\n' "${label}" "${dir}"
+  printf '[projectctl] running %s %s in %s\n' "${label}" "${script_name}" "${dir}"
   (
     cd "${dir}"
     case "${pm}" in
-      pnpm) pnpm run build ;;
-      corepack-pnpm) corepack pnpm run build ;;
-      yarn) yarn build ;;
-      corepack-yarn) corepack yarn build ;;
-      *) npm run build ;;
+      pnpm) pnpm run "${script_name}" ;;
+      corepack-pnpm) corepack pnpm run "${script_name}" ;;
+      yarn) yarn "${script_name}" ;;
+      corepack-yarn) corepack yarn "${script_name}" ;;
+      *) npm run "${script_name}" ;;
     esac
   )
 }
@@ -2695,12 +2759,8 @@ maybe_build() {
       fi
     fi
   else
-    if [[ -f package.json ]] && package_has_script build; then
-      if ! run_package_build_in_dir "${PWD}" "root"; then
-        status="failed"
-      fi
-    else
-      printf '[projectctl] skipping root build (no build script)\n' >&2
+    if ! run_package_build_in_dir "${PWD}" "root"; then
+      status="failed"
     fi
   fi
 
