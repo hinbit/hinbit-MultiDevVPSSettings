@@ -3802,6 +3802,31 @@ verify_project_http_smoke() {
   return 1
 }
 
+rescue_project_http_smoke() {
+  local label="${1:-${REPO_REF}}"
+  local domain="${2:-${APP_DOMAIN:-}}"
+  local port="${3:-${APP_PORT:-}}"
+  local https="${4:-${APP_HTTPS:-yes}}"
+
+  [[ -n "${domain}" ]] || return 0
+  [[ -n "${port}" ]] || return 0
+
+  if verify_project_http_smoke "${label}" "${domain}" "${port}" "${https}"; then
+    return 0
+  fi
+
+  printf '[projectctl] %s smoke test failed; retrying app sync and PM2 restart once\n' "${label}" >&2
+  sync_app_map
+  if [[ -x /usr/local/bin/app-sync.sh ]]; then
+    /usr/local/bin/app-sync.sh
+  fi
+  restart_pm2
+  sync_app_map
+  verify_project_mapping "${label}" "${domain}" "${port}" "${https}"
+  verify_https_vhost "${domain}" "${https}"
+  verify_project_http_smoke "${label}" "${domain}" "${port}" "${https}"
+}
+
 auth_file_for_domain() {
   local domain="$1"
   printf '%s/%s.htpasswd' "${AUTH_DIR}" "${domain}"
@@ -4094,6 +4119,34 @@ restart_pm2() {
   start_pm2
 }
 
+ensure_project_pm2_online() {
+  local label="${1:-${REPO_REF}}"
+  local attempts=0
+
+  while (( attempts < 2 )); do
+    if pm2_process_is_online "${PM2_NAME}"; then
+      return 0
+    fi
+
+    if pm2 describe "${PM2_NAME}" >/dev/null 2>&1; then
+      printf '[projectctl] %s pm2 process exists but is not online; recreating it\n' "${label}" >&2
+    else
+      printf '[projectctl] %s pm2 process is missing; starting it now\n' "${label}" >&2
+    fi
+
+    restart_pm2
+    sleep 2
+
+    if pm2_process_is_online "${PM2_NAME}"; then
+      return 0
+    fi
+
+    attempts=$((attempts + 1))
+  done
+
+  return 1
+}
+
 pm2_process_is_online() {
   local name="$1"
 
@@ -4119,15 +4172,7 @@ pm2_process_is_online() {
 verify_project_install() {
   local label="${1:-${REPO_REF}}"
 
-  if pm2_process_is_online "${PM2_NAME}"; then
-    return 0
-  fi
-
-  printf '[projectctl] %s is not online after install/update; retrying once\n' "${label}" >&2
-  restart_pm2
-  sleep 2
-
-  if pm2_process_is_online "${PM2_NAME}"; then
+  if ensure_project_pm2_online "${label}"; then
     return 0
   fi
 
@@ -4301,9 +4346,7 @@ do_install() {
   verify_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
   verify_project_install "${REPO_REF}"
-  if ! verify_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"; then
-    printf '[projectctl] Warning: continuing after smoke test failure for %s so other projects are not blocked\n' "${REPO_REF}" >&2
-  fi
+  rescue_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   touch_meta_file "${meta}"
   if [[ -n "${APP_DOMAIN}" ]]; then
     printf '[projectctl] installed %s in %s on port %s for %s\n' "${REPO_REF}" "${APP_DIR}" "${APP_PORT}" "${APP_DOMAIN}"
@@ -4442,9 +4485,7 @@ do_update() {
   verify_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
   verify_project_install "${REPO_REF}"
-  if ! verify_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"; then
-    printf '[projectctl] Warning: continuing after smoke test failure for %s so other projects are not blocked\n' "${REPO_REF}" >&2
-  fi
+  rescue_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   touch_meta_file "${meta}"
   sync_duplicate_projects_from_source "${REPO_REF}"
   printf '[projectctl] updated %s\n' "${REPO_REF}"

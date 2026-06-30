@@ -20,9 +20,12 @@ An app that uses a remote DB machine and an outbound connector such as 360dialog
 - `WEBHOOK_TOKEN`: auth token for webhook or callback endpoints.
 - `PUBLIC_URL` / `API_BASE_URL`: public domain or API base used by the client.
 - `PREINSTALL_REQUIREMENTS.md`: OS packages or browser binaries the app needs before startup.
+- `start` must launch the long-lived runtime on `PORT`; a build artifact alone is not enough for Multidev.
+- ship a health endpoint and make sure the process stays online under PM2 after install/update.
 
 ## Install rule
 
 Future Codex sessions should copy this template into a real repo, keep the root `package.json` start script visible to Multidev, and make sure env values are complete before install.
+Multidev will retry the PM2 restart and the smoke test once, but the app still has to boot successfully under `npm start` or the equivalent root start script.
 If the app needs special nginx/path wiring, put it in `VPS-INSTALL.MD` as a JSON block so Multidev can wire it automatically during install/update.
 If the app needs OS packages or browser binaries before startup, add them to `PREINSTALL_REQUIREMENTS.md` so Multidev installs them before dependency setup.

@@ -161,6 +161,7 @@ What the installer does:
 - creates or wires the project DB on the selected DB machine
 - validates that the target schema exists and has tables before the install is treated as healthy
 - exports the correct domain-related env values for the runtime
+- retries PM2 restart and the host-header smoke test once so a transient boot issue does not leave the domain mapped but dead
 
 ## 5. Verify the project
 

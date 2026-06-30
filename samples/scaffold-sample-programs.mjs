@@ -217,10 +217,13 @@ function templateReadme(app) {
     '- `WEBHOOK_TOKEN`: auth token for webhook or callback endpoints.',
     '- `PUBLIC_URL` / `API_BASE_URL`: public domain or API base used by the client.',
     '- `PREINSTALL_REQUIREMENTS.md`: OS packages or browser binaries the app needs before startup.',
+    '- `start` must launch the long-lived runtime on `PORT`; a build artifact alone is not enough for Multidev.',
+    '- ship a health endpoint and make sure the process stays online under PM2 after install/update.',
     '',
     '## Install rule',
     '',
     'Future Codex sessions should copy this template into a real repo, keep the root `package.json` start script visible to Multidev, and make sure env values are complete before install.',
+    'Multidev will retry the PM2 restart and the smoke test once, but the app still has to boot successfully under `npm start` or the equivalent root start script.',
     'If the app needs special nginx/path wiring, put it in `VPS-INSTALL.MD` as a JSON block so Multidev can wire it automatically during install/update.',
     'If the app needs OS packages or browser binaries before startup, add them to `PREINSTALL_REQUIREMENTS.md` so Multidev installs them before dependency setup.',
   ]);
@@ -365,6 +368,8 @@ function vpsInstallDoc(app, runnable = false) {
     '- keep `PORT`, `APP_PORT`, `GUI_PORT`, `API_PORT`, `DB_*`, `MYSQL_*`, `CONNECTOR_*`, `PUBLIC_URL`, and `API_BASE_URL` in the env template when relevant',
     '- use `server/.env`, `client/.env`, or `dashboard/.env` if the repo has split runtime files',
     '- use `PREINSTALL_REQUIREMENTS.md` for OS packages or browser binaries such as Chromium',
+    '- make sure the root runtime process stays alive under PM2; a successful build does not create a service by itself',
+    '- add a `/health` or `/api/health` route so Multidev smoke tests can confirm the domain serves the same app as the local port',
     '- do not hardcode localhost ports into the browser bundle',
   ];
   return lines(body);
@@ -395,6 +400,7 @@ function runReadme(app) {
     '',
     'The sample also includes `VPS-INSTALL.MD` so Multidev can learn about extra nginx route wiring when it exists.',
     'If the sample ever needs a browser or OS package, `PREINSTALL_REQUIREMENTS.md` is where that requirement belongs.',
+    'If the sample does not keep a real runtime process alive under PM2, the domain can map correctly and still return 502.',
   ]);
 }
 

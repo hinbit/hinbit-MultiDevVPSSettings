@@ -141,6 +141,8 @@ Recommended order:
 
 After a pull, Multidev should first re-run the domain mapping and HTTPS vhost checks, then run `build all` so any missing app-map or vhost wiring is repaired before the build is considered done.
 `build all` runs the root build script plus `server/`, `client/`, and `dashboard/` build scripts when present.
+If the runtime process is missing after a build or restart, Multidev should retry PM2 startup once before it leaves the install/update flow.
+The install should only be treated as healthy when the PM2 process is online and the smoke test passes, not when the build alone succeeds.
 
 The app should not require a human to create the DB user manually after install.
 
