@@ -2222,6 +2222,12 @@ function projectView() {
   return readProjects().map((project) => {
     const proc = byName.get(project.PM2_NAME || project.PROJECT_SLUG);
     const env = proc?.pm2_env || {};
+    const pm2Present = Boolean(proc);
+    const pm2Online = String(env.status || '').toLowerCase() === 'online';
+    const pm2Missing = !pm2Present;
+    const pm2StatusLabel = pm2Missing ? 'PM2 missing' : (pm2Online ? 'PM2 online' : `PM2 ${String(env.status || 'offline')}`);
+    const pm2StatusClass = pm2Missing ? 'pill warn' : (pm2Online ? 'pill good' : 'pill warn');
+    const pm2State = pm2Missing ? 'missing' : (pm2Online ? 'online' : String(env.status || 'offline'));
     const projectEnv = project.APP_DIR ? pickEnvDetails(project.APP_DIR) : { env: {} };
     const { db } = pickDbDetails(project.APP_DIR || '');
     const projectMachineContext = resolveProjectMysqlMachine(project, project.APP_DIR || '');
@@ -2285,7 +2291,12 @@ function projectView() {
       sslStatus: ssl.label,
       sslStatusClass: ssl.className,
       sslSource: ssl.source || 'missing',
-      status: env.status || 'stopped',
+      status: pm2State,
+      pm2Present,
+      pm2Online,
+      pm2Missing,
+      pm2StatusLabel,
+      pm2StatusClass,
       restarts: env.restart_time ?? proc?.pm2_env?.restart_time ?? 0,
       uptime: proc?.pm2_env?.pm_uptime || 0,
       scriptPath: env.pm_exec_path || '',
@@ -5076,6 +5087,7 @@ function renderPage() {
     .status-stopped { color: #fbbf24; }
     .status-errored { color: #f87171; }
     .status-launching { color: #38bdf8; }
+    .status-missing { color: #f97316; }
     .small { font-size: 12px; color: #94a3b8; }
     .stack { display: grid; gap: 10px; }
     .password-field { display: grid; gap: 6px; }
@@ -6024,6 +6036,7 @@ function renderPage() {
 
     function statusClass(status) {
       const value = String(status || '').toLowerCase();
+      if (value.includes('missing')) return 'status-missing';
       if (value.includes('online')) return 'status-online';
       if (value.includes('launch')) return 'status-launching';
       if (value.includes('error')) return 'status-errored';
@@ -6084,6 +6097,7 @@ function renderPage() {
           <td>
             <div><code>\${escapeHtml(project.pm2 || '')}</code></div>
             <div class="small">\${escapeHtml(project.scriptPath || '')}</div>
+            <div class="small"><span class="\${escapeHtml(project.pm2StatusClass || 'pill warn')}">\${escapeHtml(project.pm2StatusLabel || 'PM2 unknown')}</span></div>
           </td>
           <td>\${escapeHtml(project.port || '')}</td>
           <td>\${escapeHtml(formatBytes(project.memory || 0))}</td>
