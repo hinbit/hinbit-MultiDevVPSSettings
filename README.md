@@ -74,10 +74,10 @@ projectctl uninstall owner/repo
 - `Merge .env (default)` keeps the current VPS env values after the pull and appends any new upstream env keys
 - `Stash all` stashes every local change before pulling
 If you give a project a `VPN profile`, `projectctl` writes it into the project metadata and env files and, when a hook exists at `/etc/vps-vpn-profiles/<profile>.sh`, runs it during install/update. That keeps per-project egress routing as an install-time option instead of a manual server edit.
-After every pull, `projectctl` now rechecks domain mapping and HTTPS wiring before `build all`, so a missing app-map entry is repaired during the pull run instead of surfacing as a broken deploy later.
+After every pull, `projectctl` rechecks domain mapping and HTTPS wiring, runs `build all`, and then restarts PM2 so the running process always reflects the pulled `main` tip. A missing app-map entry is repaired during the pull run instead of surfacing as a broken deploy later.
 After every install or pull, `projectctl` reads `PREINSTALL_REQUIREMENTS.md` from the repo root and any `server/`, `client/`, or `dashboard/` copy, installs any declared apt packages, and only then runs dependency installs and `build all`. Use that file for extra runtime binaries such as Chromium or other OS-level tools the app needs before startup.
 Then it runs dependency installs in the root plus `server/`, `client/`, and `dashboard/` when those folders exist. The subfolder installs use `npm --prefix ...` so each component is installed in its own directory before build and restart.
-Then it runs `build all` automatically:
+Then it runs `build all` automatically on pull:
 - `build all` runs the root build script plus `server/`, `client/`, and `dashboard/` build scripts when they exist
 - the project list shows the last build mode, status, and timestamp
 After install, update, or restart, `projectctl` reruns `app-sync` after PM2 is back up so `/etc/app-map.csv` and the nginx vhost are regenerated from the current project metadata.

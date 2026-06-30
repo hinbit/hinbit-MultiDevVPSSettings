@@ -6785,6 +6785,7 @@ function renderPage() {
       pullConfirmFlash.hidden = true;
       pullConfirmSummary.innerHTML = '<div class="small">' + escapeHtml(preflight?.message || 'Git reported local changes in this project. Merge .env values first, or stash everything, then pull the remote branch.') + '</div>' +
         '<div class="small">Default action: Merge .env and keep current VPS values, then append any new upstream env keys.</div>' +
+        '<div class="small">After the pull, Multidev always runs build all and restarts PM2 so the live process matches the pulled main tip.</div>' +
         '<div class="small">Merge*2 will open the env editor so you can paste extra keys and merge them on top of the pulled result.</div>';
       pullConfirmBody.textContent = Array.isArray(preflight?.changes) && preflight.changes.length
         ? preflight.changes.map((line) => '  ' + line).join('\\n')

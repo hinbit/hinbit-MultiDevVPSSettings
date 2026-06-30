@@ -204,15 +204,14 @@ projectctl restart owner/repo
 - pull the repo
 - preserve local env files by default via `Merge .env`
 - install any project-level system requirements declared in `PREINSTALL_REQUIREMENTS.md`
-- rebuild when the repo has a build script
-- ask whether to run `build all` after a successful pull
+- rebuild with `build all`
 - restart PM2 and sidecar services
 
 When local changes exist, the update prompt offers:
 - `Merge .env (default)` to keep the current VPS env values after the pull and append any new upstream env keys
 - `Stash all` to stash every local change before pulling
 
-After pull, the UI also asks whether to run `build all`:
+After pull, the UI always runs `build all`:
 - `build all` runs the root build script plus `server/`, `client/`, and `dashboard/` build scripts when they exist
 - the project list displays the last build mode, status, and timestamp
 

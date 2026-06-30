@@ -4323,7 +4323,7 @@ do_update() {
   local db_password=""
   local db_type=""
   local build_failed="no"
-  local build_mode="${PROJECTCTL_BUILD_MODE:-all}"
+  local build_mode="all"
   local effective_db_host=""
   local bootstrap_db_machine_id=""
   local bootstrap_db_ready="no"
