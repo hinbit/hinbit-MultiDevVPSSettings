@@ -1222,6 +1222,10 @@ confirm_pull_mode_before_pull() {
       printf '%s' 'stash-all'
       return 0
       ;;
+    force-clean|clean|delete)
+      printf '%s' 'force-clean'
+      return 0
+      ;;
   esac
 
   case "${PROJECTCTL_PULL_STASH:-}" in
@@ -1241,11 +1245,16 @@ confirm_pull_mode_before_pull() {
     fi
     printf '[projectctl]   1) Merge .env (default; keep current VPS env values after pull)\n'
     printf '[projectctl]   2) Stash all local changes before pulling\n'
-    read -r -p "[projectctl] Choose [M]erge .env/[s]tash all/[c]ancel? [M/s/c] " answer || answer=""
+    printf '[projectctl]   3) Force clean repull (delete conflicting files, then repull)\n'
+    read -r -p "[projectctl] Choose [M]erge .env/[s]tash all/[f]orce clean/[c]ancel? [M/s/f/c] " answer || answer=""
     answer="${answer:-M}"
     case "${answer,,}" in
       s|stash|stash-all|2)
         printf '%s' 'stash-all'
+        return 0
+        ;;
+      f|force|force-clean|clean|delete|3)
+        printf '%s' 'force-clean'
         return 0
         ;;
       c|cancel|n|no)
@@ -1276,6 +1285,7 @@ pull_repo_with_optional_stash() {
   local all_dirty_status=""
   local line=""
   local path=""
+  local conflict_paths=()
 
   for file in "${ENV_CANDIDATES[@]}"; do
     if git -C "${repo_dir}" ls-files --error-unmatch -- "${file}" >/dev/null 2>&1; then
@@ -1288,6 +1298,11 @@ pull_repo_with_optional_stash() {
     [[ -n "${line}" ]] || continue
     path="${line:3}"
     [[ -n "${path}" ]] || continue
+    case "${line:0:2}" in
+      UU|AA|DD|AU|UA|DU|UD)
+        conflict_paths+=("${path}")
+        ;;
+    esac
     dirty_paths+=("${path}")
     if ! is_preserved_env_file "${path}"; then
       non_env_dirty_paths+=("${path}")
@@ -1299,16 +1314,17 @@ pull_repo_with_optional_stash() {
 
   env_backup_dir="$(mktemp -d)"
 
-  if [[ "${pull_mode:-merge-env}" == "merge-env" ]]; then
+  if [[ "${pull_mode:-merge-env}" == "merge-env" || "${pull_mode:-merge-env}" == "force-clean" ]]; then
     for file in "${ENV_CANDIDATES[@]}"; do
       [[ -f "${repo_dir}/${file}" ]] || continue
       mkdir -p "${env_backup_dir}/$(dirname "${file}")"
       cp -p "${repo_dir}/${file}" "${env_backup_dir}/${file}"
+      [[ "${pull_mode:-merge-env}" == "force-clean" ]] && continue
       if git -C "${repo_dir}" ls-files --error-unmatch -- "${file}" >/dev/null 2>&1; then
         git -C "${repo_dir}" checkout -- "${file}" >/dev/null 2>&1 || true
       fi
     done
-  else
+  elif [[ "${pull_mode:-merge-env}" != "force-clean" ]]; then
     all_dirty_status="${dirty_status}"
     if [[ -n "${all_dirty_status}" ]]; then
       git -C "${repo_dir}" stash push -u -m "projectctl auto-stash before pull ${REPO_REF:-${PROJECT_SLUG:-project}} $(date -u +%Y-%m-%dT%H:%M:%SZ)" -- "${dirty_paths[@]}"
@@ -1319,9 +1335,16 @@ pull_repo_with_optional_stash() {
   set +e
   git -C "${repo_dir}" remote set-url origin "${repo_url}" >/dev/null 2>&1
   git -C "${repo_dir}" fetch --prune origin "${branch}" >/dev/null 2>&1
-  git -C "${repo_dir}" checkout -B "${branch}" "${remote_ref}" >/dev/null 2>&1
-  git -C "${repo_dir}" reset --hard "${remote_ref}" >/dev/null 2>&1
-  pull_rc=$?
+  if [[ "${pull_mode:-merge-env}" == "force-clean" ]]; then
+    git -C "${repo_dir}" merge --abort >/dev/null 2>&1 || true
+    git -C "${repo_dir}" reset --hard "${remote_ref}" >/dev/null 2>&1
+    git -C "${repo_dir}" clean -fd >/dev/null 2>&1 || true
+    pull_rc=$?
+  else
+    git -C "${repo_dir}" checkout -B "${branch}" "${remote_ref}" >/dev/null 2>&1
+    git -C "${repo_dir}" reset --hard "${remote_ref}" >/dev/null 2>&1
+    pull_rc=$?
+  fi
   set -e
 
   if [[ "${did_stash}" -eq 1 ]]; then
@@ -1330,7 +1353,7 @@ pull_repo_with_optional_stash() {
     fi
   fi
 
-  if [[ "${pull_mode:-merge-env}" == "merge-env" ]]; then
+  if [[ "${pull_mode:-merge-env}" == "merge-env" || "${pull_mode:-merge-env}" == "force-clean" ]]; then
     for file in "${ENV_CANDIDATES[@]}"; do
       [[ -f "${env_backup_dir}/${file}" ]] || continue
       mkdir -p "${repo_dir}/$(dirname "${file}")"

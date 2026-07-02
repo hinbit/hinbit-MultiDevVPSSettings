@@ -894,15 +894,23 @@ function pickEnvDetails(projectPath) {
 
 function readProjectGitStatus(projectPath) {
   if (!projectPath || !fs.existsSync(path.join(projectPath, '.git'))) {
-    return { exists: false, dirty: false, lines: [] };
+    return { exists: false, dirty: false, lines: [], conflicts: [], unmerged: false };
   }
 
   try {
     const output = execFileSync('git', ['-C', projectPath, 'status', '--porcelain'], { encoding: 'utf8' }).trim();
     const lines = output ? output.split(/\r?\n/).filter(Boolean) : [];
-    return { exists: true, dirty: lines.length > 0, lines };
+    const conflicts = [];
+    for (const line of lines) {
+      const status = line.slice(0, 2);
+      const file = line.slice(3).replace(/^\s+/, '');
+      if (['UU', 'AA', 'DD', 'AU', 'UA', 'DU', 'UD'].includes(status) && file) {
+        conflicts.push(file);
+      }
+    }
+    return { exists: true, dirty: lines.length > 0, lines, conflicts, unmerged: conflicts.length > 0 };
   } catch (error) {
-    return { exists: true, dirty: false, lines: [], error: error.message || String(error) };
+    return { exists: true, dirty: false, lines: [], conflicts: [], unmerged: false, error: error.message || String(error) };
   }
 }
 
@@ -1684,6 +1692,7 @@ function githubSshHostForUser(githubUser) {
   const user = normalizeGithubUser(githubUser);
   if (!user) return '';
   if (user === 'shaykid') return 'github.com';
+  if (user === 'developseach') return 'github-developseach';
   return `github-${user}`;
 }
 
@@ -2259,6 +2268,12 @@ function projectView() {
   return readProjects().map((project) => {
     const proc = byName.get(project.PM2_NAME || project.PROJECT_SLUG);
     const env = proc?.pm2_env || {};
+    const pm2Present = Boolean(proc);
+    const pm2Online = String(env.status || '').toLowerCase() === 'online';
+    const pm2Missing = !pm2Present;
+    const pm2StatusLabel = pm2Missing ? 'PM2 missing' : (pm2Online ? 'PM2 online' : `PM2 ${String(env.status || 'offline')}`);
+    const pm2StatusClass = pm2Missing ? 'pill warn' : (pm2Online ? 'pill good' : 'pill warn');
+    const pm2State = pm2Missing ? 'missing' : (pm2Online ? 'online' : String(env.status || 'offline'));
     const projectEnv = project.APP_DIR ? pickEnvDetails(project.APP_DIR) : { env: {} };
     const { db } = pickDbDetails(project.APP_DIR || '');
     const projectMachineContext = resolveProjectMysqlMachine(project, project.APP_DIR || '');
@@ -2322,7 +2337,12 @@ function projectView() {
       sslStatus: ssl.label,
       sslStatusClass: ssl.className,
       sslSource: ssl.source || 'missing',
-      status: env.status || 'stopped',
+      status: pm2State,
+      pm2Present,
+      pm2Online,
+      pm2Missing,
+      pm2StatusLabel,
+      pm2StatusClass,
       restarts: env.restart_time ?? proc?.pm2_env?.restart_time ?? 0,
       uptime: proc?.pm2_env?.pm_uptime || 0,
       scriptPath: env.pm_exec_path || '',
@@ -3430,6 +3450,7 @@ function projectStatusClass(status) {
   if (value.includes('online')) return 'status-online';
   if (value.includes('launch')) return 'status-launching';
   if (value.includes('error')) return 'status-errored';
+  if (value.includes('missing')) return 'status-missing';
   return 'status-stopped';
 }
 
@@ -3488,6 +3509,7 @@ function renderProjectRows(projects) {
           <td>
             <div><code>${escapeHtml(project.pm2 || '')}</code></div>
             <div class="small">${escapeHtml(project.scriptPath || '')}</div>
+            <div class="small"><span class="${escapeHtml(project.pm2StatusClass || 'pill warn')}">${escapeHtml(project.pm2StatusLabel || 'PM2 unknown')}</span></div>
           </td>
           <td>${escapeHtml(project.port || '')}</td>
           <td>${escapeHtml(formatBytes(project.memory || 0))}</td>
@@ -5147,6 +5169,7 @@ function renderPage() {
     .status-stopped { color: #fbbf24; }
     .status-errored { color: #f87171; }
     .status-launching { color: #38bdf8; }
+    .status-missing { color: #f97316; }
     .small { font-size: 12px; color: #94a3b8; }
     .stack { display: grid; gap: 10px; }
     .password-field { display: grid; gap: 6px; }
@@ -5669,6 +5692,7 @@ function renderPage() {
       <div class="actions">
         <button id="pullConfirmNoBtn" class="ghost" type="button">Cancel</button>
         <button id="pullConfirmMergeBtn" class="secondary" type="button" autofocus>Merge .env (default)</button>
+        <button id="pullConfirmForceBtn" class="danger" type="button" hidden>Delete files & repull</button>
         <button id="pullConfirmStashBtn" class="ghost" type="button">Stash all</button>
       </div>
     </header>
@@ -5841,6 +5865,7 @@ function renderPage() {
     const pullConfirmSummary = document.getElementById('pullConfirmSummary');
     const pullConfirmBody = document.getElementById('pullConfirmBody');
     const pullConfirmMergeBtn = document.getElementById('pullConfirmMergeBtn');
+    const pullConfirmForceBtn = document.getElementById('pullConfirmForceBtn');
     const pullConfirmMerge2Btn = document.getElementById('pullConfirmMerge2Btn');
     const pullConfirmStashBtn = document.getElementById('pullConfirmStashBtn');
     const pullConfirmNoBtn = document.getElementById('pullConfirmNoBtn');
@@ -5877,6 +5902,7 @@ function renderPage() {
     let currentLogRef = '';
     let currentLogType = 'out';
     let currentPullRef = '';
+    let currentPullIsConflict = false;
     let pullConfirmResolve = null;
     let currentUninstallRef = '';
     let currentUninstallPreview = null;
@@ -6098,6 +6124,7 @@ function renderPage() {
       if (value.includes('online')) return 'status-online';
       if (value.includes('launch')) return 'status-launching';
       if (value.includes('error')) return 'status-errored';
+      if (value.includes('missing')) return 'status-missing';
       return 'status-stopped';
     }
 
@@ -6155,6 +6182,7 @@ function renderPage() {
           <td>
             <div><code>\${escapeHtml(project.pm2 || '')}</code></div>
             <div class="small">\${escapeHtml(project.scriptPath || '')}</div>
+            <div class="small"><span class="\${escapeHtml(project.pm2StatusClass || 'pill warn')}">\${escapeHtml(project.pm2StatusLabel || 'PM2 unknown')}</span></div>
           </td>
           <td>\${escapeHtml(project.port || '')}</td>
           <td>\${escapeHtml(formatBytes(project.memory || 0))}</td>
@@ -6779,16 +6807,29 @@ function renderPage() {
       closeProgressPanel();
       closeLogPanel();
       currentPullRef = ref;
-      pullConfirmTitle.textContent = 'Local changes detected';
+      currentPullIsConflict = Boolean(preflight?.unmerged);
+      pullConfirmTitle.textContent = currentPullIsConflict ? 'Unmerged files detected' : 'Local changes detected';
       const changes = Array.isArray(preflight?.changes) ? preflight.changes.length : 0;
-      pullConfirmSubtitle.textContent = decodeURIComponent(ref) + ' · ' + changes + ' local change' + (changes === 1 ? '' : 's') + ' · merge .env values, merge*2, or stash all before pull';
+      const conflictCount = Array.isArray(preflight?.conflicts) ? preflight.conflicts.length : 0;
+      pullConfirmSubtitle.textContent = currentPullIsConflict
+        ? decodeURIComponent(ref) + ' · ' + conflictCount + ' unmerged file' + (conflictCount === 1 ? '' : 's') + ' · delete them and repull'
+        : decodeURIComponent(ref) + ' · ' + changes + ' local change' + (changes === 1 ? '' : 's') + ' · merge .env values, merge*2, or stash all before pull';
       pullConfirmFlash.hidden = true;
-      pullConfirmSummary.innerHTML = '<div class="small">' + escapeHtml(preflight?.message || 'Git reported local changes in this project. Merge .env values first, or stash everything, then pull the remote branch.') + '</div>' +
-        '<div class="small">Default action: Merge .env and keep current VPS values, then append any new upstream env keys.</div>' +
-        '<div class="small">After the pull, Multidev always runs build all and restarts PM2 so the live process matches the pulled main tip.</div>' +
-        '<div class="small">Merge*2 will open the env editor so you can paste extra keys and merge them on top of the pulled result.</div>';
-      pullConfirmBody.textContent = Array.isArray(preflight?.changes) && preflight.changes.length
-        ? preflight.changes.map((line) => '  ' + line).join('\\n')
+      pullConfirmMergeBtn.textContent = currentPullIsConflict ? 'Delete files & repull' : 'Merge .env (default)';
+      if (pullConfirmForceBtn) pullConfirmForceBtn.hidden = !currentPullIsConflict;
+      pullConfirmStashBtn.hidden = currentPullIsConflict;
+      pullConfirmSummary.innerHTML = currentPullIsConflict
+        ? '<div class="small">Git has unresolved merge conflicts. Delete the conflicting files and repull the remote branch.</div>' +
+          '<div class="small">This removes the conflicted paths, fetches the latest upstream branch, then restores preserved env values.</div>'
+        : '<div class="small">' + escapeHtml(preflight?.message || 'Git reported local changes in this project. Merge .env values first, or stash everything, then pull the remote branch.') + '</div>' +
+          '<div class="small">Default action: Merge .env and keep current VPS values, then append any new upstream env keys.</div>' +
+          '<div class="small">After the pull, Multidev always runs build all and restarts PM2 so the live process matches the pulled main tip.</div>' +
+          '<div class="small">Merge*2 will open the env editor so you can paste extra keys and merge them on top of the pulled result.</div>';
+      const detailLines = currentPullIsConflict
+        ? (Array.isArray(preflight?.conflicts) ? preflight.conflicts : [])
+        : (Array.isArray(preflight?.changes) ? preflight.changes : []);
+      pullConfirmBody.textContent = detailLines.length
+        ? detailLines.map((line) => '  ' + line).join('\\n')
         : '(no change list available)';
       pullConfirmPanel.hidden = false;
       setModalLocked(true);
@@ -6797,9 +6838,13 @@ function renderPage() {
     function closePullConfirmPanel(mode = '') {
       pullConfirmPanel.hidden = true;
       currentPullRef = '';
+      currentPullIsConflict = false;
       pullConfirmBody.textContent = '';
       pullConfirmSummary.innerHTML = '';
       pullConfirmFlash.hidden = true;
+      pullConfirmMergeBtn.textContent = 'Merge .env (default)';
+      if (pullConfirmForceBtn) pullConfirmForceBtn.hidden = true;
+      pullConfirmStashBtn.hidden = false;
       resolvePullConfirm(mode);
       setModalLocked(false);
     }
@@ -7318,7 +7363,7 @@ function renderPage() {
             throw new Error(preflight.message || 'Git repository not found');
           }
           let mode = 'merge-env';
-          if (preflight && preflight.dirty) {
+          if (preflight && (preflight.unmerged || preflight.dirty)) {
             mode = await confirmPullMode(ref, preflight);
             if (!mode) {
               showMessage(listResult, 'Pull cancelled', false);
@@ -7327,7 +7372,9 @@ function renderPage() {
           }
           const pullMode = mode === 'merge-env2' ? 'merge-env' : mode;
           await runPullWithProgress(ref, pullMode);
-          showMessage(progressFlash, 'Pull completed and build all ran for ' + decodeURIComponent(ref));
+          showMessage(progressFlash, mode === 'force-clean'
+            ? 'Deleted unresolved files, repulled, built all, and restarted PM2 for ' + decodeURIComponent(ref)
+            : 'Pull completed, build all ran, and PM2 restarted for ' + decodeURIComponent(ref));
           if (mode === 'merge-env2') {
             await loadEnv(ref, { mergeMode: true });
             showMessage(envFlash, 'Paste extra .env keys in the overlay and click Merge overlay & save.');
@@ -7372,7 +7419,10 @@ function renderPage() {
     closeEnvBtn.addEventListener('click', closeEnvPanel);
     closeProgressBtn.addEventListener('click', closeProgressPanel);
     pullConfirmNoBtn.addEventListener('click', () => closePullConfirmPanel(''));
-    pullConfirmMergeBtn.addEventListener('click', () => closePullConfirmPanel('merge-env'));
+    pullConfirmMergeBtn.addEventListener('click', () => closePullConfirmPanel(currentPullIsConflict ? 'force-clean' : 'merge-env'));
+    if (pullConfirmForceBtn) {
+      pullConfirmForceBtn.addEventListener('click', () => closePullConfirmPanel('force-clean'));
+    }
     if (pullConfirmMerge2Btn) {
       pullConfirmMerge2Btn.addEventListener('click', () => closePullConfirmPanel('merge-env2'));
     }
@@ -9127,10 +9177,14 @@ async function handleRequest(req, res) {
         projectPath,
         exists: gitStatus.exists,
         dirty: gitStatus.dirty,
+        unmerged: gitStatus.unmerged,
+        conflicts: gitStatus.conflicts || [],
         changes: gitStatus.lines || [],
         message: gitStatus.exists
-          ? (gitStatus.dirty
-            ? `Local changes detected in ${ref}. Merge .env values or stash all changes before pulling?`
+          ? (gitStatus.unmerged
+            ? `Unmerged files detected in ${ref}. Delete the conflicting files and repull the remote branch?`
+            : gitStatus.dirty
+              ? `Local changes detected in ${ref}. Merge .env values or stash all changes before pulling?`
             : `Repository is clean for ${ref}.`)
           : `Git repository not found for ${ref}.`,
       });
@@ -9149,6 +9203,8 @@ async function handleRequest(req, res) {
       const requestedMode = String(url.searchParams.get('mode') || '').toLowerCase();
       const pullMode = requestedMode === 'stash-all' || requestedMode === 'stash'
         ? 'stash-all'
+        : requestedMode === 'force-clean' || requestedMode === 'clean' || requestedMode === 'delete'
+          ? 'force-clean'
         : requestedMode === 'merge-env' || requestedMode === 'merge' || requestedMode === 'env'
           ? 'merge-env'
           : legacyStash
