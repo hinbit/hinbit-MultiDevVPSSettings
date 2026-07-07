@@ -7070,7 +7070,7 @@ function renderPage() {
       let outputBuffer = '';
 
       const handleBlock = (block) => {
-        const lines = String(block || '').split('\n');
+        const lines = String(block || '').split('\\n');
         let eventName = 'message';
         const dataLines = [];
         for (const line of lines) {
@@ -7086,9 +7086,9 @@ function renderPage() {
         if (!dataLines.length) return;
         let payload = {};
         try {
-          payload = JSON.parse(dataLines.join('\n'));
+          payload = JSON.parse(dataLines.join('\\n'));
         } catch {
-          payload = { message: dataLines.join('\n') };
+          payload = { message: dataLines.join('\\n') };
         }
         if (eventName === 'chunk') {
           outputBuffer += String(payload.chunk || '');
@@ -7097,14 +7097,14 @@ function renderPage() {
           return;
         }
         if (eventName === 'done') {
-          outputBuffer += (outputBuffer.endsWith('\n') ? '' : '\n') + '[done]\n';
+          outputBuffer += (outputBuffer.endsWith('\\n') ? '' : '\\n') + '[done]\\n';
           progressBody.textContent = outputBuffer;
           progressBody.scrollTop = progressBody.scrollHeight;
           return;
         }
         if (eventName === 'error') {
           const message = String(payload.message || 'Request failed');
-          outputBuffer += (outputBuffer.endsWith('\n') ? '' : '\n') + '[error] ' + message + '\n';
+          outputBuffer += (outputBuffer.endsWith('\\n') ? '' : '\\n') + '[error] ' + message + '\\n';
           progressBody.textContent = outputBuffer;
           progressBody.scrollTop = progressBody.scrollHeight;
           throw new Error(message);
@@ -7114,12 +7114,12 @@ function renderPage() {
       while (true) {
         const { value, done } = await reader.read();
         rawBuffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-        let splitIndex = rawBuffer.indexOf('\n\n');
+        let splitIndex = rawBuffer.indexOf('\\n\\n');
         while (splitIndex !== -1) {
           const block = rawBuffer.slice(0, splitIndex);
           rawBuffer = rawBuffer.slice(splitIndex + 2);
           handleBlock(block);
-          splitIndex = rawBuffer.indexOf('\n\n');
+          splitIndex = rawBuffer.indexOf('\\n\\n');
         }
         if (done) break;
       }
