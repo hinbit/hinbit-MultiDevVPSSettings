@@ -1102,6 +1102,7 @@ verify_project_db_schema() {
   local machine_id=""
   local schema_count="0"
   local table_count="0"
+  local has_db_scripts="no"
 
   db_name="$(normalize_db_identifier "$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)")"
   db_user="$(normalize_db_identifier "$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)")"
@@ -1121,7 +1122,26 @@ verify_project_db_schema() {
 
   table_count="$(mysql_exec_machine "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=$(sql_quote "${db_name}")" 2>/dev/null || printf '0')"
   if [[ "${table_count}" -lt 1 ]]; then
-    die "Database schema ${db_name} on ${DB_MACHINE_NAME:-${machine_id}} has no tables"
+    for script_dir in "" "server" "client"; do
+      if [[ -n "${script_dir}" ]]; then
+        [[ -d "${APP_DIR}/${script_dir}" ]] || continue
+        if package_json_has_script_in_dir "${APP_DIR}/${script_dir}" "db:init" || package_json_has_script_in_dir "${APP_DIR}/${script_dir}" "db:seed"; then
+          has_db_scripts="yes"
+          break
+        fi
+      else
+        if package_json_has_script_in_dir "${APP_DIR}" "db:init" || package_json_has_script_in_dir "${APP_DIR}" "db:seed"; then
+          has_db_scripts="yes"
+          break
+        fi
+      fi
+    done
+
+    if [[ "${has_db_scripts}" == "yes" ]]; then
+      die "Database schema ${db_name} on ${DB_MACHINE_NAME:-${machine_id}} has no tables"
+    fi
+
+    printf '[projectctl] database schema %s on %s has no tables; no db:init/db:seed scripts were found, so continuing\n' "${db_name}" "${DB_MACHINE_NAME:-${machine_id}}" >&2
   fi
 }
 

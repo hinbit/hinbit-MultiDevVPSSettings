@@ -594,9 +594,10 @@ function readProjectGitInfo(projectPath) {
     };
   }
   try {
-    const commit = execFileSync('git', ['-C', projectPath, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const gitArgs = ['-c', `safe.directory=${projectPath}`, '-C', projectPath];
+    const commit = execFileSync('git', [...gitArgs, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
     const commitShort = commit ? commit.slice(0, 12) : '';
-    const commitDate = execFileSync('git', ['-C', projectPath, 'log', '-1', '--format=%cI'], { encoding: 'utf8' }).trim();
+    const commitDate = execFileSync('git', [...gitArgs, 'log', '-1', '--format=%cI'], { encoding: 'utf8' }).trim();
     return {
       commit,
       commitShort,
@@ -898,7 +899,7 @@ function readProjectGitStatus(projectPath) {
   }
 
   try {
-    const output = execFileSync('git', ['-C', projectPath, 'status', '--porcelain'], { encoding: 'utf8' }).trim();
+    const output = execFileSync('git', ['-c', `safe.directory=${projectPath}`, '-C', projectPath, 'status', '--porcelain'], { encoding: 'utf8' }).trim();
     const lines = output ? output.split(/\r?\n/).filter(Boolean) : [];
     const conflicts = [];
     for (const line of lines) {
