@@ -4083,6 +4083,28 @@ run_install_db_scripts() {
   done
 }
 
+project_has_db_scripts() {
+  local project_dir="${1:-${APP_DIR}}"
+  local script_dir=""
+
+  [[ -d "${project_dir}" ]] || return 1
+
+  for script_dir in "" "server" "client"; do
+    if [[ -n "${script_dir}" ]]; then
+      [[ -d "${project_dir}/${script_dir}" ]] || continue
+      if package_json_has_script_in_dir "${project_dir}/${script_dir}" "db:init" || package_json_has_script_in_dir "${project_dir}/${script_dir}" "db:seed"; then
+        return 0
+      fi
+    else
+      if package_json_has_script_in_dir "${project_dir}" "db:init" || package_json_has_script_in_dir "${project_dir}" "db:seed"; then
+        return 0
+      fi
+    fi
+  done
+
+  return 1
+}
+
 clone_or_pull() {
   if [[ -d "${APP_DIR}/.git" ]]; then
     pull_repo_with_optional_stash "${APP_DIR}" "${BRANCH}" "${REPO_URL}"
@@ -4391,7 +4413,11 @@ do_install() {
     fi
     sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "" "${bootstrap_db_machine_id}"
     run_install_db_scripts "${APP_DIR}"
-    verify_project_db_schema
+    if project_has_db_scripts "${APP_DIR}"; then
+      verify_project_db_schema
+    else
+      printf '[projectctl] no db:init/db:seed scripts found for %s; skipping schema table verification\n' "${REPO_REF}"
+    fi
     mark_project_db_bootstrap_ready "${meta}"
   else
     if [[ "${custom_db_machine}" -eq 1 ]]; then
@@ -4526,7 +4552,11 @@ do_update() {
       printf '[projectctl] custom DB machine points to local host for %s; bootstrapping through the local DB machine\n' "${REPO_REF}"
     fi
     sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "${MYSQL_ALLOWED_IPS:-}" "${bootstrap_db_machine_id}"
-    verify_project_db_schema
+    if project_has_db_scripts "${APP_DIR}"; then
+      verify_project_db_schema
+    else
+      printf '[projectctl] no db:init/db:seed scripts found for %s; skipping schema table verification\n' "${REPO_REF}"
+    fi
     mark_project_db_bootstrap_ready "${meta}"
   fi
   run_project_vpn_hook "update" "${vpn_profile}"
