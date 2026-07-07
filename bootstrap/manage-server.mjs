@@ -7460,7 +7460,7 @@ function renderPage() {
             'Preparing pull...',
             'Pull Progress',
           );
-          progressBody.textContent = '[projectctl] preparing pull\n';
+          progressBody.textContent = '[projectctl] preparing pull\\n';
           const preflight = await loadPullPreflight(ref);
           if (preflight && preflight.exists === false) {
             throw new Error(preflight.message || 'Git repository not found');
