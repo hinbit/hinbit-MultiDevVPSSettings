@@ -915,6 +915,28 @@ function readProjectGitStatus(projectPath) {
   }
 }
 
+function normalizeVpnProfileValue(rawValue) {
+  let value = String(rawValue || '').trim();
+  if (!value) return '';
+
+  value = value.replace(/'"'"'/g, "'");
+  while (value.length >= 2) {
+    const first = value[0];
+    const last = value[value.length - 1];
+    if ((first === "'" && last === "'") || (first === '"' && last === '"')) {
+      value = value.slice(1, -1).trim();
+      continue;
+    }
+    break;
+  }
+
+  if (!value) return '';
+  if (/^['"]+$/.test(value)) return '';
+  if (/['"]{3,}/.test(value)) return '';
+  if (!/[A-Za-z0-9]/.test(value)) return '';
+  return value;
+}
+
 function normalizeMysqlMachine(machineOrId) {
   if (machineOrId && typeof machineOrId === 'object' && !Array.isArray(machineOrId)) {
     return {
@@ -2308,7 +2330,7 @@ function projectView() {
       runtime: project.DEPLOY_RUNTIME || 'auto',
       type: project.APP_TYPE || '',
       packageManager: project.PACKAGE_MANAGER || '',
-      vpnProfile: project.VPN_PROFILE || project.VPN_PROFILE_NAME || project.VPN_EGRESS_PROFILE || projectEnv.env.VPN_PROFILE || projectEnv.env.VPN_PROFILE_NAME || projectEnv.env.VPN_EGRESS_PROFILE || '',
+      vpnProfile: normalizeVpnProfileValue(project.VPN_PROFILE || project.VPN_PROFILE_NAME || project.VPN_EGRESS_PROFILE || projectEnv.env.VPN_PROFILE || projectEnv.env.VPN_PROFILE_NAME || projectEnv.env.VPN_EGRESS_PROFILE || ''),
       duplicate: Boolean(project.duplicate),
       duplicateSourceRepoRef: project.duplicateSourceRepoRef || '',
       duplicateEnvMode: project.duplicateEnvMode || '',
@@ -7433,12 +7455,19 @@ function renderPage() {
       if (action === 'update') {
         btn.disabled = true;
         try {
+          openProgressPanel(
+            decodeURIComponent(ref),
+            'Preparing pull...',
+            'Pull Progress',
+          );
+          progressBody.textContent = '[projectctl] preparing pull\n';
           const preflight = await loadPullPreflight(ref);
           if (preflight && preflight.exists === false) {
             throw new Error(preflight.message || 'Git repository not found');
           }
           let mode = 'merge-env';
           if (preflight && (preflight.unmerged || preflight.dirty)) {
+            closeProgressPanel();
             mode = await confirmPullMode(ref, preflight);
             if (!mode) {
               showMessage(listResult, 'Pull cancelled', false);
