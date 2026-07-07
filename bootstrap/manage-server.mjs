@@ -597,16 +597,19 @@ function readProjectGitInfo(projectPath) {
     const gitArgs = ['-c', `safe.directory=${projectPath}`, '-C', projectPath];
     const commit = execFileSync('git', [...gitArgs, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
     const commitShort = commit ? commit.slice(0, 12) : '';
+    const commitSubject = execFileSync('git', [...gitArgs, 'log', '-1', '--format=%s'], { encoding: 'utf8' }).trim();
     const commitDate = execFileSync('git', [...gitArgs, 'log', '-1', '--format=%cI'], { encoding: 'utf8' }).trim();
     return {
       commit,
       commitShort,
+      commitSubject,
       commitDate,
     };
   } catch {
     return {
       commit: '',
       commitShort: '',
+      commitSubject: '',
       commitDate: '',
     };
   }
@@ -2376,6 +2379,7 @@ function projectView() {
       cpu: proc?.monit?.cpu ?? proc?.pm2_env?.monit?.cpu ?? 0,
       gitCommit: gitInfo.commit || '',
       gitCommitShort: gitInfo.commitShort || '',
+      gitCommitSubject: gitInfo.commitSubject || '',
       gitCommitDate: gitInfo.commitDate || '',
       lastBuildMode,
       lastBuildStatus,
@@ -3545,6 +3549,8 @@ function renderProjectRows(projects) {
           <td>
             <div><strong>${escapeHtml(project.repo || project.slug || '')}</strong>${project.duplicate ? ' <span class="pill warn">duplicate</span>' : ''}</div>
             <div class="small">${escapeHtml(project.path || '')}</div>
+            <div class="small">last commit: ${escapeHtml(project.gitCommitShort || 'n/a')} · ${escapeHtml(project.gitCommitSubject || 'n/a')}</div>
+            <div class="small">committed: ${escapeHtml(project.gitCommitDate ? new Date(project.gitCommitDate).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }) : 'n/a')}</div>
             <div class="small">version: ${escapeHtml(project.gitCommitShort || 'n/a')} · ${escapeHtml(project.gitCommitDate ? new Date(project.gitCommitDate).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }) : 'n/a')}</div>
             ${project.duplicateSourceRepoRef ? '<div class="small">source: <code>' + escapeHtml(project.duplicateSourceRepoRef) + '</code></div>' : ''}
             <div class="small">build: ${escapeHtml(project.lastBuildMode ? `${project.lastBuildMode} · ${project.lastBuildStatus || 'unknown'} · ${project.lastBuildDate || 'n/a'}` : 'n/a')}</div>
@@ -6220,6 +6226,8 @@ function renderPage() {
           <td>
             <div><strong>\${escapeHtml(project.repo || project.slug || '')}</strong>\${project.duplicate ? ' <span class="pill warn">duplicate</span>' : ''}</div>
             <div class="small">\${escapeHtml(project.path || '')}</div>
+            <div class="small">last commit: \${escapeHtml(project.gitCommitShort || 'n/a')} · \${escapeHtml(project.gitCommitSubject || 'n/a')}</div>
+            <div class="small">committed: \${escapeHtml(project.gitCommitDate ? new Date(project.gitCommitDate).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem' }) : 'n/a')}</div>
             \${project.duplicateSourceRepoRef ? '<div class="small">source: <code>' + escapeHtml(project.duplicateSourceRepoRef) + '</code></div>' : ''}
           </td>
           <td>
@@ -7070,7 +7078,7 @@ function renderPage() {
       let outputBuffer = '';
 
       const handleBlock = (block) => {
-        const lines = String(block || '').split('\\\\n');
+        const lines = String(block || '').split('\\n');
         let eventName = 'message';
         const dataLines = [];
         for (const line of lines) {
@@ -7086,9 +7094,9 @@ function renderPage() {
         if (!dataLines.length) return;
         let payload = {};
         try {
-          payload = JSON.parse(dataLines.join('\\\\n'));
+          payload = JSON.parse(dataLines.join('\\n'));
         } catch {
-          payload = { message: dataLines.join('\\\\n') };
+          payload = { message: dataLines.join('\\n') };
         }
         if (eventName === 'chunk') {
           outputBuffer += String(payload.chunk || '');
@@ -7097,14 +7105,14 @@ function renderPage() {
           return;
         }
         if (eventName === 'done') {
-          outputBuffer += (outputBuffer.endsWith('\\\\n') ? '' : '\\\\n') + '[done]\\\\n';
+          outputBuffer += (outputBuffer.endsWith('\\n') ? '' : '\\n') + '[done]\\n';
           progressBody.textContent = outputBuffer;
           progressBody.scrollTop = progressBody.scrollHeight;
           return;
         }
         if (eventName === 'error') {
           const message = String(payload.message || 'Request failed');
-          outputBuffer += (outputBuffer.endsWith('\\\\n') ? '' : '\\\\n') + '[error] ' + message + '\\\\n';
+          outputBuffer += (outputBuffer.endsWith('\\n') ? '' : '\\n') + '[error] ' + message + '\\n';
           progressBody.textContent = outputBuffer;
           progressBody.scrollTop = progressBody.scrollHeight;
           throw new Error(message);
@@ -7114,12 +7122,12 @@ function renderPage() {
       while (true) {
         const { value, done } = await reader.read();
         rawBuffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-        let splitIndex = rawBuffer.indexOf('\\\\n\\\\n');
+        let splitIndex = rawBuffer.indexOf('\\n\\n');
         while (splitIndex !== -1) {
           const block = rawBuffer.slice(0, splitIndex);
           rawBuffer = rawBuffer.slice(splitIndex + 2);
           handleBlock(block);
-          splitIndex = rawBuffer.indexOf('\\\\n\\\\n');
+          splitIndex = rawBuffer.indexOf('\\n\\n');
         }
         if (done) break;
       }
