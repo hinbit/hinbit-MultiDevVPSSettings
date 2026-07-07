@@ -4399,7 +4399,7 @@ do_install() {
     die "Build failed for ${REPO_REF}"
   fi
 
-  if [[ -n "${db_name}" && -n "${db_user}" && -n "${db_password}" ]]; then
+  if [[ -n "${db_name}" && -n "${db_user}" && -n "${db_password}" && "$(project_has_db_scripts "${APP_DIR}" && printf yes || printf no)" == "yes" ]]; then
     if [[ "${custom_db_machine}" -eq 0 ]]; then
       bootstrap_db_ready="yes"
     elif project_db_host_is_local "${effective_db_host}"; then
@@ -4516,7 +4516,7 @@ do_update() {
   if [[ "${DB_MACHINE_ID}" == "custom" && -n "${effective_db_host}" && "$(project_db_host_is_local "${effective_db_host}" && printf yes || printf no)" == "yes" ]]; then
     bootstrap_db_machine_id="${LOCAL_DB_MACHINE_ID}"
   fi
-  if [[ -n "${db_name}" && -n "${db_user}" && -n "${db_password}" ]]; then
+  if [[ -n "${db_name}" && -n "${db_user}" && -n "${db_password}" && "$(project_has_db_scripts "${APP_DIR}" && printf yes || printf no)" == "yes" ]]; then
     if [[ "${DB_MACHINE_ID}" != "custom" ]]; then
       bootstrap_db_ready="yes"
     elif project_db_host_is_local "${effective_db_host}"; then
