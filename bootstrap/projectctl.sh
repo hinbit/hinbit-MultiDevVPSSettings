@@ -887,12 +887,19 @@ normalize_env_file_shell_safe() {
   tmp="$(mktemp)"
   python3 - "$env_file" "$tmp" <<'PY'
 import re
+import shlex
 import sys
 
 source_path, target_path = sys.argv[1:3]
 line_re = re.compile(r'^([ \t]*)(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*=(.*)$')
 
 def unquote(value):
+  try:
+    parts = shlex.split(value, posix=True)
+    if len(parts) == 1:
+      return parts[0]
+  except Exception:
+    pass
   if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
     inner = value[1:-1]
     if value[0] == '"':
@@ -1865,6 +1872,7 @@ clone_mysql_database() {
 project_db_machine_id() {
   local machine_id=""
   machine_id="$(project_db_value DB_MACHINE_ID)"
+  machine_id="$(normalize_db_identifier "${machine_id}")"
   printf '%s' "${machine_id:-${LOCAL_DB_MACHINE_ID}}"
 }
 
@@ -2225,7 +2233,7 @@ update_meta_value() {
   local encoded_value="${value}"
   local tmp
   tmp="$(mktemp)"
-  if [[ "${key}" == *_JSON ]]; then
+  if [[ "${key}" == *_JSON || ! "${value}" =~ ^[A-Za-z0-9._/@%:+,=-]*$ ]]; then
     encoded_value="$(shell_quote "${value}")"
   fi
   awk -v key="${key}" -v value="${encoded_value}" '
@@ -4136,7 +4144,22 @@ start_pm2() {
 restart_pm2() {
   cleanup_project_sidecars
   if pm2 describe "${PM2_NAME}" >/dev/null 2>&1; then
-    pm2 delete "${PM2_NAME}" >/dev/null 2>&1 || true
+    (
+      cd "${APP_DIR}"
+      case "${START_KIND}" in
+        ecosystem:*|node:*|serve:*)
+          env TZ=Asia/Jerusalem PORT="${APP_PORT}" pm2 restart "${PM2_NAME}" --update-env
+          ;;
+        npm-prod|npm-start|npm-dev)
+          env TZ=Asia/Jerusalem PORT="${APP_PORT}" pm2 restart "${PM2_NAME}" --update-env
+          ;;
+        *)
+          pm2 restart "${PM2_NAME}" --update-env
+          ;;
+      esac
+    )
+    pm2 save
+    return
   fi
 
   start_pm2

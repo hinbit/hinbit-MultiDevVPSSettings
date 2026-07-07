@@ -3379,7 +3379,7 @@ function runSyncScript(scriptName) {
   return (res.stdout || '').trim();
 }
 
-function streamProjectCtl(res, args, extraEnv = {}) {
+function streamProjectCtl(req, res, args, extraEnv = {}) {
   const child = spawn(PROJECTCTL, args, {
     cwd: '/',
     env: { ...process.env, ...extraEnv },
@@ -3387,34 +3387,60 @@ function streamProjectCtl(res, args, extraEnv = {}) {
   });
 
   res.writeHead(200, {
-    'Content-Type': 'text/plain; charset=utf-8',
+    'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-store',
+    'Connection': 'keep-alive',
     'X-Accel-Buffering': 'no',
+    'Content-Encoding': 'identity',
   });
+  if (typeof res.flushHeaders === 'function') {
+    res.flushHeaders();
+  }
 
-  const writeChunk = (chunk) => {
+  const sendEvent = (event, payload) => {
     if (!res.writableEnded) {
-      res.write(chunk);
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
     }
   };
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) {
+      res.write(': keepalive\n\n');
+    }
+  }, 15000);
+  const writeChunk = (stream, chunk) => {
+    sendEvent('chunk', { stream, chunk: String(chunk) });
+  };
 
-  child.stdout.on('data', (chunk) => writeChunk(chunk));
-  child.stderr.on('data', (chunk) => writeChunk(chunk));
+  child.stdout.on('data', (chunk) => writeChunk('stdout', chunk));
+  child.stderr.on('data', (chunk) => writeChunk('stderr', chunk));
 
   child.on('close', (code) => {
+    clearInterval(heartbeat);
     if (!res.writableEnded) {
       if (code === 0) {
-        res.end('\n[done]\n');
+        sendEvent('done', { code });
+        res.end();
       } else {
-        res.end(`\n[error] projectctl exited with code ${code}\n`);
+        sendEvent('error', { code, message: `projectctl exited with code ${code}` });
+        res.end();
       }
     }
   });
 
   child.on('error', (error) => {
+    clearInterval(heartbeat);
     if (!res.writableEnded) {
       res.statusCode = 500;
-      res.end(`[error] ${error.message || String(error)}\n`);
+      sendEvent('error', { code: 500, message: error.message || String(error) });
+      res.end();
+    }
+  });
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    if (!child.killed) {
+      child.kill('SIGTERM');
     }
   });
 }
@@ -7004,6 +7030,83 @@ function renderPage() {
       await loadLog(ref, currentLogType);
     }
 
+    async function consumeProgressStream(url, signal) {
+      const res = await fetch(url, {
+        method: 'POST',
+        credentials: 'same-origin',
+        signal,
+      });
+      if (!res.ok || !res.body) {
+        const text = await res.text();
+        throw new Error(text || 'Request failed: ' + res.status);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let rawBuffer = '';
+      let outputBuffer = '';
+
+      const handleBlock = (block) => {
+        const lines = String(block || '').split('\n');
+        let eventName = 'message';
+        const dataLines = [];
+        for (const line of lines) {
+          if (!line || line.startsWith(':')) continue;
+          if (line.startsWith('event:')) {
+            eventName = line.slice(6).trim() || 'message';
+            continue;
+          }
+          if (line.startsWith('data:')) {
+            dataLines.push(line.slice(5).trimStart());
+          }
+        }
+        if (!dataLines.length) return;
+        let payload = {};
+        try {
+          payload = JSON.parse(dataLines.join('\n'));
+        } catch {
+          payload = { message: dataLines.join('\n') };
+        }
+        if (eventName === 'chunk') {
+          outputBuffer += String(payload.chunk || '');
+          progressBody.textContent = outputBuffer;
+          progressBody.scrollTop = progressBody.scrollHeight;
+          return;
+        }
+        if (eventName === 'done') {
+          outputBuffer += (outputBuffer.endsWith('\n') ? '' : '\n') + '[done]\n';
+          progressBody.textContent = outputBuffer;
+          progressBody.scrollTop = progressBody.scrollHeight;
+          return;
+        }
+        if (eventName === 'error') {
+          const message = String(payload.message || 'Request failed');
+          outputBuffer += (outputBuffer.endsWith('\n') ? '' : '\n') + '[error] ' + message + '\n';
+          progressBody.textContent = outputBuffer;
+          progressBody.scrollTop = progressBody.scrollHeight;
+          throw new Error(message);
+        }
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        rawBuffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        let splitIndex = rawBuffer.indexOf('\n\n');
+        while (splitIndex !== -1) {
+          const block = rawBuffer.slice(0, splitIndex);
+          rawBuffer = rawBuffer.slice(splitIndex + 2);
+          handleBlock(block);
+          splitIndex = rawBuffer.indexOf('\n\n');
+        }
+        if (done) break;
+      }
+
+      rawBuffer += decoder.decode();
+      if (rawBuffer.trim()) {
+        handleBlock(rawBuffer);
+      }
+    }
+
     async function runPullWithProgress(ref, mode = 'merge-env') {
       if (progressAbort) {
         progressAbort.abort();
@@ -7019,29 +7122,7 @@ function renderPage() {
         'Pull Progress',
       );
       try {
-        const res = await fetch(API + '/projects/' + ref + '/update-stream?mode=' + encodeURIComponent(mode), {
-          method: 'POST',
-          credentials: 'same-origin',
-          signal: progressAbort.signal,
-        });
-        if (!res.ok || !res.body) {
-          const text = await res.text();
-          throw new Error(text || 'Request failed: ' + res.status);
-        }
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          progressBody.textContent = buffer;
-          progressBody.scrollTop = progressBody.scrollHeight;
-        }
-        buffer += decoder.decode();
-        if (buffer.trim()) {
-          progressBody.textContent = buffer;
-        }
+        await consumeProgressStream(API + '/projects/' + ref + '/update-stream?mode=' + encodeURIComponent(mode), progressAbort.signal);
       } catch (error) {
         showMessage(progressFlash, error.message, false);
         progressFlash.hidden = false;
@@ -7063,29 +7144,7 @@ function renderPage() {
         'Build Progress',
       );
       try {
-        const res = await fetch(API + '/projects/' + ref + '/build-stream?mode=' + encodeURIComponent(mode), {
-          method: 'POST',
-          credentials: 'same-origin',
-          signal: progressAbort.signal,
-        });
-        if (!res.ok || !res.body) {
-          const text = await res.text();
-          throw new Error(text || 'Request failed: ' + res.status);
-        }
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          progressBody.textContent = buffer;
-          progressBody.scrollTop = progressBody.scrollHeight;
-        }
-        buffer += decoder.decode();
-        if (buffer.trim()) {
-          progressBody.textContent = buffer;
-        }
+        await consumeProgressStream(API + '/projects/' + ref + '/build-stream?mode=' + encodeURIComponent(mode), progressAbort.signal);
       } catch (error) {
         showMessage(progressFlash, error.message, false);
         progressFlash.hidden = false;
@@ -7254,12 +7313,27 @@ function renderPage() {
 
     async function runScript(ref, script, mode, dir = '', flashEl = scriptsFlash) {
       const action = mode === 'activate' ? 'activate' : 'run';
-      const res = await api(\`/projects/\${ref}/scripts/\${action}\`, {
-        method: 'POST',
-        body: JSON.stringify({ script, dir }),
-      });
-      showMessage(flashEl || scriptsFlash, res.message || 'Done');
-      await refresh();
+      if (progressAbort) {
+        progressAbort.abort();
+      }
+      progressAbort = new AbortController();
+      openProgressPanel(
+        decodeURIComponent(ref),
+        (action === 'activate' ? 'Activating ' : 'Running ') + script + (dir ? ' in ' + dir : ''),
+        action === 'activate' ? 'Script Activation' : 'Script Run',
+      );
+      try {
+        const query = new URLSearchParams({ script, dir }).toString();
+        await consumeProgressStream(API + '/projects/' + ref + '/scripts/' + action + '-stream?' + query, progressAbort.signal);
+        showMessage(flashEl || scriptsFlash, (action === 'activate' ? 'Activated ' : 'Ran ') + script);
+        await refresh();
+      } catch (error) {
+        showMessage(progressFlash, error.message, false);
+        progressFlash.hidden = false;
+        throw error;
+      } finally {
+        progressAbort = null;
+      }
     }
 
     async function handleAction(action, ref) {
@@ -9211,7 +9285,7 @@ async function handleRequest(req, res) {
             ? 'merge-env'
             : 'merge-env';
       touchProjectMeta(ref);
-      streamProjectCtl(res, ['update', ref], { PROJECTCTL_PULL_MODE: pullMode, PROJECTCTL_BUILD_MODE: 'all' });
+      streamProjectCtl(req, res, ['update', ref], { PROJECTCTL_PULL_MODE: pullMode, PROJECTCTL_BUILD_MODE: 'all' });
       return;
     }
 
@@ -9228,7 +9302,7 @@ async function handleRequest(req, res) {
       const buildMode = requestedMode === 'all' ? 'all' : 'root';
       const buildArgs = buildMode === 'all' ? ['build', '--all', ref] : ['build', ref];
       touchProjectMeta(ref);
-      streamProjectCtl(res, buildArgs, { PROJECTCTL_BUILD_MODE: buildMode });
+      streamProjectCtl(req, res, buildArgs, { PROJECTCTL_BUILD_MODE: buildMode });
       return;
     }
 
@@ -9292,7 +9366,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const scriptsMatch = routePath.match(/^\/api\/projects\/(.+?)\/scripts(?:\/(run|activate))?$/);
+    const scriptsMatch = routePath.match(/^\/api\/projects\/(.+?)\/scripts(?:\/(run|activate|run-stream|activate-stream))?$/);
     if (scriptsMatch) {
       const ref = decodeURIComponent(scriptsMatch[1]);
       const scriptAction = scriptsMatch[2] || '';
@@ -9316,7 +9390,14 @@ async function handleRequest(req, res) {
         if (!script) {
           throw new Error('Missing script name');
         }
-        if (scriptAction === 'activate') {
+        if (scriptAction === 'activate-stream' || scriptAction === 'run-stream') {
+          const args = ['script'];
+          if (scriptAction === 'activate-stream') args.push('--pm2');
+          if (dir) args.push('--dir', dir);
+          args.push(ref, script);
+          touchProjectMeta(ref);
+          streamProjectCtl(req, res, args);
+        } else if (scriptAction === 'activate') {
           const args = ['script', '--pm2'];
           if (dir) args.push('--dir', dir);
           args.push(ref, script);
