@@ -19,6 +19,11 @@ const SSH_CONFIG_BEGIN = '# BEGIN Multidev managed GitHub SSH config';
 const SSH_CONFIG_END = '# END Multidev managed GitHub SSH config';
 const PROJECT_ENV_BACKUP_DIR = '/etc/vps-project-env-backups';
 const MANAGE_VERSION_FILE = '/etc/vps-manage-version.json';
+const MANAGE_SELF_UPDATE_STATE_FILE = '/etc/vps-manage-self-update.json';
+const MANAGE_SELF_UPDATE_LOG_FILE = '/var/log/vps-manage-self-update.log';
+const MANAGE_SELF_UPDATE_DIR = '/opt/hinbit-MultiDevVPSSettings';
+const MANAGE_SELF_UPDATE_REPO = 'git@github-hinbit:hinbit/hinbit-MultiDevVPSSettings.git';
+const MANAGE_SELF_UPDATE_BRANCH = process.env.MANAGE_SELF_UPDATE_BRANCH || 'main';
 const TLS_CUSTOM_DIR = '/etc/vps-custom-certs';
 const TLS_SERVER_DIR = path.join(TLS_CUSTOM_DIR, 'server');
 const TLS_PROJECT_DIR = path.join(TLS_CUSTOM_DIR, 'projects');
@@ -637,6 +642,183 @@ function readManageBuildInfo() {
   } catch {
     return fallback;
   }
+}
+
+function readJsonFile(filePath, fallback = null) {
+  try {
+    if (!fs.existsSync(filePath)) return fallback;
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonFile(filePath, value) {
+  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
+function gitHeadForDir(dirPath) {
+  try {
+    if (!dirPath || !fs.existsSync(dirPath)) return { commit: '', short: '', date: '' };
+    const commit = execFileSync('git', ['-C', dirPath, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    const short = execFileSync('git', ['-C', dirPath, 'rev-parse', '--short=12', 'HEAD'], { encoding: 'utf8' }).trim();
+    const date = execFileSync('git', ['-C', dirPath, 'log', '-1', '--format=%cI'], { encoding: 'utf8' }).trim();
+    return { commit, short, date };
+  } catch {
+    return { commit: '', short: '', date: '' };
+  }
+}
+
+function gitRemoteHead(repoUrl, branch) {
+  try {
+    const out = execFileSync('git', ['ls-remote', repoUrl, `refs/heads/${branch}`], {
+      encoding: 'utf8',
+      timeout: 15000,
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: '0',
+      },
+    }).trim();
+    const commit = out.split(/\s+/)[0] || '';
+    return {
+      commit,
+      short: commit ? commit.slice(0, 12) : '',
+      branch,
+      repo: repoUrl,
+    };
+  } catch {
+    return {
+      commit: '',
+      short: '',
+      branch,
+      repo: repoUrl,
+    };
+  }
+}
+
+function readManageSelfUpdateState() {
+  const raw = readJsonFile(MANAGE_SELF_UPDATE_STATE_FILE, {});
+  return raw && typeof raw === 'object' ? raw : {};
+}
+
+function writeManageSelfUpdateState(patch) {
+  const next = {
+    ...readManageSelfUpdateState(),
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  };
+  writeJsonFile(MANAGE_SELF_UPDATE_STATE_FILE, next);
+  return next;
+}
+
+function getManageUpdateStatus() {
+  const running = readManageBuildInfo();
+  const checkout = gitHeadForDir(MANAGE_SELF_UPDATE_DIR);
+  const remote = gitRemoteHead(MANAGE_SELF_UPDATE_REPO, MANAGE_SELF_UPDATE_BRANCH);
+  const state = readManageSelfUpdateState();
+  const runningMatchesRemote = Boolean(running.commit && remote.commit && running.commit === remote.commit);
+  return {
+    running,
+    checkout,
+    remote,
+    branch: MANAGE_SELF_UPDATE_BRANCH,
+    repo: MANAGE_SELF_UPDATE_REPO,
+    state,
+    runningMatchesRemote,
+  };
+}
+
+function shellQuote(value) {
+  return `'${String(value ?? '').replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function startManageSelfUpdate() {
+  writeManageSelfUpdateState({
+    status: 'running',
+    startedAt: new Date().toISOString(),
+    message: 'Pulling latest MultiDev build from GitHub and redeploying manage scripts.',
+    logFile: MANAGE_SELF_UPDATE_LOG_FILE,
+  });
+  const script = `#!/usr/bin/env bash
+set -euo pipefail
+STATE_FILE=${shellQuote(MANAGE_SELF_UPDATE_STATE_FILE)}
+LOG_FILE=${shellQuote(MANAGE_SELF_UPDATE_LOG_FILE)}
+CHECKOUT_DIR=${shellQuote(MANAGE_SELF_UPDATE_DIR)}
+REPO_URL=${shellQuote(MANAGE_SELF_UPDATE_REPO)}
+BRANCH=${shellQuote(MANAGE_SELF_UPDATE_BRANCH)}
+VERSION_FILE=${shellQuote(MANAGE_VERSION_FILE)}
+write_state() {
+  local status="$1"
+  local message="$2"
+  local commit="$3"
+  local short="$4"
+  local date="$5"
+  python3 - "$STATE_FILE" "$status" "$message" "$commit" "$short" "$date" <<'PY'
+import json, os, sys, datetime
+path, status, message, commit, short, date = sys.argv[1:]
+data = {}
+if os.path.exists(path):
+    try:
+        with open(path, 'r', encoding='utf-8') as fh:
+            data = json.load(fh)
+    except Exception:
+        data = {}
+data.update({
+    "status": status,
+    "message": message,
+    "commit": commit,
+    "commitShort": short,
+    "commitDate": date,
+    "updatedAt": datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+})
+with open(path, 'w', encoding='utf-8') as fh:
+    json.dump(data, fh, indent=2)
+    fh.write("\\n")
+PY
+}
+on_error() {
+  local line="$1"
+  local exit_code="$2"
+  write_state "error" "Self-update failed at line ${line} (exit ${exit_code}). See ${LOG_FILE}." "" "" ""
+}
+trap 'on_error "$LINENO" "$?"' ERR
+mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$STATE_FILE")" /opt
+exec >>"$LOG_FILE" 2>&1
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] starting manage self-update"
+if [[ -d "$CHECKOUT_DIR/.git" ]]; then
+  git -C "$CHECKOUT_DIR" fetch origin "$BRANCH" --prune
+  git -C "$CHECKOUT_DIR" checkout "$BRANCH"
+  git -C "$CHECKOUT_DIR" reset --hard "origin/$BRANCH"
+else
+  rm -rf "$CHECKOUT_DIR"
+  git clone --branch "$BRANCH" "$REPO_URL" "$CHECKOUT_DIR"
+fi
+install -m 0755 "$CHECKOUT_DIR/bootstrap/app-sync.sh" /usr/local/bin/app-sync.sh
+install -m 0755 "$CHECKOUT_DIR/bootstrap/install.sh" /usr/local/bin/install.sh
+install -m 0755 "$CHECKOUT_DIR/bootstrap/manage-server.mjs" /usr/local/bin/manage-server.mjs
+install -m 0755 "$CHECKOUT_DIR/bootstrap/projectctl.sh" /usr/local/bin/projectctl
+install -m 0755 "$CHECKOUT_DIR/bootstrap/system-sync.sh" /usr/local/bin/system-sync.sh
+bash -n /usr/local/bin/app-sync.sh
+bash -n /usr/local/bin/install.sh
+bash -n /usr/local/bin/projectctl
+bash -n /usr/local/bin/system-sync.sh
+node --check /usr/local/bin/manage-server.mjs
+commit="$(git -C "$CHECKOUT_DIR" rev-parse HEAD)"
+short="$(git -C "$CHECKOUT_DIR" rev-parse --short=12 HEAD)"
+date="$(git -C "$CHECKOUT_DIR" log -1 --format=%cI)"
+cat > "$VERSION_FILE" <<JSON
+{"commit":"$commit","commitShort":"$short","commitDate":"$date","repo":"hinbit/hinbit-MultiDevVPSSettings"}
+JSON
+systemctl restart vps-manage
+write_state "ok" "Updated to latest GitHub version and restarted vps-manage." "$commit" "$short" "$date"
+`;
+  const scriptPath = path.join(os.tmpdir(), `multidev-self-update-${Date.now()}.sh`);
+  fs.writeFileSync(scriptPath, script, { mode: 0o700 });
+  const child = spawn('bash', [scriptPath], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.unref();
 }
 
 function projectFallbackDomain(domain) {
@@ -3719,6 +3901,12 @@ function renderPortalPage() {
   const projects = projectView();
   const dbMachines = readDbMachines();
   const sshKeys = readSshKeys();
+  const updateStatus = getManageUpdateStatus();
+  const versionBadgeClass = updateStatus.runningMatchesRemote ? 'ver-good' : 'ver-bad';
+  const versionBadgeLabel = updateStatus.runningMatchesRemote ? 'GREEN-V' : 'RED-V';
+  const runningShort = updateStatus.running.commitShort || updateStatus.running.commit?.slice(0, 12) || 'n/a';
+  const remoteShort = updateStatus.remote.short || updateStatus.remote.commit?.slice(0, 12) || 'n/a';
+  const updateStateLabel = String(updateStatus.state?.status || '').trim();
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -3765,6 +3953,31 @@ function renderPortalPage() {
       gap: 6px;
     }
     .btn.ghost { background: transparent; color: #dbeafe; border: 1px solid #2a3b59; }
+    .btn.secondary { background: #162033; color: #dbeafe; border: 1px solid #2a3b59; }
+    .version-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      border: 1px solid rgba(148,163,184,0.22);
+      margin-top: 10px;
+    }
+    .version-badge.ver-good { background: rgba(20,83,45,0.3); color: #86efac; border-color: rgba(34,197,94,0.45); }
+    .version-badge.ver-bad { background: rgba(127,29,29,0.28); color: #fca5a5; border-color: rgba(248,113,113,0.45); }
+    .version-badge.ver-warn { background: rgba(120,53,15,0.28); color: #fdba74; border-color: rgba(251,146,60,0.45); }
+    .portal-flash {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(148,163,184,0.18);
+      background: rgba(8,15,29,0.72);
+      color: #dbeafe;
+      white-space: pre-wrap;
+    }
     .hinbit-brand {
       position: fixed;
       top: 16px;
@@ -3800,6 +4013,13 @@ function renderPortalPage() {
       <h1>MultiDev Portal</h1>
       <div class="muted">Choose the area you want to manage.</div>
       <div class="small">${escapeHtml(String(projects.length))} projects, ${escapeHtml(String(sshKeys.length))} SSH keys, ${escapeHtml(String(dbMachines.length))} DB machines</div>
+      <div id="versionBadge" class="version-badge ${versionBadgeClass}">
+        <span>${escapeHtml(versionBadgeLabel)}</span>
+        <span>running <code>${escapeHtml(runningShort)}</code></span>
+        <span>git <code>${escapeHtml(remoteShort)}</code></span>
+      </div>
+      <div id="portalVersionText" class="small">Running <code>${escapeHtml(runningShort)}</code> · GitHub <code>${escapeHtml(remoteShort)}</code> · branch <code>${escapeHtml(updateStatus.branch || MANAGE_SELF_UPDATE_BRANCH)}</code>${updateStateLabel ? ` · update ${escapeHtml(updateStateLabel)}` : ''}</div>
+      <div id="portalFlash" class="portal-flash" hidden></div>
     </div>
     <div class="top-actions">
       <a class="btn ghost" href="/manage/">Projects</a>
@@ -3809,6 +4029,7 @@ function renderPortalPage() {
       <a class="btn ghost" href="/manage/vault/">DB Vault</a>
       <a class="btn ghost" href="/manage/db-machines/">DB Machines</a>
       <a class="btn ghost" href="/manage/tls/">TLS / Certificates</a>
+      <button class="btn secondary" id="updateVerBtn" type="button">UpdateVer</button>
     </div>
   </header>
   <main class="grid cards">
@@ -3853,6 +4074,77 @@ function renderPortalPage() {
       <div class="card-desc">Jump to the full project list and PM2 management screen.</div>
     </a>
   </main>
+  <script>
+    const versionBadgeEl = document.getElementById('versionBadge');
+    const portalVersionTextEl = document.getElementById('portalVersionText');
+    const portalFlashEl = document.getElementById('portalFlash');
+    const updateVerBtn = document.getElementById('updateVerBtn');
+    function setPortalFlash(text) {
+      if (!portalFlashEl) return;
+      if (!text) {
+        portalFlashEl.hidden = true;
+        portalFlashEl.textContent = '';
+        return;
+      }
+      portalFlashEl.hidden = false;
+      portalFlashEl.textContent = text;
+    }
+    function applyVersionStatus(data) {
+      if (!data) return;
+      const running = data.running || {};
+      const remote = data.remote || {};
+      const state = data.state || {};
+      const runningShort = running.commitShort || (running.commit || '').slice(0, 12) || 'n/a';
+      const remoteShort = remote.short || (remote.commit || '').slice(0, 12) || 'n/a';
+      const inSync = !!data.runningMatchesRemote;
+      if (versionBadgeEl) {
+        versionBadgeEl.className = 'version-badge ' + (inSync ? 'ver-good' : 'ver-bad');
+        versionBadgeEl.innerHTML = '<span>' + (inSync ? 'GREEN-V' : 'RED-V') + '</span><span>running <code>' + runningShort + '</code></span><span>git <code>' + remoteShort + '</code></span>';
+      }
+      if (portalVersionTextEl) {
+        portalVersionTextEl.innerHTML = 'Running <code>' + runningShort + '</code> · GitHub <code>' + remoteShort + '</code> · branch <code>' + (data.branch || '${escapeHtml(MANAGE_SELF_UPDATE_BRANCH)}') + '</code>' + (state.status ? ' · update ' + state.status : '');
+      }
+      if (state.status === 'running') {
+        setPortalFlash((state.message || 'Update running') + (state.logFile ? '\\n' + state.logFile : ''));
+      } else if (state.status === 'error') {
+        setPortalFlash((state.message || 'Update failed') + (state.logFile ? '\\n' + state.logFile : ''));
+      } else if (state.status === 'ok') {
+        setPortalFlash((state.message || 'Update complete') + (state.commitShort ? '\\nVersion: ' + state.commitShort : ''));
+      }
+    }
+    async function refreshVersionStatus() {
+      try {
+        const res = await fetch('/manage/api/self-update/status', { credentials: 'same-origin', cache: 'no-store' });
+        const data = await res.json();
+        applyVersionStatus(data);
+      } catch (err) {
+        setPortalFlash('Failed to refresh version status: ' + (err && err.message ? err.message : String(err)));
+      }
+    }
+    if (updateVerBtn) {
+      updateVerBtn.addEventListener('click', async () => {
+        if (!confirm('Pull latest MultiDev version from GitHub, redeploy the manage scripts, and restart vps-manage?')) return;
+        updateVerBtn.disabled = true;
+        setPortalFlash('Starting self-update...');
+        try {
+          const res = await fetch('/manage/api/self-update', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ action: 'update' }),
+          });
+          const data = await res.json();
+          setPortalFlash(data.message || 'Self-update started.');
+          applyVersionStatus(data.status || null);
+          setTimeout(() => { refreshVersionStatus(); }, 2000);
+        } catch (err) {
+          setPortalFlash('Self-update failed to start: ' + (err && err.message ? err.message : String(err)));
+          updateVerBtn.disabled = false;
+        }
+      });
+    }
+    setInterval(refreshVersionStatus, 10000);
+  </script>
 </body>
 </html>`;
 }
@@ -8401,6 +8693,30 @@ async function handleRequest(req, res) {
 
     if (req.method === 'GET' && routePath === '/api/system') {
       sendJson(res, 200, { system: getSystemStats() });
+      return;
+    }
+
+    if (req.method === 'GET' && routePath === '/api/self-update/status') {
+      sendJson(res, 200, getManageUpdateStatus());
+      return;
+    }
+
+    if (req.method === 'POST' && routePath === '/api/self-update') {
+      const state = readManageSelfUpdateState();
+      if (state.status === 'running') {
+        sendJson(res, 409, {
+          ok: false,
+          message: 'A self-update is already running.',
+          status: getManageUpdateStatus(),
+        });
+        return;
+      }
+      startManageSelfUpdate();
+      sendJson(res, 202, {
+        ok: true,
+        message: 'Self-update started. The service will restart after the latest version is installed.',
+        status: getManageUpdateStatus(),
+      });
       return;
     }
 
