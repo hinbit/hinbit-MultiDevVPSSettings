@@ -2468,6 +2468,7 @@ function getPm2List() {
 function projectView() {
   const pm2List = getPm2List();
   const byName = new Map();
+  const dbMachines = readDbMachines();
   for (const proc of pm2List) {
     const name = proc?.name || proc?.pm2_env?.name;
     if (name) byName.set(name, proc);
@@ -2482,13 +2483,11 @@ function projectView() {
     const pm2StatusLabel = pm2Missing ? 'PM2 missing' : (pm2Online ? 'PM2 online' : `PM2 ${String(env.status || 'offline')}`);
     const pm2StatusClass = pm2Missing ? 'pill warn' : (pm2Online ? 'pill good' : 'pill warn');
     const pm2State = pm2Missing ? 'missing' : (pm2Online ? 'online' : String(env.status || 'offline'));
-    const projectEnv = project.APP_DIR ? pickEnvDetails(project.APP_DIR) : { env: {} };
-    const { db } = pickDbDetails(project.APP_DIR || '');
-    const projectMachineContext = resolveProjectMysqlMachine(project, project.APP_DIR || '');
-    const projectMachine = projectMachineContext.machine || null;
-    const projectMachineLabel = projectMachine
-      ? describeDbMachine(projectMachine)
-      : (project.DB_MACHINE_ID === CUSTOM_DB_MACHINE_ID ? (project.DB_MACHINE_NAME || 'Custom / manual DB machine') : (project.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID));
+    const machineId = String(project.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID).trim() || LOCAL_DB_MACHINE_ID;
+    const knownMachine = dbMachines.find((item) => String(item.id) === machineId) || null;
+    const projectMachineLabel = knownMachine
+      ? describeDbMachine(knownMachine)
+      : (machineId === CUSTOM_DB_MACHINE_ID ? (project.DB_MACHINE_NAME || 'Custom / manual DB machine') : machineId);
     const disk = readProjectDiskUsage(project.APP_DIR || '');
     const fsUsage = readProjectFilesystemUsage(project.APP_DIR || '');
     const gitInfo = readProjectGitInfo(project.APP_DIR || '');
@@ -2515,19 +2514,19 @@ function projectView() {
       runtime: project.DEPLOY_RUNTIME || 'auto',
       type: project.APP_TYPE || '',
       packageManager: project.PACKAGE_MANAGER || '',
-      vpnProfile: normalizeVpnProfileValue(project.VPN_PROFILE || project.VPN_PROFILE_NAME || project.VPN_EGRESS_PROFILE || projectEnv.env.VPN_PROFILE || projectEnv.env.VPN_PROFILE_NAME || projectEnv.env.VPN_EGRESS_PROFILE || ''),
+      vpnProfile: normalizeVpnProfileValue(project.VPN_PROFILE || project.VPN_PROFILE_NAME || project.VPN_EGRESS_PROFILE || ''),
       duplicate: Boolean(project.duplicate),
       duplicateSourceRepoRef: project.duplicateSourceRepoRef || '',
       duplicateEnvMode: project.duplicateEnvMode || '',
       duplicateDbMode: project.duplicateDbMode || '',
       mysqlAllowedIps: project.MYSQL_ALLOWED_IPS || '',
-      dbMachineId: project.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID,
+      dbMachineId: machineId,
       dbMachineLabel: projectMachineLabel,
-      dbMachineHost: projectMachine?.originHost || projectMachine?.host || '',
-      dbMachineRootUser: projectMachine?.rootUser || '',
-      dbMachineRootPassword: projectMachine?.rootPassword || '',
-      dbMachineNotes: projectMachine?.notes || '',
-      dbMachineMode: projectMachineContext.isCustom ? 'custom' : 'global',
+      dbMachineHost: knownMachine?.originHost || knownMachine?.host || '',
+      dbMachineRootUser: knownMachine?.rootUser || '',
+      dbMachineRootPassword: knownMachine?.rootPassword || '',
+      dbMachineNotes: knownMachine?.notes || '',
+      dbMachineMode: machineId === CUSTOM_DB_MACHINE_ID ? 'custom' : 'global',
       sshUser: project.SSH_UPLOAD_USER || '',
       sshPassword: project.SSH_UPLOAD_PASSWORD || '',
       disk,
@@ -2537,9 +2536,9 @@ function projectView() {
       filesystemFree: fsUsage.free,
       filesystemPercent: fsUsage.percent,
       filesystemMount: fsUsage.mount,
-      dbName: db.DB_NAME || db.DB_DATABASE || db.MYSQL_DATABASE || db.POSTGRES_DB || '',
-      dbUser: db.DB_USER || db.MYSQL_USER || db.POSTGRES_USER || '',
-      dbPassword: db.DB_PASSWORD || db.MYSQL_PASSWORD || db.POSTGRES_PASSWORD || '',
+      dbName: project.DB_NAME || project.DB_DATABASE || project.MYSQL_DATABASE || project.POSTGRES_DB || '',
+      dbUser: project.DB_USER || project.MYSQL_USER || project.POSTGRES_USER || '',
+      dbPassword: project.DB_PASSWORD || project.MYSQL_PASSWORD || project.POSTGRES_PASSWORD || '',
       protected: Boolean(project.protected),
       sslActive: ssl.active,
       sslStatus: ssl.label,
