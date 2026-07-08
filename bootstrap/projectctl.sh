@@ -60,6 +60,7 @@ Usage:
   projectctl mysql [--move-data] [--db-name name] [--db-user user] [--db-password password] [--machine id] [--machine-name name] [--machine-host host] [--machine-port port] [--machine-root-user user] [--machine-root-password password] [--machine-notes notes] [--ips ip1,ip2] owner/repo
   projectctl ssh [--password secret|--generate] owner/repo
   projectctl uninstall [--preview] [--keep-db|--drop-db] owner/repo
+  projectctl env-cleanup [--max-bytes bytes] [--keep-latest] [--dry-run] owner/repo
   projectctl list
 
 Defaults:
@@ -74,6 +75,7 @@ Defaults:
   - `projectctl password` enables or clears nginx basic auth for a project's domain
   - `projectctl mysql` manages MySQL access IPs and DB machine placement for a project's DB user, and `--move-data` copies the DB to the selected machine before switching over
   - `projectctl uninstall --preview` shows mapped domains and DB table/row counts before removal; `--drop-db` removes the database, `--keep-db` keeps it
+  - `projectctl env-cleanup` removes oversized env backup archives for a project, which is useful when a corrupted `.env` created a massive backup zip
   - `projectctl ssh` shows or rotates the project's SSH/SFTP upload credentials
   - `projectctl update` prompts before pulling local changes; set PROJECTCTL_PULL_MODE=merge-env|stash-all to force the choice
   - `projectctl build` runs the root build script, or `--all` to also build server/ and client/ when they exist
@@ -5234,6 +5236,59 @@ cleanup_project_domain_artifacts() {
   done <<< "${domains_csv}"
 }
 
+project_env_backup_dir() {
+  local ref="$1"
+  printf '%s/%s' "${PROJECT_ENV_BACKUP_DIR}" "$(slug_from_ref "${ref}")"
+}
+
+do_env_cleanup() {
+  local ref="$1"
+  local max_bytes="${2:-1048576}"
+  local keep_latest="${3:-no}"
+  local dry_run="${4:-no}"
+  local slug
+  local dir
+  local removed=0
+  local kept=0
+  local name=""
+  local path=""
+  local size=""
+
+  slug="$(slug_from_ref "$(project_ref_from_arg "${ref}")")"
+  dir="$(project_env_backup_dir "${slug}")"
+
+  if [[ ! -d "${dir}" ]]; then
+    printf '[projectctl] no env backups found for %s\n' "${ref}"
+    return 0
+  fi
+
+  while IFS= read -r -d '' path; do
+    name="$(basename "${path}")"
+    size="$(stat -c '%s' "${path}" 2>/dev/null || printf '0')"
+    if [[ "${keep_latest}" == "yes" && "${name}" == "latest.zip" ]]; then
+      kept=$((kept + 1))
+      continue
+    fi
+    if [[ "${size}" =~ ^[0-9]+$ ]] && (( size > max_bytes )); then
+      if [[ "${dry_run}" == "yes" ]]; then
+        printf '[projectctl] would remove %s (%s bytes)\n' "${path}" "${size}"
+      else
+        rm -f -- "${path}"
+        printf '[projectctl] removed %s (%s bytes)\n' "${path}" "${size}"
+      fi
+      removed=$((removed + 1))
+    else
+      kept=$((kept + 1))
+    fi
+  done < <(find "${dir}" -maxdepth 1 -type f -name '*.zip' -print0 2>/dev/null)
+
+  if [[ "${dry_run}" != "yes" ]]; then
+    rmdir "${dir}" 2>/dev/null || true
+  fi
+
+  printf '[projectctl] env cleanup complete for %s: removed=%s kept=%s threshold=%s bytes\n' "${ref}" "${removed}" "${kept}" "${max_bytes}"
+}
+
 do_uninstall_preview() {
   local ref="$1"
   local slug
@@ -5679,6 +5734,37 @@ main() {
       else
         do_uninstall "$1" "${drop_db}"
       fi
+      ;;
+    env-cleanup)
+      local max_bytes="1048576"
+      local keep_latest="no"
+      local dry_run="no"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --max-bytes)
+            max_bytes="${2:-1048576}"
+            shift 2
+            ;;
+          --keep-latest)
+            keep_latest="yes"
+            shift
+            ;;
+          --dry-run)
+            dry_run="yes"
+            shift
+            ;;
+          --help|-h)
+            usage
+            exit 0
+            ;;
+          *)
+            break
+            ;;
+        esac
+      done
+      [[ $# -eq 1 ]] || { usage; exit 1; }
+      [[ "${max_bytes}" =~ ^[0-9]+$ ]] || die "Invalid --max-bytes value: ${max_bytes}"
+      do_env_cleanup "$1" "${max_bytes}" "${keep_latest}" "${dry_run}"
       ;;
     list)
       do_list

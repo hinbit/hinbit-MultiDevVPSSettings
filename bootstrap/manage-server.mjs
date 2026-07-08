@@ -295,6 +295,7 @@ function discoverProjectEnvFiles(projectPath) {
   ];
   const seen = new Set();
   const files = [];
+  const skipped = [];
   for (const baseDir of baseDirs) {
     for (const candidate of ENV_CANDIDATES) {
       const filePath = path.join(baseDir, candidate);
@@ -303,6 +304,13 @@ function discoverProjectEnvFiles(projectPath) {
       const stat = fs.statSync(filePath);
       if (!Number.isFinite(stat.size) || stat.size > MAX_ENV_FILE_BYTES) {
         console.warn(`[manage] skipping oversized env file ${filePath} (${stat.size} bytes)`);
+        skipped.push({
+          path: filePath,
+          relativePath: path.relative(projectPath, filePath) || path.basename(filePath),
+          name: path.basename(filePath),
+          size: Number.isFinite(stat.size) ? stat.size : 0,
+          reason: !Number.isFinite(stat.size) ? 'unreadable size' : `oversized (>${MAX_ENV_FILE_BYTES} bytes)`,
+        });
         continue;
       }
       seen.add(resolved);
@@ -318,7 +326,7 @@ function discoverProjectEnvFiles(projectPath) {
       });
     }
   }
-  return files;
+  return { files, skipped };
 }
 
 function shellQuoteEnvValue(value) {
@@ -348,7 +356,7 @@ function updateEnvFileValue(filePath, key, value) {
 }
 
 function readProjectEnv(projectPath) {
-  const envFiles = discoverProjectEnvFiles(projectPath);
+  const { files: envFiles, skipped: skippedEnvFiles } = discoverProjectEnvFiles(projectPath);
   const merged = {};
   const envEntries = [];
   const entryGroups = new Map();
@@ -399,6 +407,7 @@ function readProjectEnv(projectPath) {
     files: envFiles.map((file) => file.path),
     envFiles,
     envEntries,
+    skippedEnvFiles,
   };
 }
 
@@ -1064,7 +1073,7 @@ function pickDbDetails(projectPath) {
 }
 
 function pickEnvDetails(projectPath) {
-  const { merged, files, envFiles, envEntries } = readProjectEnv(projectPath);
+  const { merged, files, envFiles, envEntries, skippedEnvFiles } = readProjectEnv(projectPath);
   const preferredFile = envFiles.find((file) => path.basename(file.path) === '.env')
     || envFiles[0]
     || null;
@@ -1072,6 +1081,7 @@ function pickEnvDetails(projectPath) {
     files,
     envFiles,
     envEntries,
+    skippedEnvFiles,
     env: merged,
     saveTarget: chooseProjectEnvSaveTarget(projectPath, files),
     selectedFile: preferredFile ? preferredFile.path : chooseProjectEnvSaveTarget(projectPath, files),
@@ -2361,12 +2371,8 @@ function runPython(script, args = []) {
 function createEnvZip(projectPath) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vps-env-'));
   const zipPath = path.join(tmpDir, 'project-env.zip');
-  const filesJson = JSON.stringify([
-    ...ENV_CANDIDATES,
-    ...ENV_CANDIDATES.map((name) => path.join('server', name)),
-    ...ENV_CANDIDATES.map((name) => path.join('client', name)),
-    ...ENV_CANDIDATES.map((name) => path.join('dashboard', name)),
-  ]);
+  const { files: envFiles } = discoverProjectEnvFiles(projectPath);
+  const filesJson = JSON.stringify(envFiles.map((file) => file.relativePath || path.basename(file.path)));
   runPython(
     `
 import json, os, sys, zipfile
@@ -4956,6 +4962,10 @@ function renderTlsPage(selectedRef = '') {
     .kv-item.env-duplicate code,
     .kv-item.env-duplicate .small,
     .kv-item.env-duplicate .pill { color: #fecaca; }
+    .kv-item.env-skipped { border-color: rgba(239, 68, 68, 0.8); background: rgba(69, 10, 10, 0.22); }
+    .kv-item.env-skipped code,
+    .kv-item.env-skipped .small,
+    .kv-item.env-skipped .pill { color: #fca5a5; }
     .pill { display: inline-flex; padding: 3px 8px; border-radius: 999px; background: #102338; border: 1px solid #23405f; font-size: 12px; }
     .pill.good { background: #0f3a24; border-color: #14532d; color: #86efac; }
     .pill.warn { background: #3f2d0c; border-color: #7c2d12; color: #fde68a; }
@@ -5922,6 +5932,11 @@ function renderPage() {
         </div>
       </div>
       <div class="kv-item">
+        <div class="small">Skipped env files</div>
+        <div class="small">These files were found but not loaded because they exceed the safe size threshold and can freeze the UI.</div>
+        <div id="envSkippedList" class="stack" style="margin-top: 8px;"></div>
+      </div>
+      <div class="kv-item">
         <div class="small">Saved backups</div>
         <div id="envBackupsList" class="stack"></div>
       </div>
@@ -6145,6 +6160,7 @@ function renderPage() {
     const sshCopyAllBtn = document.getElementById('sshCopyAllBtn');
     let currentMysqlDetails = null;
     let currentEnvFiles = [];
+    let currentEnvSkippedFiles = [];
     let currentEnvFilePath = '';
     let currentDomainsRef = '';
     let currentDomainBindings = [];
@@ -6169,6 +6185,7 @@ function renderPage() {
     const envReloadBtn = document.getElementById('envReloadBtn');
     const envSaveTarget = document.getElementById('envSaveTarget');
     const envCurrentFileLabel = document.getElementById('envCurrentFileLabel');
+    const envSkippedList = document.getElementById('envSkippedList');
     const envMergeBox = document.getElementById('envMergeBox');
     const envMergeOverlay = document.getElementById('envMergeOverlay');
     const envMergeSaveBtn = document.getElementById('envMergeSaveBtn');
@@ -6825,6 +6842,30 @@ function renderPage() {
       }).join('');
     }
 
+    function renderSkippedEnvList(listEl, files) {
+      const list = Array.isArray(files) ? files : [];
+      if (!list.length) {
+        listEl.innerHTML = '<div class="muted">No skipped env files.</div>';
+        return;
+      }
+      listEl.innerHTML = list.map((file) => {
+        const label = file.relativePath || file.name || file.path || 'n/a';
+        const reason = file.reason || 'skipped';
+        return \`
+          <div class="kv-item env-skipped">
+            <div class="row spread" style="gap: 10px; align-items: flex-start;">
+              <div>
+                <div><strong>\${escapeHtml(label)}</strong> <span class="pill warn">skipped</span></div>
+                <div class="small">Reason: \${escapeHtml(reason)}</div>
+                <div class="small">Size: \${escapeHtml(formatBytes(file.size || 0))}</div>
+              </div>
+              <code>\${escapeHtml(String(file.path || ''))}</code>
+            </div>
+          </div>
+        \`;
+      }).join('');
+    }
+
     function renderBackupList(listEl, backups) {
       if (!Array.isArray(backups) || !backups.length) {
         listEl.innerHTML = '<div class="muted">No saved backups yet.</div>';
@@ -7039,6 +7080,7 @@ function renderPage() {
       currentEnvRef = ref;
       currentEnvDetails = details || null;
       currentEnvFiles = Array.isArray(details.envFiles) ? details.envFiles : [];
+      currentEnvSkippedFiles = Array.isArray(details.skippedEnvFiles) ? details.skippedEnvFiles : [];
       currentEnvMergeMode = Boolean(options.mergeMode);
       envTitle.textContent = currentEnvMergeMode ? 'Merge Environment Values' : 'Environment Values';
       envSubtitle.textContent = currentEnvMergeMode
@@ -7065,6 +7107,7 @@ function renderPage() {
         envEditor.value = selectedEnvFile ? String(selectedEnvFile.content || '') : '';
       }
       renderEnvFileSelect(envFileSelect, currentEnvFiles, currentEnvFilePath);
+      renderSkippedEnvList(envSkippedList, currentEnvSkippedFiles);
       if (envMergeBox) {
         envMergeBox.hidden = !currentEnvMergeMode;
       }
@@ -7096,10 +7139,12 @@ function renderPage() {
       currentEnvRef = '';
       currentEnvDetails = null;
       currentEnvFiles = [];
+      currentEnvSkippedFiles = [];
       currentEnvFilePath = '';
       currentEnvMergeMode = false;
       envList.innerHTML = '';
       envBackupsList.innerHTML = '';
+      if (envSkippedList) envSkippedList.innerHTML = '';
       if (envFileSelect) envFileSelect.innerHTML = '';
       if (envRestoreSelect) envRestoreSelect.innerHTML = '';
       envFlash.hidden = true;
@@ -9431,7 +9476,7 @@ async function handleRequest(req, res) {
       const mode = envMatch[2] || '';
       const meta = parseEnvFile(metaPathForRef(ref));
       const projectPath = meta.APP_DIR || '';
-      const { files, envFiles, envEntries, env, saveTarget, selectedFile } = pickEnvDetails(projectPath);
+      const { files, envFiles, envEntries, skippedEnvFiles, env, saveTarget, selectedFile } = pickEnvDetails(projectPath);
       const backups = listProjectEnvBackups(ref);
       touchProjectMeta(ref);
 
@@ -9441,6 +9486,7 @@ async function handleRequest(req, res) {
           files,
           envFiles,
           envEntries,
+          skippedEnvFiles,
           env,
           saveTarget,
           selectedFile,
@@ -9517,6 +9563,7 @@ async function handleRequest(req, res) {
           files: refreshed.files,
           envFiles: refreshed.envFiles || [],
           envEntries: refreshed.envEntries || [],
+          skippedEnvFiles: refreshed.skippedEnvFiles || [],
           env: refreshed.env,
           saveTarget: refreshed.saveTarget,
           selectedFile: targetPath,

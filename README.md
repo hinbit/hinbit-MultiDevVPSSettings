@@ -68,6 +68,7 @@ Pull updates and restart PM2 for an existing project:
 projectctl update owner/repo
 projectctl restart owner/repo
 projectctl uninstall owner/repo
+projectctl env-cleanup owner/repo
 ```
 
 `projectctl update` now prompts with two choices when local changes exist:
