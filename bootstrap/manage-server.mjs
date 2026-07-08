@@ -788,7 +788,7 @@ PY
 on_error() {
   local line="$1"
   local exit_code="$2"
-  write_state "error" "Self-update failed at line ${line} (exit ${exit_code}). See ${LOG_FILE}." "" "" ""
+  write_state "error" "Self-update failed at line \${line} (exit \${exit_code}). See \${LOG_FILE}." "" "" ""
 }
 trap 'on_error "$LINENO" "$?"' ERR
 mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$STATE_FILE")" /opt
