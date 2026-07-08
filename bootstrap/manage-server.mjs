@@ -3908,7 +3908,7 @@ function renderPortalPage() {
   const sshKeys = readSshKeys();
   const updateStatus = getManageUpdateStatus();
   const versionBadgeClass = updateStatus.runningMatchesRemote ? 'ver-good' : 'ver-bad';
-  const versionBadgeLabel = updateStatus.runningMatchesRemote ? 'GREEN-V' : 'RED-V';
+  const versionBadgeLabel = updateStatus.runningMatchesRemote ? 'Updated' : 'not uptodate';
   const runningShort = updateStatus.running.commitShort || updateStatus.running.commit?.slice(0, 12) || 'n/a';
   const remoteShort = updateStatus.remote.short || updateStatus.remote.commit?.slice(0, 12) || 'n/a';
   const updateStateLabel = String(updateStatus.state?.status || '').trim();
@@ -4104,7 +4104,7 @@ function renderPortalPage() {
       const inSync = !!data.runningMatchesRemote;
       if (versionBadgeEl) {
         versionBadgeEl.className = 'version-badge ' + (inSync ? 'ver-good' : 'ver-bad');
-        versionBadgeEl.innerHTML = '<span>' + (inSync ? 'GREEN-V' : 'RED-V') + '</span><span>running <code>' + runningShort + '</code></span><span>git <code>' + remoteShort + '</code></span>';
+        versionBadgeEl.innerHTML = '<span>' + (inSync ? 'Updated' : 'not uptodate') + '</span><span>running <code>' + runningShort + '</code></span><span>git <code>' + remoteShort + '</code></span>';
       }
       if (portalVersionTextEl) {
         portalVersionTextEl.innerHTML = 'Running <code>' + runningShort + '</code> · GitHub <code>' + remoteShort + '</code> · branch <code>' + (data.branch || '${escapeHtml(MANAGE_SELF_UPDATE_BRANCH)}') + '</code>' + (state.status ? ' · update ' + state.status : '');
