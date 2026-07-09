@@ -62,6 +62,7 @@ Rules:
 - save actions write back to the selected file, not the merged view
 - if one project should answer to more than one domain, store a primary domain plus alias bindings, and let each alias carry its own env-file path for management and editing
 - when the install or pull flow resolves dependencies, root plus `server/`, `client/`, and `dashboard/` should be installed separately, and the subfolder installs should use `npm --prefix <folder>` so each component is refreshed in place before build
+- if the user pastes a source `.env`, Multidev must rewrite the VPS-specific runtime values during install: DB host, DB port, DB user, DB password, `PORT`, public URLs, and production markers must be replaced with the chosen VPS install values before the app boots
 
 Examples:
 

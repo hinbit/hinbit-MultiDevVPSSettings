@@ -244,6 +244,23 @@ unquote_shell_value() {
   printf '%s' "${value}"
 }
 
+strip_nested_shell_quotes() {
+  local value="${1:-}"
+
+  while [[ "${#value}" -ge 2 ]]; do
+    case "${value:0:1}${value: -1}" in
+      "''"|'"'"'""'"'"')
+        value="${value:1:${#value}-2}"
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  printf '%s' "${value}"
+}
+
 ensure_env_file_accessible() {
   local file="$1"
 
@@ -285,6 +302,8 @@ project_env_value() {
   elif [[ "${#value}" -ge 2 && "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
     value="${value:1:${#value}-2}"
   fi
+
+  value="$(strip_nested_shell_quotes "${value}")"
 
   printf '%s' "${value}"
 }
@@ -332,7 +351,7 @@ def parse_env(path):
                 key, value = line.split("=", 1)
                 key = key.strip()
                 value = value.strip()
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                while len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
                     value = value[1:-1]
                 data[key] = value
     except OSError:
@@ -391,6 +410,8 @@ project_db_value_exact() {
       value="${value:1:${#value}-2}"
     fi
 
+    value="$(strip_nested_shell_quotes "${value}")"
+
     if [[ -n "${value}" || "$(project_env_has_key "${key}")" == "yes" ]]; then
       printf '%s' "${value}"
       return
@@ -409,6 +430,8 @@ normalize_db_identifier() {
   elif [[ "${#value}" -ge 2 && "${value:0:1}" == '"' && "${value: -1}" == '"' ]]; then
     value="${value:1:${#value}-2}"
   fi
+
+  value="$(strip_nested_shell_quotes "${value}")"
 
   printf '%s' "${value}"
 }
@@ -915,6 +938,11 @@ def unquote(value):
     return inner
   return value
 
+def strip_nested_quotes(value):
+  while len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+    value = value[1:-1]
+  return value
+
 def shell_quote(value):
   return "'" + value.replace("'", "'\"'\"'") + "'"
 
@@ -934,7 +962,7 @@ for line in lines:
     continue
 
   indent, key, raw_value = match.groups()
-  value = unquote(raw_value.strip())
+  value = strip_nested_quotes(unquote(raw_value.strip()))
   out.append(f"{indent}{key}={shell_quote(value)}\n")
 
 with open(target_path, 'w', encoding='utf-8', errors='surrogateescape') as handle:
