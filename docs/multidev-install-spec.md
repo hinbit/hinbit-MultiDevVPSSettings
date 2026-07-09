@@ -175,6 +175,8 @@ If the app has a demo login or required admin user:
 - document the credentials in `README.md`
 - make the seed idempotent
 
+On uninstall, Multidev should remove the project directory, project metadata, app-map entries, nginx vhosts, project certificates, basic-auth files, PM2 log files, and project env backup archives. If the user chooses to drop the DB, drop the database and user grants on the selected DB machine too.
+
 If the app needs support tables outside the main schema:
 - put them in a separate support SQL file
 - make `db:init` apply them every time

@@ -5264,6 +5264,37 @@ cleanup_project_domain_artifacts() {
   done <<< "${domains_csv}"
 }
 
+cleanup_project_env_artifacts() {
+  local ref="$1"
+  local backup_dir=""
+
+  backup_dir="$(project_env_backup_dir "${ref}")"
+  rm -rf "${backup_dir}" 2>/dev/null || true
+}
+
+project_pm2_log_paths() {
+  local name="$1"
+
+  [[ -n "${name}" ]] || return 0
+  pm2 jlist 2>/dev/null | node -e '
+    const name = process.argv[1];
+    let input = "";
+    process.stdin.on("data", (chunk) => (input += chunk));
+    process.stdin.on("end", () => {
+      try {
+        const list = JSON.parse(input || "[]");
+        const proc = Array.isArray(list) ? list.find((item) => item && (item.name === name || (item.pm2_env && item.pm2_env.name === name))) : null;
+        const env = proc && proc.pm2_env ? proc.pm2_env : {};
+        process.stdout.write(String(env.pm_out_log_path || ""));
+        process.stdout.write("\t");
+        process.stdout.write(String(env.pm_err_log_path || ""));
+      } catch {
+        // Return empty paths when PM2 metadata is unavailable.
+      }
+    });
+  ' "${name}"
+}
+
 project_env_backup_dir() {
   local ref="$1"
   printf '%s/%s' "${PROJECT_ENV_BACKUP_DIR}" "$(slug_from_ref "${ref}")"
@@ -5381,6 +5412,8 @@ do_uninstall() {
   local all_domains_csv
   local domain
   local current_domains
+  local pm2_out_log=""
+  local pm2_err_log=""
 
   slug="$(slug_from_ref "$(project_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
@@ -5394,14 +5427,23 @@ do_uninstall() {
   all_domains_csv="$(printf '%s\n' "${APP_DOMAIN:-}" "$(project_all_domains)" | awk 'NF && !seen[$0]++')"
 
   if pm2 describe "${PM2_NAME}" >/dev/null 2>&1; then
+    IFS=$'\t' read -r pm2_out_log pm2_err_log < <(project_pm2_log_paths "${PM2_NAME}" || true)
     pm2 delete "${PM2_NAME}" >/dev/null 2>&1 || true
     pm2 save || true
   fi
 
   cleanup_project_domain_artifacts "${all_domains_csv}"
+  cleanup_project_env_artifacts "${ref}"
   remove_domains_from_app_map "${all_domains_csv}"
   if [[ -x /usr/local/bin/app-sync.sh ]]; then
     /usr/local/bin/app-sync.sh
+  fi
+
+  if [[ -n "${pm2_out_log}" ]]; then
+    rm -f -- "${pm2_out_log}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${pm2_err_log}" ]]; then
+    rm -f -- "${pm2_err_log}" >/dev/null 2>&1 || true
   fi
 
   remove_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "${DB_MACHINE_ID:-${LOCAL_DB_MACHINE_ID}}"

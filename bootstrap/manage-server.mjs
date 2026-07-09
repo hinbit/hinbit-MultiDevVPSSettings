@@ -7898,7 +7898,7 @@ function renderPage() {
     if (uninstallDropDbBtn) {
       uninstallDropDbBtn.addEventListener('click', async () => {
         if (!currentUninstallRef) return;
-        const ok = window.confirm('Delete the database records too? This will remove the project mapping, auth files, app leftovers, and drop the database.');
+        const ok = window.confirm('Delete the database records too? This will remove the project mapping, auth files, env backups, PM2 logs, app leftovers, and drop the database.');
         if (!ok) return;
         uninstallKeepDbBtn.disabled = true;
         uninstallDropDbBtn.disabled = true;
