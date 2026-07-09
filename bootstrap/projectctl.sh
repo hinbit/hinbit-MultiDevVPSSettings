@@ -2899,6 +2899,45 @@ record_last_build() {
   update_meta_value "${meta}" "LAST_BUILD_AT" "${at}"
 }
 
+write_build_info_stamp() {
+  local dir="$1"
+  local mode="${2:-root}"
+  local commit=""
+  local commit_short=""
+  local commit_date=""
+  local json=""
+  local target=""
+
+  if ! command -v git >/dev/null 2>&1; then
+    return 0
+  fi
+
+  [[ -n "${dir}" ]] || return 0
+  [[ -d "${dir}" ]] || return 0
+
+  commit="$(git -C "${dir}" rev-parse HEAD 2>/dev/null || true)"
+  [[ -n "${commit}" ]] || return 0
+  commit_short="${commit:0:12}"
+  commit_date="$(git -C "${dir}" log -1 --format=%cI 2>/dev/null || true)"
+  json="$(python3 - "$commit" "$commit_short" "$commit_date" "$mode" <<'PY'
+import json
+import sys
+
+commit, commit_short, commit_date, mode = sys.argv[1:5]
+print(json.dumps({
+    "commit": commit,
+    "commitShort": commit_short,
+    "commitDate": commit_date,
+    "buildMode": mode,
+}, indent=2))
+PY
+)"
+
+  target="${dir}/dist"
+  [[ -d "${target}" ]] || return 0
+  printf '%s\n' "${json}" > "${target}/build-info.json"
+}
+
 run_package_build_in_dir() {
   local dir="$1"
   local label="$2"
@@ -2921,6 +2960,7 @@ run_package_build_in_dir() {
       *) npm run build ;;
     esac
   )
+  write_build_info_stamp "${dir}" "${label}"
 }
 
 maybe_build() {
@@ -4464,6 +4504,7 @@ do_install() {
   verify_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
   restart_pm2
+  ensure_project_pm2_online "${REPO_REF}"
   sync_app_map
   verify_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"

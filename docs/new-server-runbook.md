@@ -215,6 +215,8 @@ When local changes exist, the update prompt offers:
 After pull, the UI always runs `build all`:
 - `build all` runs the root build script plus `server/`, `client/`, and `dashboard/` build scripts when they exist
 - the project list displays the last build mode, status, and timestamp
+- each successful component build writes a `dist/build-info.json` stamp with the current commit, so the deployed version can be read back from the artifact
+- if build, PM2 restart, or the post-restart online check fails, the pull stops and the UI shows the failure
 
 The merge path also normalizes project `.env` files into a shell-safe format, so values with spaces are quoted automatically and keep working in scripts that source the file.
 When choosing new ports, `projectctl` skips common reserved ports and preserves split-app internal ports instead of overwriting them with the public app port.
