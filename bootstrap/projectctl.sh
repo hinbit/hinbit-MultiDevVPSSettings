@@ -5395,8 +5395,10 @@ project_pm2_log_paths() {
         process.stdout.write(String(env.pm_out_log_path || ""));
         process.stdout.write("\t");
         process.stdout.write(String(env.pm_err_log_path || ""));
+        process.stdout.write("\n");
       } catch {
         // Return empty paths when PM2 metadata is unavailable.
+        process.stdout.write("\n");
       }
     });
   ' "${name}"
