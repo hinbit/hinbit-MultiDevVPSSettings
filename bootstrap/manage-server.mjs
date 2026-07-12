@@ -9791,8 +9791,8 @@ async function handleRequest(req, res) {
 
       if (req.method === 'POST' && scriptAction) {
         const body = await readBody(req);
-        const script = String(body.script || '').trim();
-        const dir = String(body.dir || '').trim();
+        const script = String(body.script || url.searchParams.get('script') || '').trim();
+        const dir = String(body.dir || url.searchParams.get('dir') || '').trim();
         if (!script) {
           throw new Error('Missing script name');
         }
