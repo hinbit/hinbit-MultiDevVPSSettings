@@ -723,8 +723,16 @@ function writeManageSelfUpdateState(patch) {
 }
 
 function getManageUpdateStatus() {
-  const running = readManageBuildInfo();
   const checkout = gitHeadForDir(MANAGE_SELF_UPDATE_DIR);
+  const runningFile = readManageBuildInfo();
+  const running = checkout.commit
+    ? {
+      ...runningFile,
+      commit: checkout.commit,
+      commitShort: checkout.short || runningFile.commitShort || '',
+      commitDate: checkout.date || runningFile.commitDate || '',
+    }
+    : runningFile;
   const remote = gitRemoteHead(MANAGE_SELF_UPDATE_REPO, MANAGE_SELF_UPDATE_BRANCH);
   const state = readManageSelfUpdateState();
   const runningMatchesRemote = Boolean(running.commit && remote.commit && running.commit === remote.commit);
