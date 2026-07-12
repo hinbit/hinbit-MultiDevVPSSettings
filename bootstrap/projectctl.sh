@@ -3,6 +3,7 @@ set -euo pipefail
 
 META_DIR="/etc/vps-projects"
 PROJECT_ENV_GROUP="${PROJECT_ENV_GROUP:-adm}"
+PROJECT_ENV_BACKUP_DIR="/etc/vps-project-env-backups"
 APP_ROOT="/var/www"
 APP_MAP="/etc/app-map.csv"
 AUTH_DIR="/etc/nginx/project-auth"
