@@ -8783,7 +8783,12 @@ function renderPage() {
           method: 'POST',
           body: JSON.stringify(payload),
         });
-        showMessage(installResult, result.message || 'Installed');
+        const installSummary = [
+          result.message || 'Installed',
+          result.project ? ('Project: ' + result.project) : '',
+          result.port ? ('Port: ' + result.port) : '',
+        ].filter(Boolean).join('\n');
+        showMessage(installResult, installSummary);
         renderInstallDbScripts(result.repo || payload.repo, result.dbScripts || [], result.project || result.repo || payload.repo);
         for (const id of ['repo', 'domain', 'branch', 'pm2Name', 'port', 'entrypoint']) {
           const el = document.getElementById(id);
@@ -8795,7 +8800,15 @@ function renderPage() {
         if (envText) envText.value = '';
         const accessPassword = document.getElementById('accessPassword');
         if (accessPassword) accessPassword.value = '';
-        await refresh();
+        try {
+          await refresh();
+        } catch (refreshError) {
+          showMessage(
+            installResult,
+            installSummary + '\nWarning: project installed, but the project list refresh failed: ' + (refreshError.message || String(refreshError)),
+            false,
+          );
+        }
         if (openMergeMode) {
           await loadEnv(result.repo || payload.repo, { mergeMode: true });
           showMessage(envFlash, 'Paste extra .env keys in the overlay and click Merge overlay & save.');
