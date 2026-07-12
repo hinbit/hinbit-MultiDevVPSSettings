@@ -5348,7 +5348,7 @@ remove_domains_from_app_map() {
         }
       }
     }
-    NR == 1 { print; next }
+    NR == 1 && $1 == "domain" { print; next }
     !remove[$1] { print }
   ' "${APP_MAP}" > "${tmp}"
 
@@ -5365,6 +5365,8 @@ cleanup_project_domain_artifacts() {
   while IFS= read -r domain; do
     [[ -n "${domain}" ]] || continue
     rm -f "$(auth_file_for_domain "${domain}")"
+    rm -f "/etc/nginx/sites-enabled/${domain}.conf" \
+      "/etc/nginx/sites-available/${domain}.conf"
     rm -rf "/etc/vps-custom-certs/projects/${domain}" \
       "/etc/letsencrypt/live/${domain}" \
       "/etc/letsencrypt/archive/${domain}"
@@ -5546,7 +5548,7 @@ do_uninstall() {
   cleanup_project_env_artifacts "${ref}"
   remove_domains_from_app_map "${all_domains_csv}"
   if [[ -x /usr/local/bin/app-sync.sh ]]; then
-    /usr/local/bin/app-sync.sh
+    APP_SYNC_SKIP_ACME=1 /usr/local/bin/app-sync.sh
   fi
 
   if [[ -n "${pm2_out_log}" ]]; then
