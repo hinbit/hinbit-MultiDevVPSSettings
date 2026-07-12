@@ -2712,6 +2712,19 @@ EOF
   fi
 }
 
+meta_file_value() {
+  local meta="$1"
+  local key="$2"
+  awk -F= -v key="${key}" '
+    $1 == key {
+      sub(/^[^=]*=/, "");
+      gsub(/\r/, "");
+      print;
+      exit;
+    }
+  ' "${meta}" 2>/dev/null | head -n 1 || true
+}
+
 load_meta() {
   local meta="$1"
   local line=""
@@ -3988,9 +4001,8 @@ refresh_project_ssh_config() {
 
   while IFS= read -r meta; do
     [[ -e "${meta}" ]] || continue
-    # shellcheck disable=SC1090
-    source "${meta}"
-    user="${SSH_UPLOAD_USER:-}"
+    user="$(meta_file_value "${meta}" SSH_UPLOAD_USER)"
+    user="$(unquote_shell_value "$(trim_shell_whitespace "${user}")")"
     [[ -n "${user}" ]] || continue
     blocks+=("Match User ${user}"$'\n'"  PasswordAuthentication yes"$'\n'"  KbdInteractiveAuthentication no"$'\n'"  PubkeyAuthentication no"$'\n'"  AllowTcpForwarding no"$'\n'"  X11Forwarding no"$'\n'"  PermitTTY no"$'\n'"  ForceCommand internal-sftp")
   done < <(find "${META_DIR}" -maxdepth 1 -name '*.env' -print | sort)
