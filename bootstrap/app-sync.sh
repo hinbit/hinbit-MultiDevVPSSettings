@@ -11,6 +11,7 @@ MANIFEST="${STATE_DIR}/app-sync.manifest"
 ACME_ROOT="/var/www/html"
 CUSTOM_CERT_ROOT="/etc/vps-custom-certs/projects"
 PROJECT_META_DIR="/etc/vps-projects"
+SKIP_ACME="${APP_SYNC_SKIP_ACME:-0}"
 
 mkdir -p "${STATE_DIR}"
 
@@ -371,7 +372,7 @@ while IFS=, read -r domain port type https; do
     elif [[ -n "${fallback_domain}" && -s "${fallback_cert}" && -s "${fallback_key}" ]]; then
       cert_ready="yes"
       cert_source="default-domain"
-    elif [[ ! -s "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
+    elif [[ "${SKIP_ACME}" != "1" && ! -s "/etc/letsencrypt/live/${domain}/fullchain.pem" ]]; then
       if certbot certonly \
         --webroot \
         -w "${ACME_ROOT}" \

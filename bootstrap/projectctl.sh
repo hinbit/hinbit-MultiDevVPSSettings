@@ -2725,6 +2725,12 @@ meta_file_value() {
   ' "${meta}" 2>/dev/null | head -n 1 || true
 }
 
+run_project_app_sync() {
+  if [[ -x /usr/local/bin/app-sync.sh ]]; then
+    APP_SYNC_SKIP_ACME=1 /usr/local/bin/app-sync.sh
+  fi
+}
+
 load_meta() {
   local meta="$1"
   local line=""
@@ -3748,9 +3754,7 @@ sync_app_map() {
       [[ -n "${extra_domain:-}" && -n "${extra_port:-}" ]] || continue
       app_map_upsert "${extra_domain}" "${extra_port}" "${extra_type:-${APP_TYPE:-project}}" "${extra_https:-${APP_HTTPS:-yes}}"
     done < <(project_domain_binding_rows)
-    if [[ -x /usr/local/bin/app-sync.sh ]]; then
-      /usr/local/bin/app-sync.sh
-    fi
+    run_project_app_sync
   fi
 }
 
@@ -3770,9 +3774,7 @@ verify_https_vhost() {
     return 0
   fi
 
-  if [[ -x /usr/local/bin/app-sync.sh ]]; then
-    /usr/local/bin/app-sync.sh
-  fi
+  run_project_app_sync
 
   if [[ ! -s "${conf}" ]] || [[ ! -s "${cert}" ]] || ! grep -q 'listen 443 ssl' "${conf}"; then
     printf '[projectctl] Warning: HTTPS was requested for %s, but the SSL vhost is not active yet. The project will remain available over HTTP until DNS and certificate provisioning finish. Re-run app sync after the domain resolves to this VPS.\n' "${domain}" >&2
@@ -3951,9 +3953,7 @@ rescue_project_http_smoke() {
 
   printf '[projectctl] %s smoke test failed; retrying app sync and PM2 restart once\n' "${label}" >&2
   sync_app_map
-  if [[ -x /usr/local/bin/app-sync.sh ]]; then
-    /usr/local/bin/app-sync.sh
-  fi
+  run_project_app_sync
   restart_pm2
   sync_app_map
   verify_project_mapping "${label}" "${domain}" "${port}" "${https}"
