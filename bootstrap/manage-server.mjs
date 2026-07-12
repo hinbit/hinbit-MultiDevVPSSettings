@@ -1959,6 +1959,12 @@ function syncGithubSshConfig() {
     selected.set(user, key);
   }
 
+  // Some repos are owned by org accounts but are still accessed through the
+  // maintainer's personal GitHub key on certain VPSes.
+  if (!selected.has('developseach') && selected.has('shaykid')) {
+    selected.set('developseach', selected.get('shaykid'));
+  }
+
   const entries = Array.from(selected.entries())
     .map(([user, key]) => ({
       githubUser: user,
