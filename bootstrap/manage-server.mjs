@@ -8787,6 +8787,7 @@ function renderPage() {
           result.message || 'Installed',
           result.project ? ('Project: ' + result.project) : '',
           result.port ? ('Port: ' + result.port) : '',
+          result.pm2Name ? ('PM2: ' + result.pm2Name) : '',
         ].filter(Boolean).join('\n');
         showMessage(installResult, installSummary);
         renderInstallDbScripts(result.repo || payload.repo, result.dbScripts || [], result.project || result.repo || payload.repo);
@@ -9582,6 +9583,7 @@ async function handleRequest(req, res) {
         repo,
         project: meta.APP_DOMAIN || meta.PROJECT_SLUG || repo,
         port: meta.APP_PORT || body.port || '',
+        pm2Name: meta.PM2_NAME || body.pm2Name || '',
         scripts,
         dbScripts,
       });
