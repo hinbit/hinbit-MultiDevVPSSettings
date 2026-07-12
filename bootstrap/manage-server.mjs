@@ -43,6 +43,8 @@ const LOCAL_DB_MACHINE = {
   rootPassword: '',
   port: '3306',
   notes: 'Current VPS local DB on this VPS',
+  originHost: '',
+  phpMyAdminUrl: '',
 };
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1143,6 +1145,7 @@ function normalizeMysqlMachine(machineOrId) {
       port: String(machineOrId.port || '3306').trim() || '3306',
       notes: String(machineOrId.notes || '').trim(),
       originHost: String(machineOrId.originHost || '').trim(),
+      phpMyAdminUrl: String(machineOrId.phpMyAdminUrl || '').trim(),
     };
   }
 
@@ -1156,6 +1159,7 @@ function normalizeMysqlMachine(machineOrId) {
       port: '3306',
       notes: '',
       originHost: '',
+      phpMyAdminUrl: '',
     };
   }
 
@@ -1190,6 +1194,8 @@ function resolveProjectMysqlMachine(meta, projectPath) {
   const rootUser = String(db.DB_MACHINE_ROOT_USER || 'root').trim() || 'root';
   const rootPassword = String(db.DB_MACHINE_ROOT_PASSWORD || '').trim();
   const notes = String(db.DB_MACHINE_NOTES || '').trim();
+  const originHost = String(db.DB_MACHINE_ORIGIN_HOST || '').trim();
+  const phpMyAdminUrl = String(db.DB_MACHINE_PHPMYADMIN_URL || '').trim();
 
   return {
     machine: {
@@ -1200,7 +1206,8 @@ function resolveProjectMysqlMachine(meta, projectPath) {
       rootPassword,
       port,
       notes,
-      originHost: '',
+      originHost,
+      phpMyAdminUrl,
     },
     isCustom: true,
   };
@@ -1259,6 +1266,7 @@ function readDbMachines() {
       port: String(machine.port || '3306').trim() || '3306',
       notes: String(machine.notes || '').trim(),
       originHost: String(machine.originHost || machine.remoteHost || '').trim(),
+      phpMyAdminUrl: String(machine.phpMyAdminUrl || machine.phpmyadminUrl || '').trim(),
     })).filter((machine) => machine.name || machine.host || machine.rootUser || machine.rootPassword);
     if (!machines.some((machine) => machine.id === LOCAL_DB_MACHINE_ID)) {
       machines.unshift({ ...LOCAL_DB_MACHINE });
@@ -1897,6 +1905,66 @@ function describeDbMachine(machine) {
   return parts.filter(Boolean).join(' · ');
 }
 
+function normalizePhpMyAdminBaseUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    return parsed.toString().replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function resolvePhpMyAdminBaseUrl(machine, requestHost = '') {
+  const configured = normalizePhpMyAdminBaseUrl(machine?.phpMyAdminUrl);
+  if (configured) return configured;
+  const machineId = String(machine?.id || '').trim();
+  if (machineId === LOCAL_DB_MACHINE_ID || (!machine && requestHost)) {
+    return '/phpmyadmin';
+  }
+  const originHost = String(machine?.originHost || '').trim();
+  if (originHost && !['localhost', '127.0.0.1', '::1'].includes(originHost)) {
+    return `https://${originHost.replace(/\/+$/, '')}/phpmyadmin`;
+  }
+  const host = String(machine?.host || '').trim();
+  if (host && !['localhost', '127.0.0.1', '::1'].includes(host)) {
+    return `https://${host.replace(/\/+$/, '')}/phpmyadmin`;
+  }
+  return '/phpmyadmin';
+}
+
+function resolvePhpMyAdminProjectAccess(ref, requestHost = '') {
+  const meta = parseEnvFile(metaPathForRef(ref));
+  const projectPath = meta.APP_DIR || '';
+  const { files, db } = pickDbDetails(projectPath);
+  const projectMachineContext = resolveProjectMysqlMachine(meta, projectPath);
+  const machines = readDbMachines();
+  const projectMachineId = meta.DB_MACHINE_ID || LOCAL_DB_MACHINE_ID;
+  const machine = projectMachineContext.machine
+    || machines.find((item) => String(item.id) === String(projectMachineId))
+    || null;
+  const dbName = db.DB_NAME || db.DB_DATABASE || db.MYSQL_DATABASE || db.POSTGRES_DB || '';
+  const dbUser = db.DB_USER || db.MYSQL_USER || db.POSTGRES_USER || '';
+  const dbPassword = db.DB_PASSWORD || db.MYSQL_PASSWORD || db.POSTGRES_PASSWORD || '';
+  const baseUrl = resolvePhpMyAdminBaseUrl(machine, requestHost);
+  const openUrl = dbName
+    ? `${baseUrl.replace(/\/+$/, '')}/index.php?db=${encodeURIComponent(dbName)}`
+    : `${baseUrl.replace(/\/+$/, '')}/index.php`;
+  return {
+    ref,
+    meta,
+    files,
+    db,
+    dbName,
+    dbUser,
+    dbPassword,
+    machine,
+    baseUrl,
+    openUrl,
+  };
+}
+
 function normalizeGithubUser(value) {
   return String(value || '')
     .trim()
@@ -2310,6 +2378,8 @@ function normalizeDbMachine(input, existing = {}, options = {}) {
   const rootUser = String(input?.rootUser || input?.user || existing.rootUser || '').trim();
   const rootPassword = String(input?.rootPassword || input?.password || existing.rootPassword || '').trim();
   const notes = String(input?.notes || existing.notes || '').trim();
+  const originHost = String(input?.originHost || input?.remoteHost || existing.originHost || existing.remoteHost || '').trim();
+  const phpMyAdminUrl = String(input?.phpMyAdminUrl || input?.phpmyadminUrl || existing.phpMyAdminUrl || '').trim();
   let port = String(input?.port || existing.port || '3306').trim() || '3306';
 
   if (!name) throw new Error('DB machine name is required');
@@ -2323,8 +2393,21 @@ function normalizeDbMachine(input, existing = {}, options = {}) {
   if (!Number.isFinite(portNum) || portNum < 1 || portNum > 65535) {
     throw new Error(`Invalid DB port: ${port}`);
   }
+  if (originHost && !/^[A-Za-z0-9._:-]+$/.test(originHost)) {
+    throw new Error(`Invalid DB machine origin host: ${originHost}`);
+  }
   if (!allowMissingRootCredentials && !rootPassword && !['localhost', '127.0.0.1', '::1'].includes(host)) {
     throw new Error('DB root password is required');
+  }
+  if (phpMyAdminUrl) {
+    try {
+      const parsed = new URL(phpMyAdminUrl);
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        throw new Error('unsupported protocol');
+      }
+    } catch {
+      throw new Error(`Invalid phpMyAdmin URL: ${phpMyAdminUrl}`);
+    }
   }
 
   return {
@@ -2335,6 +2418,8 @@ function normalizeDbMachine(input, existing = {}, options = {}) {
     rootPassword,
     port: String(portNum),
     notes,
+    originHost,
+    phpMyAdminUrl,
   };
 }
 
@@ -2839,7 +2924,7 @@ function renderVaultPage() {
 
 function renderDbMachineRows(machines) {
   if (!machines.length) {
-    return '<tr><td colspan="6" class="muted">No DB machines saved yet.</td></tr>';
+    return '<tr><td colspan="8" class="muted">No DB machines saved yet.</td></tr>';
   }
   return machines.map((machine) => {
     const ref = escapeHtml(machine.id || '');
@@ -2851,6 +2936,8 @@ function renderDbMachineRows(machines) {
           <div class="small">${escapeHtml(machine.notes || '')}</div>
         </td>
         <td><code>${escapeHtml(machine.host || '')}</code></td>
+        <td><code>${escapeHtml(machine.originHost || '')}</code></td>
+        <td>${machine.phpMyAdminUrl ? `<a class="btn ghost" href="${escapeHtml(machine.phpMyAdminUrl)}" target="_blank" rel="noreferrer">Open</a>` : '<span class="muted">n/a</span>'}</td>
         <td><code>${escapeHtml(machine.rootUser || '')}</code></td>
         <td>
           <div class="password-cell">
@@ -2880,6 +2967,189 @@ function renderDbMachineOptions(machines, selectedId = LOCAL_DB_MACHINE_ID, incl
     const label = describeDbMachine(machine);
     return `<option value="${escapeHtml(id)}"${id === String(selectedId || '') ? ' selected' : ''}>${escapeHtml(label)}</option>`;
   }).join('');
+}
+
+function renderProjectPhpMyAdminPage(ref, requestHost = '') {
+  const access = resolvePhpMyAdminProjectAccess(ref, requestHost);
+  const projectLabel = access.meta.APP_DOMAIN || access.meta.PROJECT_SLUG || ref;
+  const machineLabel = access.machine ? describeDbMachine(access.machine) : 'Current VPS DB';
+  const usingRemoteHost = /^https?:\/\//i.test(access.baseUrl);
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>phpMyAdmin Access · ${escapeHtml(projectLabel)}</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #09111f;
+      color: #ecf3ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at top, rgba(59,130,246,0.18), transparent 42%),
+        linear-gradient(180deg, #09111f 0%, #050b14 100%);
+      padding: 28px;
+    }
+    main {
+      max-width: 920px;
+      margin: 0 auto;
+      display: grid;
+      gap: 18px;
+    }
+    .panel {
+      background: rgba(11, 20, 36, 0.9);
+      border: 1px solid rgba(148, 163, 184, 0.24);
+      border-radius: 18px;
+      padding: 22px;
+      box-shadow: 0 18px 50px rgba(2, 6, 23, 0.45);
+    }
+    h1, h2 { margin: 0 0 10px; }
+    p { margin: 0; color: #c7d7ef; line-height: 1.5; }
+    .muted { color: #8ea4c5; }
+    .grid { display: grid; gap: 14px; }
+    .two { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+    .kv {
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      border-radius: 14px;
+      padding: 14px;
+      background: rgba(15, 23, 42, 0.72);
+    }
+    .kv .label {
+      font-size: 12px;
+      color: #8ea4c5;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    code, input {
+      width: 100%;
+      display: block;
+      border-radius: 10px;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      background: rgba(2, 6, 23, 0.68);
+      color: #f8fbff;
+      padding: 11px 12px;
+      font: inherit;
+    }
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 14px;
+    }
+    .btn {
+      appearance: none;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      background: #1d4ed8;
+      color: #fff;
+      border-radius: 12px;
+      padding: 11px 14px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .btn.ghost {
+      background: transparent;
+      color: #dbeafe;
+    }
+    .flash {
+      margin-top: 12px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      background: rgba(15, 23, 42, 0.8);
+      color: #dbeafe;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="panel">
+      <h1>phpMyAdmin Access</h1>
+      <p>${escapeHtml(projectLabel)}</p>
+      <div class="actions">
+        <a class="btn ghost" href="/manage/">Back to manage</a>
+        <a class="btn" href="${escapeHtml(access.openUrl)}" target="_blank" rel="noreferrer">Open phpMyAdmin</a>
+      </div>
+      <div class="flash">
+        phpMyAdmin no longer accepts username/password auto-login by URL or hidden form fields on current versions. This page opens the correct phpMyAdmin target and keeps the project credentials ready to copy.
+      </div>
+    </section>
+    <section class="panel grid two">
+      <div class="kv">
+        <div class="label">DB Machine</div>
+        <code>${escapeHtml(machineLabel || 'n/a')}</code>
+      </div>
+      <div class="kv">
+        <div class="label">phpMyAdmin Target</div>
+        <code id="pmaTarget">${escapeHtml(access.openUrl)}</code>
+      </div>
+      <div class="kv">
+        <div class="label">Database Name</div>
+        <input id="dbName" type="text" readonly value="${escapeHtml(access.dbName)}">
+      </div>
+      <div class="kv">
+        <div class="label">Database User</div>
+        <input id="dbUser" type="text" readonly value="${escapeHtml(access.dbUser)}">
+      </div>
+      <div class="kv">
+        <div class="label">Database Password</div>
+        <input id="dbPassword" type="text" readonly value="${escapeHtml(access.dbPassword)}">
+      </div>
+      <div class="kv">
+        <div class="label">Source Files</div>
+        <code>${access.files.length ? access.files.map((file) => escapeHtml(file)).join('<br>') : 'n/a'}</code>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Use</h2>
+      <p class="muted">${usingRemoteHost ? 'This project points to a remote DB machine, so phpMyAdmin opens on that remote host.' : 'This project points to the current VPS DB machine, so phpMyAdmin opens on this server.'}</p>
+      <div class="actions">
+        <button class="btn ghost" type="button" data-copy="dbName">Copy DB name</button>
+        <button class="btn ghost" type="button" data-copy="dbUser">Copy DB user</button>
+        <button class="btn ghost" type="button" data-copy="dbPassword">Copy DB password</button>
+        <button class="btn ghost" type="button" data-copy-text="${escapeHtml(access.openUrl)}">Copy target URL</button>
+      </div>
+      <div id="copyResult" class="flash" hidden></div>
+    </section>
+  </main>
+  <script>
+    const copyResult = document.getElementById('copyResult');
+    function showMessage(value) {
+      copyResult.hidden = false;
+      copyResult.textContent = value;
+    }
+    async function copyText(value, label) {
+      try {
+        await navigator.clipboard.writeText(value);
+        showMessage(label + ' copied');
+      } catch {
+        showMessage('Copy failed. Use the field directly.');
+      }
+    }
+    document.addEventListener('click', async (event) => {
+      const copyBtn = event.target.closest('button[data-copy], button[data-copy-text]');
+      if (!copyBtn) return;
+      if (copyBtn.dataset.copyText) {
+        await copyText(copyBtn.dataset.copyText, 'Target URL');
+        return;
+      }
+      const field = document.getElementById(copyBtn.dataset.copy || '');
+      if (!field) return;
+      await copyText(field.value || '', field.id);
+      field.focus();
+      field.select();
+    });
+  </script>
+</body>
+</html>`;
 }
 
 function renderDbMachinesPage() {
@@ -2981,6 +3251,12 @@ function renderDbMachinesPage() {
         <label>DB host
           <input id="machineHost" placeholder="localhost, 10.0.0.5, db.example.com">
         </label>
+        <label>Remote host / origin host
+          <input id="machineOriginHost" placeholder="multidev.seach.co.il">
+        </label>
+        <label>phpMyAdmin URL
+          <input id="machinePhpMyAdminUrl" placeholder="https://multidev.seach.co.il/phpmyadmin/">
+        </label>
         <label>DB root user
           <input id="machineRootUser" placeholder="root">
         </label>
@@ -3013,6 +3289,8 @@ function renderDbMachinesPage() {
             <tr>
               <th>Name</th>
               <th>Host</th>
+              <th>Origin</th>
+              <th>phpMyAdmin</th>
               <th>Root user</th>
               <th>Root password</th>
               <th>Port</th>
@@ -3083,6 +3361,8 @@ function renderDbMachinesPage() {
               <div class="small">\${machine.id === '${LOCAL_DB_MACHINE_ID}' ? 'Built-in current VPS DB' : escapeHtml(machine.notes || '')}</div>
             </td>
             <td><code>\${escapeHtml(machine.host || '')}</code></td>
+            <td><code>\${escapeHtml(machine.originHost || '')}</code></td>
+            <td>\${machine.phpMyAdminUrl ? '<a class="btn ghost" href="' + escapeHtml(machine.phpMyAdminUrl) + '" target="_blank" rel="noreferrer">Open</a>' : '<span class="muted">n/a</span>'}</td>
             <td><code>\${escapeHtml(machine.rootUser || '')}</code></td>
             <td>
               <div class="password-cell">
@@ -3099,13 +3379,15 @@ function renderDbMachinesPage() {
             </td>
           </tr>
         \`).join('')
-        : '<tr><td colspan="6" class="muted">No DB machines saved yet.</td></tr>';
+        : '<tr><td colspan="8" class="muted">No DB machines saved yet.</td></tr>';
     }
 
     function clearForm() {
       machineId.value = '';
       machineName.value = '';
       machineHost.value = '';
+      machineOriginHost.value = '';
+      machinePhpMyAdminUrl.value = '';
       machineRootUser.value = '';
       machineRootPassword.value = '';
       machinePort.value = '3306';
@@ -3117,6 +3399,8 @@ function renderDbMachinesPage() {
       machineId.value = machine.id || '';
       machineName.value = machine.name || '';
       machineHost.value = machine.host || '';
+      machineOriginHost.value = machine.originHost || '';
+      machinePhpMyAdminUrl.value = machine.phpMyAdminUrl || '';
       machineRootUser.value = machine.rootUser || '';
       machineRootPassword.value = machine.rootPassword || '';
       machinePort.value = machine.port || '3306';
@@ -3136,6 +3420,8 @@ function renderDbMachinesPage() {
         id: machineId.value.trim(),
         name: machineName.value.trim(),
         host: machineHost.value.trim(),
+        originHost: machineOriginHost.value.trim(),
+        phpMyAdminUrl: machinePhpMyAdminUrl.value.trim(),
         rootUser: machineRootUser.value.trim(),
         rootPassword: machineRootPassword.value.trim(),
         port: machinePort.value.trim(),
@@ -3714,6 +4000,7 @@ function renderProjectActions(project) {
           <button class="danger" data-action="uninstall" data-ref="${escapeHtml(ref)}">Kill</button>
           <button class="secondary" data-action="db" data-ref="${escapeHtml(ref)}">DB</button>
           <button class="secondary" data-action="mysql" data-ref="${escapeHtml(ref)}">MySQL</button>
+          <a class="btn ghost" href="/manage/phpmyadmin?ref=${escapeHtml(ref)}" target="_blank" rel="noreferrer">phpMyAdmin</a>
           <button class="secondary" data-action="ssh" data-ref="${escapeHtml(ref)}">SSH</button>
           <button class="secondary" data-action="env" data-ref="${escapeHtml(ref)}">Env</button>
           <button class="secondary" data-action="env-backup" data-ref="${escapeHtml(ref)}">Backup</button>
@@ -4074,15 +4361,10 @@ function renderPortalPage() {
       <h2 class="card-title">TLS / Certificates</h2>
       <div class="card-desc">Upload server and project certificates, switch between custom certs and Let’s Encrypt, and keep nginx in sync.</div>
     </a>
-    <a class="card" href="/phpmyadmin/">
-      <div class="card-meta">Database UI</div>
-      <h2 class="card-title">phpMyAdmin</h2>
-      <div class="card-desc">Open the MySQL admin UI for database inspection and maintenance.</div>
-    </a>
     <a class="card" href="/manage/">
       <div class="card-meta">Dashboard</div>
       <h2 class="card-title">Project Dashboard</h2>
-      <div class="card-desc">Jump to the full project list and PM2 management screen.</div>
+      <div class="card-desc">Jump to the full project list. phpMyAdmin now opens per project so the DB target matches the selected project.</div>
     </a>
   </main>
   <script>
@@ -5824,6 +6106,12 @@ function renderPage() {
             <label>Custom DB host
               <input id="mysqlCustomHost" type="text" placeholder="10.0.0.5">
             </label>
+            <label>Custom remote host / origin host
+              <input id="mysqlCustomOriginHost" type="text" placeholder="multidev.seach.co.il">
+            </label>
+            <label>Custom phpMyAdmin URL
+              <input id="mysqlCustomPhpMyAdminUrl" type="text" placeholder="https://multidev.seach.co.il/phpmyadmin/">
+            </label>
             <label>Custom DB port
               <input id="mysqlCustomPort" type="number" min="1" max="65535" placeholder="3306">
             </label>
@@ -6145,6 +6433,8 @@ function renderPage() {
     const mysqlCustomDbPassword = document.getElementById('mysqlCustomDbPassword');
     const mysqlCustomName = document.getElementById('mysqlCustomName');
     const mysqlCustomHost = document.getElementById('mysqlCustomHost');
+    const mysqlCustomOriginHost = document.getElementById('mysqlCustomOriginHost');
+    const mysqlCustomPhpMyAdminUrl = document.getElementById('mysqlCustomPhpMyAdminUrl');
     const mysqlCustomPort = document.getElementById('mysqlCustomPort');
     const mysqlCustomRootUser = document.getElementById('mysqlCustomRootUser');
     const mysqlCustomRootPassword = document.getElementById('mysqlCustomRootPassword');
@@ -6386,6 +6676,8 @@ function renderPage() {
       if (mysqlCustomDbPassword) mysqlCustomDbPassword.value = db.DB_PASSWORD || db.MYSQL_PASSWORD || db.POSTGRES_PASSWORD || '';
       if (mysqlCustomName) mysqlCustomName.value = custom.name || details?.dbMachineLabel || '';
       if (mysqlCustomHost) mysqlCustomHost.value = custom.host || details?.dbMachineHost || '';
+      if (mysqlCustomOriginHost) mysqlCustomOriginHost.value = custom.originHost || '';
+      if (mysqlCustomPhpMyAdminUrl) mysqlCustomPhpMyAdminUrl.value = custom.phpMyAdminUrl || details?.phpMyAdminUrl || '';
       if (mysqlCustomPort) mysqlCustomPort.value = custom.port || '';
       if (mysqlCustomRootUser) mysqlCustomRootUser.value = custom.rootUser || '';
       if (mysqlCustomRootPassword) mysqlCustomRootPassword.value = custom.rootPassword || '';
@@ -6511,6 +6803,7 @@ function renderPage() {
           <button class="danger" data-action="uninstall" data-ref="\${ref}">Kill</button>
           <button class="secondary" data-action="db" data-ref="\${ref}">DB</button>
           <button class="secondary" data-action="mysql" data-ref="\${ref}">MySQL</button>
+          <a class="btn ghost" href="/manage/phpmyadmin?ref=\${ref}" target="_blank" rel="noreferrer">phpMyAdmin</a>
           <button class="secondary" data-action="ssh" data-ref="\${ref}">SSH</button>
           <button class="secondary" data-action="env" data-ref="\${ref}">Env</button>
           <button class="secondary" data-action="env-backup" data-ref="\${ref}">Backup</button>
@@ -6702,7 +6995,7 @@ function renderPage() {
       mysqlTitle.textContent = 'MySQL Access';
       mysqlSubtitle.textContent = subtitle || '';
       mysqlFlash.hidden = true;
-      mysqlPhpMyAdminBtn.href = '/phpmyadmin/';
+      mysqlPhpMyAdminBtn.href = '/manage/phpmyadmin?ref=' + encodeURIComponent(ref);
       mysqlIpsInput.value = details.allowedIps || '';
       currentDbMachines = Array.isArray(details.machines) && details.machines.length ? details.machines : currentDbMachines;
       const customMode = isCustomMysqlMachine(details);
@@ -6720,6 +7013,7 @@ function renderPage() {
         { label: 'Database password', value: details.db?.DB_PASSWORD || details.db?.MYSQL_PASSWORD || details.db?.POSTGRES_PASSWORD || 'n/a' },
         { label: 'DB machine', value: details.dbMachineLabel || details.dbMachineId || 'local-current' },
         { label: 'DB machine host', value: '<code id="mysqlDbMachineHostValue">' + escapeHtml(details.dbMachineHost || 'n/a') + '</code>', html: true },
+        { label: 'DB machine phpMyAdmin', value: details.phpMyAdminUrl ? '<a class="btn ghost" href="' + escapeHtml(details.phpMyAdminUrl) + '" target="_blank" rel="noreferrer">Open target</a>' : 'n/a', html: Boolean(details.phpMyAdminUrl) },
         { label: 'DB machine root user', value: details.dbMachineRootUser || 'n/a' },
         { label: 'DB machine root password', value: details.dbMachineRootPassword || 'n/a' },
         { label: 'Database host', value: '<code id="mysqlDatabaseHostValue">' + escapeHtml(details.db?.DB_HOST || details.db?.MYSQL_HOST || details.db?.POSTGRES_HOST || 'n/a') + '</code>', html: true },
@@ -7650,6 +7944,8 @@ function renderPage() {
         id: CUSTOM_DB_MACHINE_ID,
         name: mysqlCustomName ? mysqlCustomName.value.trim() : '',
         host: mysqlCustomHost ? mysqlCustomHost.value.trim() : '',
+        originHost: mysqlCustomOriginHost ? mysqlCustomOriginHost.value.trim() : '',
+        phpMyAdminUrl: mysqlCustomPhpMyAdminUrl ? mysqlCustomPhpMyAdminUrl.value.trim() : '',
         port: mysqlCustomPort ? mysqlCustomPort.value.trim() : '',
         rootUser: mysqlCustomRootUser ? mysqlCustomRootUser.value.trim() : '',
         rootPassword: mysqlCustomRootPassword ? mysqlCustomRootPassword.value : '',
@@ -7668,6 +7964,8 @@ function renderPage() {
           machineId: CUSTOM_DB_MACHINE_ID,
           customMachine,
           customMachineHost: customMachine ? customMachine.host : '',
+          customMachineOriginHost: customMachine ? customMachine.originHost : '',
+          customMachinePhpMyAdminUrl: customMachine ? customMachine.phpMyAdminUrl : '',
           customMachineName: customMachine ? customMachine.name : '',
           customMachinePort: customMachine ? customMachine.port : '',
           customMachineRootUser: customMachine ? customMachine.rootUser : '',
@@ -8709,6 +9007,20 @@ async function handleRequest(req, res) {
       return;
     }
 
+    if (req.method === 'GET' && routePath === '/phpmyadmin') {
+      const ref = String(url.searchParams.get('ref') || '').trim();
+      if (!ref) {
+        throw new Error('Project ref is required');
+      }
+      touchProjectMeta(ref);
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(renderProjectPhpMyAdminPage(ref, req.headers.host || ''));
+      return;
+    }
+
     if (req.method === 'GET' && routePath === '/proxy') {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
@@ -9351,6 +9663,7 @@ async function handleRequest(req, res) {
         ? describeDbMachine(projectMachine)
         : (projectMachineId === CUSTOM_DB_MACHINE_ID ? (meta.DB_MACHINE_NAME || 'Custom / manual DB machine') : projectMachineId);
       const projectMachineHost = projectMachine?.originHost || projectMachine?.host || 'n/a';
+      const projectPhpMyAdminUrl = resolvePhpMyAdminBaseUrl(projectMachine, req.headers.host || '');
       const projectMachineRootUser = projectMachine?.rootUser || 'root';
       const projectMachineRootPassword = projectMachine?.rootPassword || '';
       const projectMachineNotes = projectMachine?.notes || '';
@@ -9369,6 +9682,7 @@ async function handleRequest(req, res) {
           dbMachineId: projectMachineContext.isCustom && projectMachine ? CUSTOM_DB_MACHINE_ID : projectMachineId,
           dbMachineLabel: projectMachineLabel,
           dbMachineHost: projectMachineHost,
+          phpMyAdminUrl: projectPhpMyAdminUrl,
           dbMachineRootUser: projectMachineRootUser,
           dbMachineRootPassword: projectMachineRootPassword,
           dbMachineNotes: projectMachineNotes,
@@ -9389,6 +9703,8 @@ async function handleRequest(req, res) {
           id: String(customMachineInput.id || CUSTOM_DB_MACHINE_ID).trim() || CUSTOM_DB_MACHINE_ID,
           name: String(customMachineInput.name || body.customMachineName || '').trim(),
           host: String(customMachineInput.host || body.customMachineHost || '').trim(),
+          originHost: String(customMachineInput.originHost || body.customMachineOriginHost || '').trim(),
+          phpMyAdminUrl: String(customMachineInput.phpMyAdminUrl || body.customMachinePhpMyAdminUrl || '').trim(),
           port: String(customMachineInput.port || body.customMachinePort || '').trim(),
           rootUser: String(customMachineInput.rootUser || body.customMachineRootUser || '').trim(),
           rootPassword: String(customMachineInput.rootPassword || body.customMachineRootPassword || ''),
@@ -9404,6 +9720,8 @@ async function handleRequest(req, res) {
             id: CUSTOM_DB_MACHINE_ID,
             name: body.customMachineName || '',
             host: body.customMachineHost || '',
+            originHost: body.customMachineOriginHost || '',
+            phpMyAdminUrl: body.customMachinePhpMyAdminUrl || '',
             port: body.customMachinePort || '',
             rootUser: body.customMachineRootUser || '',
             rootPassword: body.customMachineRootPassword || '',
@@ -9416,6 +9734,8 @@ async function handleRequest(req, res) {
             '--machine', CUSTOM_DB_MACHINE_ID,
             '--machine-name', normalizedCustomMachine.name,
             '--machine-host', normalizedCustomMachine.host,
+            '--machine-origin-host', normalizedCustomMachine.originHost,
+            '--machine-phpmyadmin-url', normalizedCustomMachine.phpMyAdminUrl,
             '--machine-port', normalizedCustomMachine.port,
             '--machine-root-user', normalizedCustomMachine.rootUser,
             '--machine-root-password', normalizedCustomMachine.rootPassword,
@@ -9447,6 +9767,7 @@ async function handleRequest(req, res) {
           dbMachineId: refreshedMachineContext.isCustom && refreshedMachine ? CUSTOM_DB_MACHINE_ID : (refreshedMeta.DB_MACHINE_ID || projectMachineId || LOCAL_DB_MACHINE_ID),
           dbMachineLabel: refreshedMachine ? describeDbMachine(refreshedMachine) : (refreshedMeta.DB_MACHINE_ID || projectMachineId || LOCAL_DB_MACHINE_ID),
           dbMachineHost: refreshedMachine?.originHost || refreshedMachine?.host || 'n/a',
+          phpMyAdminUrl: resolvePhpMyAdminBaseUrl(refreshedMachine, req.headers.host || ''),
           dbMachineRootUser: refreshedMachine?.rootUser || 'root',
           dbMachineRootPassword: refreshedMachine?.rootPassword || '',
           dbMachineNotes: refreshedMachine?.notes || '',

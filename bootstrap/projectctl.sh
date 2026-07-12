@@ -57,7 +57,7 @@ Usage:
   projectctl status owner/repo
   projectctl script [--pm2] [--dir path] owner/repo package-script
   projectctl password [--password secret|--clear] owner/repo
-  projectctl mysql [--move-data] [--db-name name] [--db-user user] [--db-password password] [--machine id] [--machine-name name] [--machine-host host] [--machine-port port] [--machine-root-user user] [--machine-root-password password] [--machine-notes notes] [--ips ip1,ip2] owner/repo
+  projectctl mysql [--move-data] [--db-name name] [--db-user user] [--db-password password] [--machine id] [--machine-name name] [--machine-host host] [--machine-origin-host host] [--machine-phpmyadmin-url url] [--machine-port port] [--machine-root-user user] [--machine-root-password password] [--machine-notes notes] [--ips ip1,ip2] owner/repo
   projectctl ssh [--password secret|--generate] owner/repo
   projectctl uninstall [--preview] [--keep-db|--drop-db] owner/repo
   projectctl env-cleanup [--max-bytes bytes] [--keep-latest] [--dry-run] owner/repo
@@ -439,6 +439,8 @@ normalize_db_identifier() {
 project_custom_db_machine_details() {
   local machine_name=""
   local machine_host=""
+  local machine_origin_host=""
+  local machine_phpmyadmin_url=""
   local machine_root_user=""
   local machine_root_password=""
   local machine_port=""
@@ -446,6 +448,8 @@ project_custom_db_machine_details() {
 
   machine_name="$(project_db_value_exact DB_MACHINE_NAME)"
   machine_host="$(project_db_value_exact DB_MACHINE_HOST DB_HOST MYSQL_HOST POSTGRES_HOST)"
+  machine_origin_host="$(project_db_value_exact DB_MACHINE_ORIGIN_HOST)"
+  machine_phpmyadmin_url="$(project_db_value_exact DB_MACHINE_PHPMYADMIN_URL)"
   machine_root_user="$(project_db_value_exact DB_MACHINE_ROOT_USER)"
   machine_root_password="$(project_db_value_exact DB_MACHINE_ROOT_PASSWORD)"
   machine_port="$(project_db_value_exact DB_MACHINE_PORT DB_PORT MYSQL_PORT POSTGRES_PORT)"
@@ -456,9 +460,11 @@ project_custom_db_machine_details() {
   [[ -n "${machine_root_user}" ]] || machine_root_user="root"
   [[ -n "${machine_port}" ]] || machine_port="3306"
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${machine_name}" \
     "${machine_host}" \
+    "${machine_origin_host}" \
+    "${machine_phpmyadmin_url}" \
     "${machine_root_user}" \
     "${machine_root_password}" \
     "${machine_port}" \
@@ -823,7 +829,7 @@ sync_duplicate_project_from_source() {
   write_meta "${meta}"
   chmod 0644 "${meta}"
   if [[ "${clone_db}" == "yes" || "${sync_env_base}" == "yes" ]]; then
-    sync_project_db_machine_env "${target_machine_id}" "${target_machine_host}" "${target_machine_port}" "${target_machine_root_user}" "${target_machine_root_password}" "${target_machine_name}" "${target_machine_notes}"
+    sync_project_db_machine_env "${target_machine_id}" "${target_machine_host}" "${target_machine_port}" "${target_machine_root_user}" "${target_machine_root_password}" "${target_machine_name}" "${target_machine_notes}" "" ""
   fi
   apply_duplicate_project_overrides "${source_dir}" "${APP_DIR}" "${APP_DOMAIN}" "${db_mode}" "${db_name}" "${db_user}" "${db_password}" "${db_type}" "${APP_HTTPS}" "${clone_db}"
 
@@ -1519,6 +1525,8 @@ local_default = {
     "rootPassword": "",
     "port": "3306",
     "notes": "Current VPS local DB on this VPS",
+    "originHost": "",
+    "phpMyAdminUrl": "",
 }
 
 machines = []
@@ -1551,6 +1559,8 @@ normalized = {
     "rootPassword": str(record.get("rootPassword", record.get("password", ""))),
     "port": str(record.get("port", "3306") or "3306"),
     "notes": str(record.get("notes", "")),
+    "originHost": str(record.get("originHost", record.get("remoteHost", ""))),
+    "phpMyAdminUrl": str(record.get("phpMyAdminUrl", record.get("phpmyadminUrl", ""))),
 }
 
 if field:
@@ -1564,6 +1574,8 @@ else:
         normalized["rootPassword"],
         normalized["port"],
         normalized["notes"],
+        normalized["originHost"],
+        normalized["phpMyAdminUrl"],
     ]:
         print(item)
 PY
@@ -1577,13 +1589,15 @@ write_db_machine_record() {
   local root_password="$5"
   local port="$6"
   local notes="$7"
+  local origin_host="${8:-}"
+  local phpmyadmin_url="${9:-}"
 
-  python3 - "${DB_MACHINES_FILE}" "${machine_id}" "${name}" "${host}" "${root_user}" "${root_password}" "${port}" "${notes}" <<'PY'
+  python3 - "${DB_MACHINES_FILE}" "${machine_id}" "${name}" "${host}" "${root_user}" "${root_password}" "${port}" "${notes}" "${origin_host}" "${phpmyadmin_url}" <<'PY'
 import json
 import os
 import sys
 
-path, machine_id, name, host, root_user, root_password, port, notes = sys.argv[1:9]
+path, machine_id, name, host, root_user, root_password, port, notes, origin_host, phpmyadmin_url = sys.argv[1:11]
 entry = {
     "id": machine_id,
     "name": name,
@@ -1592,6 +1606,8 @@ entry = {
     "rootPassword": root_password,
     "port": port or "3306",
     "notes": notes,
+    "originHost": origin_host,
+    "phpMyAdminUrl": phpmyadmin_url,
 }
 
 machines = []
@@ -1623,6 +1639,8 @@ if not any(str(item.get("id", "")) == "local-current" for item in machines):
         "rootPassword": "",
         "port": "3306",
         "notes": "Current VPS local DB on this VPS",
+        "originHost": "",
+        "phpMyAdminUrl": "",
     })
 
 machines.sort(key=lambda item: str(item.get("name", "")))
@@ -1691,16 +1709,20 @@ resolve_db_machine() {
     DB_MACHINE_ROOT_PASSWORD="${machine_fields[4]:-}"
     DB_MACHINE_PORT="${machine_fields[5]:-3306}"
     DB_MACHINE_NOTES="${machine_fields[6]:-}"
+    DB_MACHINE_ORIGIN_HOST="${machine_fields[7]:-}"
+    DB_MACHINE_PHPMYADMIN_URL="${machine_fields[8]:-}"
   else
     if machine_output="$(project_custom_db_machine_details 2>/dev/null)"; then
       IFS=$'\t' read -r -a machine_fields <<< "${machine_output}"
       DB_MACHINE_ID="${machine_id:-custom}"
       DB_MACHINE_NAME="${machine_fields[0]:-custom}"
       DB_MACHINE_HOST="${machine_fields[1]:-}"
-      DB_MACHINE_ROOT_USER="${machine_fields[2]:-root}"
-      DB_MACHINE_ROOT_PASSWORD="${machine_fields[3]:-}"
-      DB_MACHINE_PORT="${machine_fields[4]:-3306}"
-      DB_MACHINE_NOTES="${machine_fields[5]:-}"
+      DB_MACHINE_ORIGIN_HOST="${machine_fields[2]:-}"
+      DB_MACHINE_PHPMYADMIN_URL="${machine_fields[3]:-}"
+      DB_MACHINE_ROOT_USER="${machine_fields[4]:-root}"
+      DB_MACHINE_ROOT_PASSWORD="${machine_fields[5]:-}"
+      DB_MACHINE_PORT="${machine_fields[6]:-3306}"
+      DB_MACHINE_NOTES="${machine_fields[7]:-}"
     else
       die "Unknown DB machine: ${machine_id}"
     fi
@@ -1717,6 +1739,8 @@ resolve_db_machine() {
     DB_MACHINE_ROOT_PASSWORD="${machine_fields[4]:-}"
     DB_MACHINE_PORT="${machine_fields[5]:-3306}"
     DB_MACHINE_NOTES="${machine_fields[6]:-}"
+    DB_MACHINE_ORIGIN_HOST="${machine_fields[7]:-}"
+    DB_MACHINE_PHPMYADMIN_URL="${machine_fields[8]:-}"
   fi
 }
 
@@ -2136,6 +2160,8 @@ sync_project_db_machine_env() {
   local machine_root_password="${5:-}"
   local machine_name="${6:-}"
   local machine_notes="${7:-}"
+  local machine_origin_host="${8:-}"
+  local machine_phpmyadmin_url="${9:-}"
   local env_file="${APP_DIR}/.env.machine"
   local db_type=""
   local project_env=""
@@ -2154,6 +2180,8 @@ sync_project_db_machine_env() {
     update_meta_value "${env_file}" "DB_MACHINE_ROOT_USER" "${machine_root_user}"
     update_meta_value "${env_file}" "DB_MACHINE_ROOT_PASSWORD" "${machine_root_password}"
     update_meta_value "${env_file}" "DB_MACHINE_NOTES" "${machine_notes}"
+    update_meta_value "${env_file}" "DB_MACHINE_ORIGIN_HOST" "${machine_origin_host}"
+    update_meta_value "${env_file}" "DB_MACHINE_PHPMYADMIN_URL" "${machine_phpmyadmin_url}"
     update_meta_value "${env_file}" "DB_HOST" "${machine_host}"
     update_meta_value "${env_file}" "DB_PORT" "${machine_port}"
     update_meta_value "${env_file}" "MYSQL_HOST" "${machine_host}"
@@ -2165,6 +2193,8 @@ sync_project_db_machine_env() {
     [[ -n "${machine_root_user}" ]] && update_meta_value "${env_file}" "DB_MACHINE_ROOT_USER" "${machine_root_user}"
     [[ -n "${machine_root_password}" ]] && update_meta_value "${env_file}" "DB_MACHINE_ROOT_PASSWORD" "${machine_root_password}"
     [[ -n "${machine_notes}" ]] && update_meta_value "${env_file}" "DB_MACHINE_NOTES" "${machine_notes}"
+    [[ -n "${machine_origin_host}" ]] && update_meta_value "${env_file}" "DB_MACHINE_ORIGIN_HOST" "${machine_origin_host}"
+    [[ -n "${machine_phpmyadmin_url}" ]] && update_meta_value "${env_file}" "DB_MACHINE_PHPMYADMIN_URL" "${machine_phpmyadmin_url}"
     [[ -n "${machine_host}" ]] && update_meta_value "${env_file}" "DB_HOST" "${machine_host}"
     [[ -n "${machine_port}" ]] && update_meta_value "${env_file}" "DB_PORT" "${machine_port}"
     [[ -n "${machine_host}" ]] && update_meta_value "${env_file}" "MYSQL_HOST" "${machine_host}"
@@ -2189,6 +2219,8 @@ sync_project_db_machine_env() {
       update_meta_value "${project_env}" "DB_MACHINE_HOST" "${machine_host}"
       update_meta_value "${project_env}" "DB_MACHINE_PORT" "${machine_port}"
       update_meta_value "${project_env}" "DB_MACHINE_NOTES" "${machine_notes}"
+      update_meta_value "${project_env}" "DB_MACHINE_ORIGIN_HOST" "${machine_origin_host}"
+      update_meta_value "${project_env}" "DB_MACHINE_PHPMYADMIN_URL" "${machine_phpmyadmin_url}"
       update_meta_value "${project_env}" "DB_HOST" "${machine_host}"
       update_meta_value "${project_env}" "DB_PORT" "${machine_port}"
       update_meta_value "${project_env}" "MYSQL_HOST" "${machine_host}"
@@ -2200,6 +2232,8 @@ sync_project_db_machine_env() {
       [[ -n "${machine_host}" ]] && update_meta_value "${project_env}" "DB_MACHINE_HOST" "${machine_host}"
       [[ -n "${machine_port}" ]] && update_meta_value "${project_env}" "DB_MACHINE_PORT" "${machine_port}"
       [[ -n "${machine_notes}" ]] && update_meta_value "${project_env}" "DB_MACHINE_NOTES" "${machine_notes}"
+      [[ -n "${machine_origin_host}" ]] && update_meta_value "${project_env}" "DB_MACHINE_ORIGIN_HOST" "${machine_origin_host}"
+      [[ -n "${machine_phpmyadmin_url}" ]] && update_meta_value "${project_env}" "DB_MACHINE_PHPMYADMIN_URL" "${machine_phpmyadmin_url}"
       [[ -n "${machine_host}" ]] && update_meta_value "${project_env}" "DB_HOST" "${machine_host}"
       [[ -n "${machine_port}" ]] && update_meta_value "${project_env}" "DB_PORT" "${machine_port}"
       [[ -n "${machine_host}" ]] && update_meta_value "${project_env}" "MYSQL_HOST" "${machine_host}"
@@ -4457,12 +4491,12 @@ do_install() {
     APP_PROXY_ROUTES_JSON="$(project_vps_install_proxy_routes_json "${APP_DIR}")"
     write_meta "${meta}"
     chmod 0644 "${meta}"
-    sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
+    sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}" "${DB_MACHINE_ORIGIN_HOST:-}" "${DB_MACHINE_PHPMYADMIN_URL:-}"
   else
     APP_PROXY_ROUTES_JSON="$(project_vps_install_proxy_routes_json "${APP_DIR}")"
     write_meta "${meta}"
     chmod 0644 "${meta}"
-    sync_project_db_machine_env "custom" "" "" "" "" "Custom / manual DB machine" "Configure DB host and credentials in MySQL Access after install"
+    sync_project_db_machine_env "custom" "" "" "" "" "Custom / manual DB machine" "Configure DB host and credentials in MySQL Access after install" "" ""
   fi
   sync_project_vpn_profile_env "${VPN_PROFILE}" "Per-project VPN / egress profile"
 
@@ -4580,13 +4614,13 @@ do_update() {
   if [[ "${DB_MACHINE_ID}" == "custom" ]]; then
     if project_custom_db_machine_details >/dev/null 2>&1; then
       resolve_db_machine "${DB_MACHINE_ID}"
-      sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
+      sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}" "${DB_MACHINE_ORIGIN_HOST:-}" "${DB_MACHINE_PHPMYADMIN_URL:-}"
     else
-      sync_project_db_machine_env "custom" "" "" "" "" "Custom / manual DB machine" "Configure DB host and credentials in MySQL Access"
+      sync_project_db_machine_env "custom" "" "" "" "" "Custom / manual DB machine" "Configure DB host and credentials in MySQL Access" "" ""
     fi
   else
     resolve_db_machine "${DB_MACHINE_ID:-${LOCAL_DB_MACHINE_ID}}"
-    sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
+    sync_project_db_machine_env "${DB_MACHINE_ID}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}" "${DB_MACHINE_ORIGIN_HOST:-}" "${DB_MACHINE_PHPMYADMIN_URL:-}"
   fi
   vpn_profile="$(normalize_vpn_profile_value "${vpn_profile}")"
   sync_project_vpn_profile_env "${vpn_profile}" "Per-project VPN / egress profile"
@@ -5031,14 +5065,16 @@ do_mysql() {
   local machine_id="${3:-__unset__}"
   local machine_name="${4-__unset__}"
   local machine_host="${5-__unset__}"
-  local machine_port="${6-__unset__}"
-  local machine_root_user="${7-__unset__}"
-  local machine_root_password="${8-__unset__}"
-  local machine_notes="${9-__unset__}"
-  local db_name_override="${10:-__unset__}"
-  local db_user_override="${11:-__unset__}"
-  local db_password_override="${12:-__unset__}"
-  local move_data="${13:-no}"
+  local machine_origin_host="${6-__unset__}"
+  local machine_phpmyadmin_url="${7-__unset__}"
+  local machine_port="${8-__unset__}"
+  local machine_root_user="${9-__unset__}"
+  local machine_root_password="${10-__unset__}"
+  local machine_notes="${11-__unset__}"
+  local db_name_override="${12:-__unset__}"
+  local db_user_override="${13:-__unset__}"
+  local db_password_override="${14:-__unset__}"
+  local move_data="${15:-no}"
   local slug
   local meta
   local old_ips
@@ -5056,6 +5092,8 @@ do_mysql() {
   local source_machine_root_user
   local source_machine_root_password
   local source_machine_notes
+  local source_machine_origin_host
+  local source_machine_phpmyadmin_url
   local active_machine_id
   local active_machine_host
   local active_machine_port
@@ -5063,11 +5101,15 @@ do_mysql() {
   local active_machine_root_user
   local active_machine_root_password
   local active_machine_notes
+  local active_machine_origin_host
+  local active_machine_phpmyadmin_url
   local current_machine_id
   local mutate="no"
   local custom_requested="no"
   local custom_machine_name=""
   local custom_machine_host=""
+  local custom_machine_origin_host=""
+  local custom_machine_phpmyadmin_url=""
   local custom_machine_port=""
   local custom_machine_root_user=""
   local custom_machine_root_password=""
@@ -5084,6 +5126,8 @@ do_mysql() {
   source_machine_root_user="${DB_MACHINE_ROOT_USER}"
   source_machine_root_password="${DB_MACHINE_ROOT_PASSWORD}"
   source_machine_notes="${DB_MACHINE_NOTES}"
+  source_machine_origin_host="${DB_MACHINE_ORIGIN_HOST:-}"
+  source_machine_phpmyadmin_url="${DB_MACHINE_PHPMYADMIN_URL:-}"
   custom_db_name="$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)"
   custom_db_user="$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)"
   custom_db_password="$(project_db_value DB_PASSWORD MYSQL_PASSWORD POSTGRES_PASSWORD)"
@@ -5097,7 +5141,7 @@ do_mysql() {
     custom_db_password="${db_password_override}"
   fi
 
-  if [[ "${machine_name}" != "__unset__" || "${machine_host}" != "__unset__" || "${machine_port}" != "__unset__" || "${machine_root_user}" != "__unset__" || "${machine_root_password}" != "__unset__" || "${machine_notes}" != "__unset__" ]]; then
+  if [[ "${machine_name}" != "__unset__" || "${machine_host}" != "__unset__" || "${machine_origin_host}" != "__unset__" || "${machine_phpmyadmin_url}" != "__unset__" || "${machine_port}" != "__unset__" || "${machine_root_user}" != "__unset__" || "${machine_root_password}" != "__unset__" || "${machine_notes}" != "__unset__" ]]; then
     custom_requested="yes"
   fi
 
@@ -5122,12 +5166,16 @@ do_mysql() {
     mutate="yes"
     custom_machine_name="${machine_name}"
     custom_machine_host="${machine_host}"
+    custom_machine_origin_host="${machine_origin_host}"
+    custom_machine_phpmyadmin_url="${machine_phpmyadmin_url}"
     custom_machine_port="${machine_port}"
     custom_machine_root_user="${machine_root_user}"
     custom_machine_root_password="${machine_root_password}"
     custom_machine_notes="${machine_notes}"
     [[ "${custom_machine_name}" != "__unset__" ]] || custom_machine_name="$(project_db_value DB_MACHINE_NAME)"
     [[ "${custom_machine_host}" != "__unset__" ]] || custom_machine_host="$(project_db_value DB_MACHINE_HOST DB_HOST MYSQL_HOST POSTGRES_HOST)"
+    [[ "${custom_machine_origin_host}" != "__unset__" ]] || custom_machine_origin_host="$(project_db_value DB_MACHINE_ORIGIN_HOST)"
+    [[ "${custom_machine_phpmyadmin_url}" != "__unset__" ]] || custom_machine_phpmyadmin_url="$(project_db_value DB_MACHINE_PHPMYADMIN_URL)"
     [[ "${custom_machine_port}" != "__unset__" ]] || custom_machine_port="$(project_db_value DB_MACHINE_PORT DB_PORT MYSQL_PORT POSTGRES_PORT)"
     [[ "${custom_machine_root_user}" != "__unset__" ]] || custom_machine_root_user="$(project_db_value DB_MACHINE_ROOT_USER)"
     [[ "${custom_machine_root_password}" != "__unset__" ]] || custom_machine_root_password="$(project_db_value DB_MACHINE_ROOT_PASSWORD)"
@@ -5136,7 +5184,7 @@ do_mysql() {
     [[ -n "${custom_machine_host}" ]] || die "Missing custom DB machine host"
     [[ -n "${custom_machine_port}" ]] || custom_machine_port="3306"
     [[ -n "${custom_machine_root_user}" ]] || custom_machine_root_user="root"
-    sync_project_db_machine_env "${active_machine_id}" "${custom_machine_host}" "${custom_machine_port}" "${custom_machine_root_user}" "${custom_machine_root_password}" "${custom_machine_name}" "${custom_machine_notes}"
+    sync_project_db_machine_env "${active_machine_id}" "${custom_machine_host}" "${custom_machine_port}" "${custom_machine_root_user}" "${custom_machine_root_password}" "${custom_machine_name}" "${custom_machine_notes}" "${custom_machine_origin_host}" "${custom_machine_phpmyadmin_url}"
     sync_project_db_identity_env "${custom_db_name}" "${custom_db_user}" "${custom_db_password}"
   fi
 
@@ -5148,6 +5196,8 @@ do_mysql() {
     active_machine_root_user="${DB_MACHINE_ROOT_USER}"
     active_machine_root_password="${DB_MACHINE_ROOT_PASSWORD}"
     active_machine_notes="${DB_MACHINE_NOTES}"
+    active_machine_origin_host="${DB_MACHINE_ORIGIN_HOST:-}"
+    active_machine_phpmyadmin_url="${DB_MACHINE_PHPMYADMIN_URL:-}"
   fi
 
   if [[ "${mutate}" != "yes" ]]; then
@@ -5161,6 +5211,8 @@ do_mysql() {
     active_machine_root_user="${DB_MACHINE_ROOT_USER}"
     active_machine_root_password="${DB_MACHINE_ROOT_PASSWORD}"
     active_machine_notes="${DB_MACHINE_NOTES}"
+    active_machine_origin_host="${DB_MACHINE_ORIGIN_HOST:-}"
+    active_machine_phpmyadmin_url="${DB_MACHINE_PHPMYADMIN_URL:-}"
     printf 'repo: %s\npath: %s\ndb: %s\nuser: %s\npassword: %s\nallowed_ips: %s\n' \
       "${REPO_REF}" "${APP_DIR}" \
       "${db_name}" \
@@ -5170,6 +5222,8 @@ do_mysql() {
     printf 'db_machine: %s\n' "${active_machine_name}"
     printf 'db_machine_id: %s\n' "${active_machine_id}"
     printf 'db_machine_host: %s\n' "${active_machine_host}"
+    printf 'db_machine_origin_host: %s\n' "${active_machine_origin_host}"
+    printf 'db_machine_phpmyadmin_url: %s\n' "${active_machine_phpmyadmin_url}"
     printf 'db_machine_port: %s\n' "${active_machine_port}"
     printf 'db_machine_root_user: %s\n' "${active_machine_root_user}"
     printf 'db_machine_root_password: %s\n' "${active_machine_root_password}"
@@ -5228,7 +5282,7 @@ do_mysql() {
 
   if [[ "${custom_requested}" != "yes" ]]; then
     resolve_db_machine "${active_machine_id}"
-    sync_project_db_machine_env "${active_machine_id}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}"
+    sync_project_db_machine_env "${active_machine_id}" "${DB_MACHINE_HOST}" "${DB_MACHINE_PORT}" "${DB_MACHINE_ROOT_USER}" "${DB_MACHINE_ROOT_PASSWORD}" "${DB_MACHINE_NAME}" "${DB_MACHINE_NOTES}" "${DB_MACHINE_ORIGIN_HOST:-}" "${DB_MACHINE_PHPMYADMIN_URL:-}"
   else
     resolve_db_machine "${active_machine_id}"
   fi
@@ -5733,6 +5787,8 @@ main() {
       local machine_id="__unset__"
       local machine_name="__unset__"
       local machine_host="__unset__"
+      local machine_origin_host="__unset__"
+      local machine_phpmyadmin_url="__unset__"
       local machine_port="__unset__"
       local machine_root_user="__unset__"
       local machine_root_password="__unset__"
@@ -5772,6 +5828,14 @@ main() {
             machine_host="${2:-}"
             shift 2
             ;;
+          --machine-origin-host)
+            machine_origin_host="${2:-}"
+            shift 2
+            ;;
+          --machine-phpmyadmin-url)
+            machine_phpmyadmin_url="${2:-}"
+            shift 2
+            ;;
           --machine-port)
             machine_port="${2:-}"
             shift 2
@@ -5798,7 +5862,7 @@ main() {
         esac
       done
       [[ $# -eq 1 ]] || { usage; exit 1; }
-      do_mysql "$1" "${ips}" "${machine_id}" "${machine_name}" "${machine_host}" "${machine_port}" "${machine_root_user}" "${machine_root_password}" "${machine_notes}" "${db_name}" "${db_user}" "${db_password}" "${move_data}"
+      do_mysql "$1" "${ips}" "${machine_id}" "${machine_name}" "${machine_host}" "${machine_origin_host}" "${machine_phpmyadmin_url}" "${machine_port}" "${machine_root_user}" "${machine_root_password}" "${machine_notes}" "${db_name}" "${db_user}" "${db_password}" "${move_data}"
       ;;
     ssh)
       local password=""
