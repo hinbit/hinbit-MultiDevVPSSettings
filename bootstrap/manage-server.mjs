@@ -6336,7 +6336,7 @@ function renderPage() {
   <div id="progressPanel" class="scripts-panel modal-panel" hidden>
     <header>
       <div>
-        <h2 id="progressTitle">Pull Progress</h2>
+        <h2 id="progressTitle">Run Log</h2>
         <div id="progressSubtitle" class="muted"></div>
       </div>
       <button id="closeProgressBtn" class="ghost" type="button">Close</button>
@@ -7466,7 +7466,7 @@ function renderPage() {
       setModalLocked(false);
     }
 
-    function openProgressPanel(ref, subtitle, title = 'Pull Progress') {
+    function openProgressPanel(ref, subtitle, title = 'Run Log') {
       closeScriptsModal();
       closeDbPanel();
       closeEnvPanel();
@@ -7794,7 +7794,7 @@ function renderPage() {
           : mode === 'merge-env2'
             ? 'Pulling ' + decodeURIComponent(ref) + ' with merge*2'
             : 'Pulling ' + decodeURIComponent(ref),
-        'Pull Progress',
+        'Pull Log',
       );
       try {
         await consumeProgressStream(API + '/projects/' + ref + '/update-stream?mode=' + encodeURIComponent(mode), progressAbort.signal);
@@ -8114,7 +8114,7 @@ function renderPage() {
           openProgressPanel(
             decodeURIComponent(ref),
             'Preparing pull...',
-            'Pull Progress',
+            'Pull Log',
           );
           progressBody.textContent = '[projectctl] preparing pull\\n';
           const preflight = await loadPullPreflight(ref);
@@ -8135,6 +8135,11 @@ function renderPage() {
           showMessage(progressFlash, mode === 'force-clean'
             ? 'Deleted unresolved files, repulled, built all, and restarted PM2 for ' + decodeURIComponent(ref)
             : 'Pull completed, build all ran, and PM2 restarted for ' + decodeURIComponent(ref));
+          try {
+            await refresh();
+          } catch (refreshError) {
+            showMessage(progressFlash, 'Pull finished, but refreshing the project list failed: ' + (refreshError.message || String(refreshError)), false);
+          }
           if (mode === 'merge-env2') {
             await loadEnv(ref, { mergeMode: true });
             showMessage(envFlash, 'Paste extra .env keys in the overlay and click Merge overlay & save.');
