@@ -8793,7 +8793,7 @@ function renderPage() {
           result.project ? ('Project: ' + result.project) : '',
           result.port ? ('Port: ' + result.port) : '',
           result.pm2Name ? ('PM2: ' + result.pm2Name) : '',
-        ].filter(Boolean).join('\n');
+        ].filter(Boolean).join('\\n');
         showMessage(installResult, installSummary);
         renderInstallDbScripts(result.repo || payload.repo, result.dbScripts || [], result.project || result.repo || payload.repo);
         for (const id of ['repo', 'domain', 'branch', 'pm2Name', 'port', 'entrypoint']) {
@@ -8811,7 +8811,7 @@ function renderPage() {
         } catch (refreshError) {
           showMessage(
             installResult,
-            installSummary + '\nWarning: project installed, but the project list refresh failed: ' + (refreshError.message || String(refreshError)),
+            installSummary + '\\nWarning: project installed, but the project list refresh failed: ' + (refreshError.message || String(refreshError)),
             false,
           );
         }
