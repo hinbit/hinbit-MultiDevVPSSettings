@@ -2766,6 +2766,18 @@ run_project_app_sync() {
   fi
 }
 
+run_project_app_sync_soft() {
+  local label="${1:-${REPO_REF:-project}}"
+  if [[ ! -x /usr/local/bin/app-sync.sh ]]; then
+    return 0
+  fi
+  if APP_SYNC_SKIP_ACME=1 /usr/local/bin/app-sync.sh; then
+    return 0
+  fi
+  printf '[projectctl] Warning: app sync failed while preparing %s; deferring nginx/domain verification until after the app is built and PM2 is online\n' "${label}" >&2
+  return 1
+}
+
 load_meta() {
   local meta="$1"
   local line=""
@@ -3821,13 +3833,29 @@ prepare_project_domain_mapping() {
   local domain="${2:-${APP_DOMAIN:-}}"
   local port="${3:-${APP_PORT:-}}"
   local https="${4:-${APP_HTTPS:-yes}}"
+  local sync_ok="yes"
 
   [[ -n "${domain}" ]] || return 0
   [[ -n "${port}" ]] || return 0
 
-  sync_app_map
-  verify_project_mapping "${label}" "${domain}" "${port}" "${https}"
-  verify_https_vhost "${domain}" "${https}"
+  if [[ -n "${APP_DOMAIN:-}" ]]; then
+    ensure_auth_file_accessible "${APP_DOMAIN}"
+    app_map_upsert "${APP_DOMAIN}" "${APP_PORT}" "${APP_TYPE:-project}" "${APP_HTTPS:-yes}"
+    while IFS=$'\t' read -r extra_domain extra_port extra_type extra_https; do
+      [[ -n "${extra_domain:-}" && -n "${extra_port:-}" ]] || continue
+      app_map_upsert "${extra_domain}" "${extra_port}" "${extra_type:-${APP_TYPE:-project}}" "${extra_https:-${APP_HTTPS:-yes}}"
+    done < <(project_domain_binding_rows)
+    if ! run_project_app_sync_soft "${label}"; then
+      sync_ok="no"
+    fi
+  fi
+
+  if [[ "${sync_ok}" == "yes" ]]; then
+    verify_project_mapping "${label}" "${domain}" "${port}" "${https}"
+    verify_https_vhost "${domain}" "${https}"
+  else
+    printf '[projectctl] %s mapping was written to %s, but nginx verification is deferred until the final install/update pass\n' "${label}" "${APP_MAP}" >&2
+  fi
 }
 
 app_map_port_for_domain() {
