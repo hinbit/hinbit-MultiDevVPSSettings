@@ -690,8 +690,12 @@ while IFS=, read -r domain port type https; do
       else
         echo "[WARN] TLS issuance failed for ${domain}; keeping HTTP only for now" >&2
       fi
-    else
+    elif [[ -s "/etc/letsencrypt/live/${domain}/fullchain.pem" && -s "/etc/letsencrypt/live/${domain}/privkey.pem" ]]; then
       cert_ready="yes"
+    else
+      # ACME skipped and no certificate on disk — HTTP only. Rendering an
+      # ssl_certificate for a missing file breaks `nginx -t` for every site.
+      echo "[WARN] no certificate on disk for ${domain}; serving HTTP only until one is issued" >&2
     fi
 
     if [[ "${cert_ready}" == "yes" ]]; then

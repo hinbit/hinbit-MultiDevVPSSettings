@@ -386,9 +386,15 @@ while IFS=, read -r domain port type https; do
       else
         echo "[WARN] TLS issuance failed for ${domain}; keeping HTTP only for now" >&2
       fi
-    else
+    elif [[ -s "/etc/letsencrypt/live/${domain}/fullchain.pem" && -s "/etc/letsencrypt/live/${domain}/privkey.pem" ]]; then
       cert_ready="yes"
       cert_source="letsencrypt"
+    else
+      # Reached when ACME is skipped (every projectctl-driven sync passes
+      # APP_SYNC_SKIP_ACME=1) and the domain has no certificate yet. Never
+      # render an ssl_certificate pointing at a file that is not on disk:
+      # nginx -t then fails for EVERY site on the box, not just this one.
+      echo "[WARN] no certificate on disk for ${domain}; serving HTTP only until one is issued" >&2
     fi
 
     if [[ "${cert_ready}" == "yes" ]]; then
