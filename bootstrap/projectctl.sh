@@ -1222,21 +1222,15 @@ project_db_schema_ready() {
   local db_type=""
   local machine_id=""
   local table_count="0"
-  local signature=""
 
   db_name="$(normalize_db_identifier "$(project_db_value DB_NAME DB_DATABASE MYSQL_DATABASE POSTGRES_DB)")"
   db_user="$(normalize_db_identifier "$(project_db_value DB_USER MYSQL_USER POSTGRES_USER)")"
   db_type="$(normalize_db_identifier "$(project_db_value DB_TYPE VITE_DB_TYPE)")"
   machine_id="$(project_db_machine_id)"
-  signature="$(project_db_bootstrap_signature)"
 
   [[ "${db_type,,}" == "mysql" ]] || return 1
   [[ -n "${db_name}" ]] || return 1
   [[ -n "${db_user}" ]] || return 1
-
-  if [[ "${DB_BOOTSTRAP_READY:-}" == "yes" && "${DB_BOOTSTRAP_SIGNATURE:-}" == "${signature}" ]]; then
-    return 0
-  fi
 
   resolve_db_machine "${machine_id}"
   table_count="$(mysql_exec_machine "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA=$(sql_quote "${db_name}")" 2>/dev/null || printf '0')"
@@ -2385,37 +2379,46 @@ merge_env_file_preserving_current_values() {
   fi
 
   python3 - "$current_file" "$new_file" "$tmp" <<'PY'
-import os
 import re
 import sys
 
 current_path, new_path, out_path = sys.argv[1:4]
-line_re = re.compile(r'^([ \t]*)([A-Za-z_][A-Za-z0-9_]*)[ \t]*=(.*)$')
+line_re = re.compile(r'^([ \t]*)(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*=(.*)$')
 
 def read_lines(path):
     with open(path, 'r', encoding='utf-8', errors='surrogateescape') as handle:
         return handle.read().splitlines(True)
 
+def extract_key(line):
+    match = line_re.match(line.rstrip('\n'))
+    if not match:
+        return None
+    return match.group(2)
+
 current_lines = read_lines(current_path)
 new_lines = read_lines(new_path)
 seen = set()
-out = []
+appended = []
+out = list(current_lines)
 
 for line in current_lines:
-    match = line_re.match(line)
-    if match:
-        seen.add(match.group(2))
-    out.append(line)
+    key = extract_key(line)
+    if key:
+        seen.add(key)
 
 for line in new_lines:
-    match = line_re.match(line)
-    if not match:
-        continue
-    key = match.group(2)
-    if key in seen:
+    key = extract_key(line)
+    if not key or key in seen:
         continue
     seen.add(key)
-    out.append(line)
+    appended.append(line if line.endswith('\n') else f'{line}\n')
+
+if appended:
+    if out and not out[-1].endswith('\n'):
+        out[-1] = out[-1] + '\n'
+    if out and out[-1].strip():
+        out.append('\n')
+    out.extend(appended)
 
 with open(out_path, 'w', encoding='utf-8', errors='surrogateescape') as handle:
     handle.writelines(out)
@@ -2575,6 +2578,7 @@ package_re = re.compile(r'^[A-Za-z0-9][A-Za-z0-9+._:-]*$')
 block_re = re.compile(r'```(?:vps-requirements|json)\s*(.*?)```', re.I | re.S)
 heading_re = re.compile(r'^(#{1,6})\s+(.*)$')
 bullet_re = re.compile(r'^[-*]\s+(.*)$')
+inline_packages_re = re.compile(r'^(?:apt(?:-packages?)?|system-packages?)\s*:\s*(.+)$', re.I)
 seen = set()
 packages = []
 
@@ -2633,6 +2637,27 @@ def parse_jsonish(text):
         return None
 
 
+def heading_is_apt_section(value):
+    value = (value or '').strip().lower()
+    if not value:
+        return False
+    return any(token in value for token in ('apt', 'apt-get', 'debian', 'ubuntu'))
+
+
+def parse_inline_packages(value):
+    value = (value or '').strip()
+    if not value:
+        return
+    if value.lower() in ('none', 'no', 'n/a', '[]'):
+        return
+    data = parse_jsonish(value)
+    if data is not None:
+        extract_packages(data)
+        return
+    for item in re.split(r'[\s,]+', value):
+        add_package(item)
+
+
 def parse_markdown(text):
     for match in block_re.finditer(text):
         content = match.group(1).strip()
@@ -2653,11 +2678,16 @@ def parse_markdown(text):
             current_heading = heading_match.group(2).strip().lower()
             continue
 
+        inline_match = inline_packages_re.match(line)
+        if inline_match:
+            parse_inline_packages(inline_match.group(1))
+            continue
+
         bullet_match = bullet_re.match(line)
         if not bullet_match:
             continue
 
-        if any(token in current_heading for token in ('apt', 'package', 'requirement', 'system')):
+        if heading_is_apt_section(current_heading):
             add_package(bullet_match.group(1).strip())
 
     data = parse_jsonish(text.strip())
@@ -3805,6 +3835,17 @@ sync_app_map() {
   fi
 }
 
+finalize_project_mapping() {
+  local label="${1:-${REPO_REF}}"
+  local domain="${2:-${APP_DOMAIN:-}}"
+  local port="${3:-${APP_PORT:-}}"
+  local https="${4:-${APP_HTTPS:-yes}}"
+
+  sync_app_map
+  verify_project_mapping "${label}" "${domain}" "${port}" "${https}"
+  verify_https_vhost "${domain}" "${https}"
+}
+
 verify_https_vhost() {
   local domain="${1:-}"
   local https="${2:-yes}"
@@ -4575,14 +4616,10 @@ do_install() {
   ensure_project_ssh_user "${SSH_UPLOAD_USER}" "${SSH_UPLOAD_PASSWORD}" "${APP_DIR}"
   refresh_project_ssh_config
 
-  sync_app_map
-  verify_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
-  verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
+  finalize_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   restart_pm2
   ensure_project_pm2_online "${REPO_REF}"
-  sync_app_map
-  verify_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
-  verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
+  finalize_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   verify_project_install "${REPO_REF}"
   rescue_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   touch_meta_file "${meta}"
@@ -4698,6 +4735,7 @@ do_update() {
       printf '[projectctl] custom DB machine points to local host for %s; bootstrapping through the local DB machine\n' "${REPO_REF}"
     fi
     sync_mysql_permissions "${db_name}" "${db_user}" "${db_password}" "${MYSQL_ALLOWED_IPS:-}" "${MYSQL_ALLOWED_IPS:-}" "${bootstrap_db_machine_id}"
+    run_install_db_scripts "${APP_DIR}"
     if project_has_db_scripts "${APP_DIR}"; then
       verify_project_db_schema
     else
@@ -4719,13 +4757,9 @@ do_update() {
   ensure_project_ssh_user "${SSH_UPLOAD_USER}" "${SSH_UPLOAD_PASSWORD}" "${APP_DIR}"
   refresh_project_ssh_config
 
-  sync_app_map
-  verify_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
-  verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
+  finalize_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   restart_pm2
-  sync_app_map
-  verify_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
-  verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
+  finalize_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   verify_project_install "${REPO_REF}"
   rescue_project_http_smoke "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   touch_meta_file "${meta}"
@@ -4806,9 +4840,7 @@ do_restart() {
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
   restart_pm2
-  sync_app_map
-  verify_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
-  verify_https_vhost "${APP_DOMAIN:-}" "${APP_HTTPS:-yes}"
+  finalize_project_mapping "${REPO_REF}" "${APP_DOMAIN:-}" "${APP_PORT}" "${APP_HTTPS:-yes}"
   touch_meta_file "${meta}"
   printf '[projectctl] restarted %s\n' "${REPO_REF}"
 }
