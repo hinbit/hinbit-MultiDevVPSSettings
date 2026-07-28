@@ -2503,12 +2503,12 @@ function readVpsWakeMachines({ includeSecrets = true } = {}) {
         providerSecretKey: String(entry.providerSecretKey || ''),
         providerResourceId: String(entry.providerResourceId || '').trim(),
         boReg: entry.boReg && typeof entry.boReg === 'object' ? {
-          port: String(entry.boReg.port || '9088').trim() || '9088',
+          port: String(entry.boReg.port || '7211').trim() || '7211',
           bindHost: String(entry.boReg.bindHost || '0.0.0.0').trim() || '0.0.0.0',
           installedAt: String(entry.boReg.installedAt || '').trim(),
           version: String(entry.boReg.version || '').trim(),
           updatedAt: String(entry.boReg.updatedAt || '').trim(),
-        } : { port: '9088', bindHost: '0.0.0.0', installedAt: '', version: '', updatedAt: '' },
+        } : { port: '7211', bindHost: '127.0.0.1', installedAt: '', version: '', updatedAt: '' },
         policy: entry.policy && typeof entry.policy === 'object' && !Array.isArray(entry.policy) ? entry.policy : {},
         notes: String(entry.notes || '').trim(),
         lastStatus: entry.lastStatus && typeof entry.lastStatus === 'object' ? entry.lastStatus : {},
@@ -2550,8 +2550,8 @@ function normalizeVpsWakeMachine(input, existing = {}) {
   const providerResourceId = String(input?.providerResourceId || existing.providerResourceId || '').trim();
   const notes = String(input?.notes || existing.notes || '').trim();
   const boRegInput = input?.boReg && typeof input.boReg === 'object' ? input.boReg : input || {};
-  const boRegPort = String(boRegInput.boRegPort || boRegInput.port || existing.boReg?.port || '9088').trim() || '9088';
-  const boRegBindHost = String(boRegInput.boRegBindHost || boRegInput.bindHost || existing.boReg?.bindHost || '0.0.0.0').trim() || '0.0.0.0';
+  const boRegPort = String(boRegInput.boRegPort || boRegInput.port || existing.boReg?.port || '7211').trim() || '7211';
+  const boRegBindHost = String(boRegInput.boRegBindHost || boRegInput.bindHost || existing.boReg?.bindHost || '127.0.0.1').trim() || '127.0.0.1';
   const sshPassword = Object.prototype.hasOwnProperty.call(input || {}, 'sshPassword') && String(input.sshPassword || '')
     ? String(input.sshPassword) : String(existing.sshPassword || '');
   const agentToken = Object.prototype.hasOwnProperty.call(input || {}, 'agentToken') && String(input.agentToken || '')
@@ -2617,6 +2617,22 @@ function buildBoRegPackage() {
   return packagePath;
 }
 
+function getBoRegGithubVersion() {
+  try {
+    if (fs.existsSync(path.join(BO_REG_SOURCE_DIR, '.git'))) {
+      execFileSync('git', ['fetch', 'origin', 'main'], { cwd: BO_REG_SOURCE_DIR, encoding: 'utf8', timeout: 60000 });
+      execFileSync('git', ['reset', '--hard', 'origin/main'], { cwd: BO_REG_SOURCE_DIR, encoding: 'utf8', timeout: 60000 });
+    } else {
+      fs.mkdirSync(path.dirname(BO_REG_SOURCE_DIR), { recursive: true, mode: 0o755 });
+      execFileSync('git', ['clone', '--branch', 'main', '--depth', '1', BO_REG_SOURCE_REPO, BO_REG_SOURCE_DIR], { encoding: 'utf8', timeout: 90000 });
+    }
+    return String(JSON.parse(fs.readFileSync(path.join(BO_REG_SOURCE_DIR, 'package.json'), 'utf8')).version || '');
+  } catch (error) {
+    console.warn('[manage] could not read bo.reg GitHub version:', error.message || error);
+    return '';
+  }
+}
+
 function uploadBoRegPackage(machine, packagePath) {
   try {
     const command = machine.sshKeyPath ? 'scp' : 'sshpass';
@@ -2635,13 +2651,14 @@ function installBoRegOnVps(id, { update = false } = {}) {
   if (index < 0) throw new Error('VPS machine not found');
   const machine = machines[index];
   const agentToken = machine.agentToken || randomBytes(32).toString('hex');
-  const port = String(machine.boReg?.port || '9088');
-  const bindHost = String(machine.boReg?.bindHost || '0.0.0.0');
+  const port = String(machine.boReg?.port || '7211');
+  const bindHost = String(machine.boReg?.bindHost || '127.0.0.1');
+  const publicHost = String(machine.host || machine.sshHost || '').trim();
   const packagePath = buildBoRegPackage();
   uploadBoRegPackage(machine, packagePath);
   const installCommand = [
     'npm install -g --omit=dev /tmp/bo.reg-latest.tgz',
-    `bo-reg install --token ${agentToken} --host ${bindHost} --port ${port}`,
+    `bo-reg install --mode client --token ${agentToken} --host ${bindHost} --port ${port}${publicHost ? ` --public-host ${publicHost}` : ''}`,
     'systemctl is-active bo-reg.service',
     'BO_REG_ROOT="$(npm root -g)" node -p "require(process.env.BO_REG_ROOT + \'/bo.reg/package.json\').version"',
   ].join(' && ');
@@ -2650,7 +2667,7 @@ function installBoRegOnVps(id, { update = false } = {}) {
   machine.agentToken = agentToken;
   if (!machine.agentUrl) {
     const baseHost = machine.host || machine.sshHost;
-    machine.agentUrl = `http://${baseHost}:${port}`;
+    machine.agentUrl = `http://${baseHost}/bo.reg/api`;
   }
   machine.boReg = { ...machine.boReg, port, bindHost, installedAt: machine.boReg?.installedAt || new Date().toISOString(), updatedAt: new Date().toISOString(), version };
   machine.lastAction = { action: update ? 'bo-reg-update' : 'bo-reg-install', requestedAt: new Date().toISOString(), result: `bo.reg ${version || 'installed'}` };
@@ -3906,6 +3923,7 @@ function renderDbMachinesPage() {
 function renderVpsWakeTimesPage() {
   const machines = readVpsWakeMachines({ includeSecrets: false });
   const initialMachines = JSON.stringify(machines).replace(/</g, '\\u003c');
+  const availableBoRegVersion = JSON.stringify(getBoRegGithubVersion()).replace(/</g, '\\u003c');
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>VPS Wake Times</title><style>
@@ -3934,8 +3952,8 @@ async function refresh(){const d=await api('/vps-wake-machines');machines=d.mach
 by('saveBtn').onclick=async()=>{try{const p={id:by('machineId').value};fields.forEach(k=>p[k]=by(k).value);const d=await api('/vps-wake-machines',{method:'POST',body:JSON.stringify(p)});message(by('formResult'),d.message);await refreshAndCheck();clear()}catch(e){message(by('formResult'),e.message,false)}};by('clearBtn').onclick=clear;by('refreshBtn').onclick=async()=>{try{await refreshAndCheck();message(by('listResult'),'All VPS statuses refreshed')}catch(e){message(by('listResult'),e.message,false)}};
 document.addEventListener('click',async e=>{const preset=e.target.closest('[data-policy-preset]');if(preset){by('policy').value=JSON.stringify(policyPresets[preset.dataset.policyPreset]||{},null,2);return}const editBtn=e.target.closest('[data-edit]');if(editBtn){const m=machines.find(x=>x.id===editBtn.dataset.edit);if(m)edit(m);return}const del=e.target.closest('[data-delete]');if(del){if(confirm('Delete this VPS registry entry?')){await api('/vps-wake-machines/'+encodeURIComponent(del.dataset.delete),{method:'DELETE'});await refresh()}return}const install=e.target.closest('[data-bo-install]');if(install){if(!confirm('Install or update 🔩 on this VPS over password SSH? A random token will be written to /opt/bo.reg/.env.'))return;install.disabled=true;try{const d=await api('/vps-wake-machines/'+encodeURIComponent(install.dataset.boInstall)+'/bo-reg',{method:'POST',body:JSON.stringify({update:true})});message(by('listResult'),d.message||'🔩 installed');await refreshAndCheck()}catch(err){message(by('listResult'),err.message,false)}finally{install.disabled=false}return}const b=e.target.closest('[data-act]');if(!b)return;const action=b.dataset.act;if(['shutdown','communication-off'].includes(action)&&!confirm('Send '+action+' to this VPS?'))return;b.disabled=true;try{const path=action==='status'?'/vps-wake-machines/'+encodeURIComponent(b.dataset.id)+'/check':'/vps-wake-machines/'+encodeURIComponent(b.dataset.id)+'/actions';const d=await api(path,{method:'POST',body:action==='status'?undefined:JSON.stringify({action})});message(by('listResult'),d.message||('Action '+action+' sent'));await refreshAndCheck()}catch(err){message(by('listResult'),err.message,false)}finally{b.disabled=false}});render();refreshAndCheck().catch(error=>message(by('listResult'),error.message,false));
 </script><script>
-function renderPm2Processes(){const cards=document.querySelectorAll('#machineList .machine');cards.forEach((card,index)=>{const machine=machines[index]||{};const reported=machine.lastStatus?.agent?.raw?.processes;const pm2=Array.isArray(reported)?reported.filter(p=>p&&p.kind==='pm2'&&p.name):[];card.querySelector('.pm2-processes')?.remove();if(!machine.lastStatus?.boReg?.installed)return;const section=document.createElement('div');section.className='pm2-processes';section.style.cssText='margin-top:14px;padding-top:12px;border-top:1px solid #263752';if(!pm2.length){section.innerHTML='<div class="small">PM2 processes: none reported by 🔩.</div>';card.append(section);return}section.innerHTML='<div class="small" style="margin-bottom:8px">PM2 processes</div>'+pm2.map(p=>{const online=String(p.status||'').toLowerCase()==='online';return '<div class="actions" style="margin:6px 0"><code style="align-self:center">'+esc(p.name)+' #'+esc(p.id)+'</code>'+statusChip(p.status,online?'enabled':'disabled')+'<button class="secondary" data-pm2-action="process-start" data-id="'+esc(machine.id)+'" data-process-name="'+esc(p.name)+'" '+(online?'disabled':'')+'>Start</button><button class="danger" data-pm2-action="process-stop" data-id="'+esc(machine.id)+'" data-process-name="'+esc(p.name)+'" '+(online?'':'disabled')+'>Stop</button></div>'}).join('');card.append(section)})}
-new MutationObserver(renderPm2Processes).observe(by('machineList'),{childList:true});document.addEventListener('click',async e=>{const button=e.target.closest('[data-pm2-action]');if(!button)return;const action=button.dataset.pm2Action;const processName=button.dataset.processName;if(action==='process-stop'&&!confirm('Stop PM2 process '+processName+'?'))return;button.disabled=true;try{const d=await api('/vps-wake-machines/'+encodeURIComponent(button.dataset.id)+'/actions',{method:'POST',body:JSON.stringify({action,processName})});message(by('listResult'),d.message||('PM2 '+action+' accepted'));await refreshAndCheck()}catch(error){message(by('listResult'),error.message,false)}finally{button.disabled=false}});renderPm2Processes();
+const BO_REG_GITHUB_VERSION=${availableBoRegVersion};function versionParts(v){return String(v||'').replace(/^v/,'').split('.').map(x=>Number(x)||0)}function versionOlder(current,available){const a=versionParts(current),b=versionParts(available);for(let i=0;i<Math.max(a.length,b.length);i++){if((a[i]||0)!==(b[i]||0))return(a[i]||0)<(b[i]||0)}return false}function renderBoRegVersions(){document.querySelectorAll('#machineList .machine').forEach((card,index)=>{const installed=machines[index]?.lastStatus?.boReg?.version||machines[index]?.boReg?.version||'';const chip=card.querySelector('[title="bo.reg installed"]');if(!chip||!BO_REG_GITHUB_VERSION||!versionOlder(installed,BO_REG_GITHUB_VERSION))return;chip.textContent='🔩 update '+BO_REG_GITHUB_VERSION+' available';chip.title='Installed '+installed+'; GitHub has '+BO_REG_GITHUB_VERSION;chip.style.cssText='background:#991b1b;color:#fff;border:1px solid #f87171'})}if(by('boRegPort').value==='9088')by('boRegPort').value='7211';if(by('boRegBindHost').value==='0.0.0.0')by('boRegBindHost').value='127.0.0.1';by('clearBtn').addEventListener('click',()=>setTimeout(()=>{by('boRegPort').value='7211';by('boRegBindHost').value='127.0.0.1'}));function renderPm2Processes(){const cards=document.querySelectorAll('#machineList .machine');cards.forEach((card,index)=>{const machine=machines[index]||{};const reported=machine.lastStatus?.agent?.raw?.processes;const pm2=Array.isArray(reported)?reported.filter(p=>p&&p.kind==='pm2'&&p.name):[];card.querySelector('.pm2-processes')?.remove();if(!machine.lastStatus?.boReg?.installed)return;const section=document.createElement('div');section.className='pm2-processes';section.style.cssText='margin-top:14px;padding-top:12px;border-top:1px solid #263752';if(!pm2.length){section.innerHTML='<div class="small">PM2 processes: none reported by 🔩.</div>';card.append(section);return}section.innerHTML='<div class="small" style="margin-bottom:8px">PM2 processes</div>'+pm2.map(p=>{const online=String(p.status||'').toLowerCase()==='online';return '<div class="actions" style="margin:6px 0"><code style="align-self:center">'+esc(p.name)+' #'+esc(p.id)+'</code>'+statusChip(p.status,online?'enabled':'disabled')+'<button class="secondary" data-pm2-action="process-start" data-id="'+esc(machine.id)+'" data-process-name="'+esc(p.name)+'" '+(online?'disabled':'')+'>Start</button><button class="danger" data-pm2-action="process-stop" data-id="'+esc(machine.id)+'" data-process-name="'+esc(p.name)+'" '+(online?'':'disabled')+'>Stop</button></div>'}).join('');card.append(section)})}
+new MutationObserver(()=>{renderBoRegVersions();renderPm2Processes()}).observe(by('machineList'),{childList:true});document.addEventListener('click',async e=>{const button=e.target.closest('[data-pm2-action]');if(!button)return;const action=button.dataset.pm2Action;const processName=button.dataset.processName;if(action==='process-stop'&&!confirm('Stop PM2 process '+processName+'?'))return;button.disabled=true;try{const d=await api('/vps-wake-machines/'+encodeURIComponent(button.dataset.id)+'/actions',{method:'POST',body:JSON.stringify({action,processName})});message(by('listResult'),d.message||('PM2 '+action+' accepted'));await refreshAndCheck()}catch(error){message(by('listResult'),error.message,false)}finally{button.disabled=false}});renderBoRegVersions();renderPm2Processes();
 </script></body></html>`;
 }
 
