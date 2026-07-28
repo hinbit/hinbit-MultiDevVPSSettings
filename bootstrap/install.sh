@@ -546,7 +546,7 @@ ${MARKER}
 server {
     listen 80;
     server_name ${domain};
-    client_max_body_size 50m;
+    client_max_body_size 100M;
 
     location /.well-known/acme-challenge/ {
         root ${ACME_ROOT};
@@ -575,7 +575,7 @@ ${MARKER}
 server {
     listen 80;
     server_name ${domain};
-    client_max_body_size 50m;
+    client_max_body_size 100M;
     location /.well-known/acme-challenge/ {
         root ${ACME_ROOT};
     }
@@ -587,7 +587,7 @@ server {
 server {
     listen 443 ssl http2;
     server_name ${domain};
-    client_max_body_size 50m;
+    client_max_body_size 100M;
 
     ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;

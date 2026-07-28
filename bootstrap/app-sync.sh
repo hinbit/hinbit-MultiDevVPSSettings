@@ -147,7 +147,7 @@ ${MARKER}
 server {
     listen 80;
     server_name ${domain};
-    client_max_body_size 50m;
+    client_max_body_size 100M;
 ${auth_block}
     location /.well-known/acme-challenge/ {
         auth_basic off;
@@ -183,7 +183,7 @@ ${MARKER}
 server {
     listen 80;
     server_name ${domain};
-    client_max_body_size 50m;
+    client_max_body_size 100M;
 
     location /.well-known/acme-challenge/ {
         auth_basic off;
@@ -200,7 +200,7 @@ ${extra_blocks}
 server {
     listen 443 ssl http2;
     server_name ${domain};
-    client_max_body_size 50m;
+    client_max_body_size 100M;
 ${auth_block}
     ssl_certificate ${cert_path};
     ssl_certificate_key ${key_path};
