@@ -2632,7 +2632,7 @@ function installBoRegOnVps(id, { update = false } = {}) {
     'npm install -g --omit=dev /tmp/bo.reg-latest.tgz',
     `bo-reg install --token ${agentToken} --host ${bindHost} --port ${port}`,
     'systemctl is-active bo-reg.service',
-    'node -p "require(\'/usr/local/lib/node_modules/bo.reg/package.json\').version"',
+    'BO_REG_ROOT="$(npm root -g)" node -p "require(process.env.BO_REG_ROOT + \'/bo.reg/package.json\').version"',
   ].join(' && ');
   const output = runVpsSsh(machine, installCommand);
   const version = output.split(/\r?\n/).filter(Boolean).pop() || '';
