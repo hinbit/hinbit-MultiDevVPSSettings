@@ -76,6 +76,25 @@ Control response example:
 }
 ```
 
+## bo.reg installation
+
+The portal's `Install bo.reg` button uses the VPS root password saved in the
+VPS registry, installs `git+https://github.com/hinbit/bo.reg.git#main`, creates
+`/opt/bo.reg/.env` with a generated 256-bit token, and enables
+`bo-reg.service`. The VPS card then displays the installed package version and
+offers `Update bo.reg`.
+
+The agent's default port is `9088`. Bind it to `0.0.0.0` only when its firewall
+allows that port from the MultiDev controller alone. For a controller running
+on the same VPS, use `127.0.0.1` as the agent URL and bind host.
+
+The policy editor has valid editable presets for Shabbat communication off,
+Shabbat shutdown, nightly 20:00-06:00 power off, a weekly two-hour maintenance
+wake period, and a combined policy. Shabbat shutdown includes the explicit
+`BO_REG_ALLOW_SHUTDOWN=true` requirement. A preset only fills the JSON field;
+it does not send a command until a later policy scheduler/agent phase is
+enabled.
+
 ## Oracle and GNS adapters
 
 Do not put provider-specific calls directly in the portal UI. Configure a

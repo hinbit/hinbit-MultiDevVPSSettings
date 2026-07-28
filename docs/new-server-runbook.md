@@ -45,6 +45,27 @@ The installer will set up:
 - the `/manage/` system portal
 - `projectctl`
 
+## VPS control agent
+
+When this VPS is added in `/manage/vps-wake-times/`, use the `Install bo.reg`
+button. MultiDev connects with the saved password SSH credentials, installs the
+`bo.reg` npm package, generates a unique token, and writes it only to
+`/opt/bo.reg/.env` with mode `0600`. The matching token is stored only in the
+root-only MultiDev VPS registry. The installer enables `bo-reg.service`.
+
+For a manually managed VPS, the equivalent command is:
+
+```bash
+npm install -g --omit=dev git+https://github.com/hinbit/bo.reg.git#main
+bo-reg install --token "a-long-random-token" --host 0.0.0.0 --port 9088
+```
+
+Only expose port `9088` to the MultiDev controller IP, or use a reverse proxy
+with the same bearer token. Configure `BO_REG_COMMUNICATION_PM2` and
+`BO_REG_COMMUNICATION_SYSTEMD` in `/opt/bo.reg/.env` before allowing policy
+driven communication controls. `BO_REG_ALLOW_SHUTDOWN=true` is required before
+the agent accepts a shutdown action.
+
 ## Optional Cloudflare Tunnel for manage
 
 Use this when you want `multidev.seach.co.il` to reach the manage UI without opening inbound HTTP/HTTPS on the server.
