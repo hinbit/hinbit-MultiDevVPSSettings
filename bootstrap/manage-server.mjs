@@ -2494,6 +2494,7 @@ function readVpsWakeMachines({ includeSecrets = true } = {}) {
         sshPort: String(entry.sshPort || '22').trim() || '22',
         sshUser: String(entry.sshUser || 'root').trim() || 'root',
         sshPassword: String(entry.sshPassword || ''),
+        sshKeyPath: String(entry.sshKeyPath || '').trim(),
         agentUrl: String(entry.agentUrl || '').trim(),
         agentToken: String(entry.agentToken || ''),
         providerEndpoint: String(entry.providerEndpoint || '').trim(),
@@ -2543,6 +2544,7 @@ function normalizeVpsWakeMachine(input, existing = {}) {
   const sshHost = String(input?.sshHost || host || existing.sshHost || '').trim();
   const sshUser = String(input?.sshUser || existing.sshUser || 'root').trim() || 'root';
   const sshPort = String(input?.sshPort || existing.sshPort || '22').trim() || '22';
+  const sshKeyPath = String(input?.sshKeyPath || existing.sshKeyPath || '').trim();
   const agentUrl = validateOptionalUrl(String(input?.agentUrl || existing.agentUrl || '').trim(), 'Agent URL');
   const providerEndpoint = validateOptionalUrl(String(input?.providerEndpoint || existing.providerEndpoint || '').trim(), 'Provider endpoint');
   const providerResourceId = String(input?.providerResourceId || existing.providerResourceId || '').trim();
@@ -2571,11 +2573,12 @@ function normalizeVpsWakeMachine(input, existing = {}) {
   if (host && !/^[A-Za-z0-9._:-]+$/.test(host)) throw new Error(`Invalid VPS host: ${host}`);
   if (sshHost && !/^[A-Za-z0-9._:-]+$/.test(sshHost)) throw new Error(`Invalid SSH host: ${sshHost}`);
   if (!/^[0-9]+$/.test(sshPort) || Number(sshPort) < 1 || Number(sshPort) > 65535) throw new Error('SSH port must be between 1 and 65535');
+  if (sshKeyPath && (!path.isAbsolute(sshKeyPath) || !/^[A-Za-z0-9_./-]+$/.test(sshKeyPath))) throw new Error('SSH key path must be an absolute safe path');
   if (!/^[0-9]+$/.test(boRegPort) || Number(boRegPort) < 1 || Number(boRegPort) > 65535) throw new Error('bo.reg port must be between 1 and 65535');
   if (!/^[A-Za-z0-9._:-]+$/.test(boRegBindHost)) throw new Error('Invalid bo.reg bind host');
   return {
     id: String(existing.id || input?.id || `vps-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`),
-    name, provider, host, sshHost, sshPort, sshUser, sshPassword, agentUrl, agentToken,
+    name, provider, host, sshHost, sshPort, sshUser, sshPassword, sshKeyPath, agentUrl, agentToken,
     providerEndpoint, providerToken, providerAccessKey, providerSecretKey, providerResourceId, policy, notes,
     boReg: { port: boRegPort, bindHost: boRegBindHost, installedAt: existing.boReg?.installedAt || '', version: existing.boReg?.version || '', updatedAt: existing.boReg?.updatedAt || '' },
     lastStatus: existing.lastStatus || {}, lastAction: existing.lastAction || {},
@@ -2583,16 +2586,15 @@ function normalizeVpsWakeMachine(input, existing = {}) {
 }
 
 function runVpsSsh(machine, remoteCommand, timeout = 120000) {
-  if (!machine.sshHost || !machine.sshUser || !machine.sshPassword) {
-    throw new Error('SSH host, user, and password are required to install bo.reg');
+  if (!machine.sshHost || !machine.sshUser || (!machine.sshPassword && !machine.sshKeyPath)) {
+    throw new Error('SSH host, user, and either a password or managed key path are required to install bo.reg');
   }
+  const keyArgs = machine.sshKeyPath ? ['-i', machine.sshKeyPath, '-o', 'BatchMode=yes'] : [];
+  const authArgs = machine.sshKeyPath
+    ? ['ssh', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'IdentitiesOnly=yes', ...keyArgs, '-o', 'ConnectTimeout=20', '-p', machine.sshPort || '22', `${machine.sshUser}@${machine.sshHost}`, remoteCommand]
+    : ['sshpass', '-p', machine.sshPassword, 'ssh', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'PreferredAuthentications=password', '-o', 'PubkeyAuthentication=no', '-o', 'PasswordAuthentication=yes', '-o', 'ConnectTimeout=20', '-p', machine.sshPort || '22', `${machine.sshUser}@${machine.sshHost}`, remoteCommand];
   try {
-    return execFileSync('sshpass', [
-      '-p', machine.sshPassword,
-      'ssh', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'PreferredAuthentications=password',
-      '-o', 'PubkeyAuthentication=no', '-o', 'PasswordAuthentication=yes', '-o', 'ConnectTimeout=20',
-      '-p', machine.sshPort || '22', `${machine.sshUser}@${machine.sshHost}`, remoteCommand,
-    ], { encoding: 'utf8', timeout, maxBuffer: 5 * 1024 * 1024 }).trim();
+    return execFileSync(authArgs[0], authArgs.slice(1), { encoding: 'utf8', timeout, maxBuffer: 5 * 1024 * 1024 }).trim();
   } catch (error) {
     throw new Error(String(error.stderr || error.message || error).trim());
   }
@@ -2617,12 +2619,11 @@ function buildBoRegPackage() {
 
 function uploadBoRegPackage(machine, packagePath) {
   try {
-    execFileSync('sshpass', [
-      '-p', machine.sshPassword,
-      'scp', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'PreferredAuthentications=password',
-      '-o', 'PubkeyAuthentication=no', '-o', 'PasswordAuthentication=yes', '-o', 'ConnectTimeout=20',
-      '-P', machine.sshPort || '22', packagePath, `${machine.sshUser}@${machine.sshHost}:/tmp/bo.reg-latest.tgz`,
-    ], { encoding: 'utf8', timeout: 120000, maxBuffer: 5 * 1024 * 1024 });
+    const command = machine.sshKeyPath ? 'scp' : 'sshpass';
+    const args = machine.sshKeyPath
+      ? ['-i', machine.sshKeyPath, '-o', 'StrictHostKeyChecking=accept-new', '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', '-P', machine.sshPort || '22', packagePath, `${machine.sshUser}@${machine.sshHost}:/tmp/bo.reg-latest.tgz`]
+      : ['-p', machine.sshPassword, 'scp', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'PreferredAuthentications=password', '-o', 'PubkeyAuthentication=no', '-o', 'PasswordAuthentication=yes', '-o', 'ConnectTimeout=20', '-P', machine.sshPort || '22', packagePath, `${machine.sshUser}@${machine.sshHost}:/tmp/bo.reg-latest.tgz`];
+    execFileSync(command, args, { encoding: 'utf8', timeout: 120000, maxBuffer: 5 * 1024 * 1024 });
   } catch (error) {
     throw new Error(`bo.reg package upload failed: ${String(error.stderr || error.message || error).trim()}`);
   }
@@ -3902,7 +3903,7 @@ function renderVpsWakeTimesPage() {
 <div class="head"><div><h1>VPS Wake Times</h1><div class="muted">Control registry for awake state, communication state, and JSON living policies.</div><div class="small">Power and communication actions require a configured VPS token agent or provider endpoint. SSH is a reachability probe only.</div></div><div class="actions"><a class="btn ghost" href="/manage/">Back to manage</a><a class="btn ghost" href="/manage/db-machines/">DB Machines</a><button class="secondary" id="refreshBtn">Refresh all</button></div></div>
 <section class="panel"><h2 id="formTitle">Add VPS machine</h2><div class="grid">
 <input id="machineId" type="hidden"><label>Name<input id="name" placeholder="multilisten.hinbit.com"></label><label>Provider<select id="provider"><option value="agent">Agent</option><option value="oracle">Oracle</option><option value="gns">GNS</option><option value="manual">Manual</option></select></label><label>Display / VPS host<input id="host" placeholder="108.175.8.172"></label>
-<label>SSH host<input id="sshHost" placeholder="108.175.8.172"></label><label>SSH port<input id="sshPort" value="22"></label><label>SSH user<input id="sshUser" value="root"></label><label>SSH password <span class="small">leave empty to keep existing</span><input id="sshPassword" type="password"></label>
+<label>SSH host<input id="sshHost" placeholder="108.175.8.172"></label><label>SSH port<input id="sshPort" value="22"></label><label>SSH user<input id="sshUser" value="root"></label><label>SSH password <span class="small">leave empty to keep existing</span><input id="sshPassword" type="password"></label><label>SSH key path on MultiDev VPS<input id="sshKeyPath" placeholder="/root/.ssh/vps-managed-keys/example"></label>
 <label>Agent base URL<input id="agentUrl" placeholder="https://agent.example.com"></label><label>Agent token <span class="small">leave empty to keep existing</span><input id="agentToken" type="password"></label><label>Provider action endpoint<input id="providerEndpoint" placeholder="https://provider.example/api/control"></label>
 <label>Provider token <span class="small">leave empty to keep existing</span><input id="providerToken" type="password"></label><label>Provider resource ID<input id="providerResourceId" placeholder="Oracle OCID / GNS server id"></label><label>Notes<input id="notes" placeholder="Oracle VPS, speaker allowed after Shabbat"></label>
 <label>GNS access key <span class="small">leave empty to keep existing</span><input id="providerAccessKey" type="password"></label><label>GNS secret key <span class="small">leave empty to keep existing</span><input id="providerSecretKey" type="password"></label><div class="small">GNS needs these two fields plus its API endpoint and server/resource ID before Wake can be enabled.</div>
@@ -3912,7 +3913,7 @@ function renderVpsWakeTimesPage() {
 </div><div class="actions"><button id="saveBtn">Save VPS</button><button id="clearBtn" class="ghost">Clear</button></div><div id="formResult" class="flash" hidden></div></section>
 <section class="panel"><h2>Connected VPS machines</h2><div id="machineList"></div><div id="listResult" class="flash" hidden></div></section>
 </main><script>
-const API='/manage/api';let machines=${initialMachines};const by=id=>document.getElementById(id);const fields=['name','provider','host','sshHost','sshPort','sshUser','sshPassword','agentUrl','agentToken','providerEndpoint','providerToken','providerAccessKey','providerSecretKey','providerResourceId','notes','boRegPort','boRegBindHost','policy'];const policyPresets={shabbat:{timezone:'Asia/Jerusalem',rules:[{when:'shabbat',communication:'off',start:'friday-sunset',end:'saturday-nightfall'}],processes:{speaker:'disabled'}},'shabbat-shutdown':{timezone:'Asia/Jerusalem',rules:[{when:'shabbat',power:'shutdown',start:'friday-sunset',end:'saturday-nightfall',requires:'BO_REG_ALLOW_SHUTDOWN=true'}],processes:{}},night:{timezone:'Asia/Jerusalem',rules:[{when:'daily',power:'off',start:'20:00',end:'06:00'}],processes:{}},weekly:{timezone:'Asia/Jerusalem',rules:[{when:'weekly',power:'on',day:'sunday',start:'10:00',end:'12:00',minimumDurationMinutes:120}],processes:{}},combined:{timezone:'Asia/Jerusalem',rules:[{when:'shabbat',communication:'off',start:'friday-sunset',end:'saturday-nightfall'},{when:'daily',power:'off',start:'20:00',end:'06:00'},{when:'weekly',power:'on',day:'sunday',start:'10:00',end:'12:00',minimumDurationMinutes:120}],processes:{speaker:'disabled'}}};
+const API='/manage/api';let machines=${initialMachines};const by=id=>document.getElementById(id);const fields=['name','provider','host','sshHost','sshPort','sshUser','sshPassword','sshKeyPath','agentUrl','agentToken','providerEndpoint','providerToken','providerAccessKey','providerSecretKey','providerResourceId','notes','boRegPort','boRegBindHost','policy'];const policyPresets={shabbat:{timezone:'Asia/Jerusalem',rules:[{when:'shabbat',communication:'off',start:'friday-sunset',end:'saturday-nightfall'}],processes:{speaker:'disabled'}},'shabbat-shutdown':{timezone:'Asia/Jerusalem',rules:[{when:'shabbat',power:'shutdown',start:'friday-sunset',end:'saturday-nightfall',requires:'BO_REG_ALLOW_SHUTDOWN=true'}],processes:{}},night:{timezone:'Asia/Jerusalem',rules:[{when:'daily',power:'off',start:'20:00',end:'06:00'}],processes:{}},weekly:{timezone:'Asia/Jerusalem',rules:[{when:'weekly',power:'on',day:'sunday',start:'10:00',end:'12:00',minimumDurationMinutes:120}],processes:{}},combined:{timezone:'Asia/Jerusalem',rules:[{when:'shabbat',communication:'off',start:'friday-sunset',end:'saturday-nightfall'},{when:'daily',power:'off',start:'20:00',end:'06:00'},{when:'weekly',power:'on',day:'sunday',start:'10:00',end:'12:00',minimumDurationMinutes:120}],processes:{speaker:'disabled'}}};
 function esc(v){return String(v??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}function message(el,text,ok=true){el.hidden=false;el.textContent=text;el.style.borderColor=ok?'#166534':'#991b1b'}
 async function api(p,o={}){const r=await fetch(API+p,{headers:{'Content-Type':'application/json'},credentials:'same-origin',...o});const t=await r.text();let d;try{d=t?JSON.parse(t):{}}catch{d={message:t}}if(!r.ok)throw Error(d.error||d.message||'Request failed');return d}
 function statusChip(value,kind){return '<span class="chip '+esc(value)+' '+(kind||'')+'">'+esc(value||'unknown')+'</span>'}function render(){const out=machines.length?machines.map(m=>{const s=m.lastStatus||{},a=m.lastAction||{},b=m.boReg||{},agent=s.boReg||{};const installed=Boolean(agent.installed);const bo=installed?'<span class="chip enabled" title="bo.reg installed">🔩 '+esc(agent.version||b.version||'installed')+'</span>':'<span class="chip" title="bo.reg not installed or unreachable">🔩 not installed</span>';const canWake=s.state==='off'&&Boolean(s.provider&&s.provider.reachable);const canShutdown=s.state==='awake'&&installed&&Boolean(s.provider&&s.provider.reachable);const canCommunication=installed;return '<article class="machine"><div class="machine-head"><div><strong>'+esc(m.name)+'</strong><div class="small">'+esc(m.host||m.agentUrl||m.providerEndpoint||'no host')+' · '+esc(m.provider)+'</div></div><div class="chips">'+statusChip(s.state,'state')+statusChip(s.communication,'communication')+bo+'</div></div><div class="small">Last checked: '+esc(s.checkedAt||'checking...')+' · Provider: '+esc(s.provider?.state||'not configured')+' · Last action: '+esc(a.action||'none')+(a.result?' ('+esc(a.result)+')':'')+'</div><div class="actions"><button class="secondary" data-act="status" data-id="'+esc(m.id)+'">Check status</button><button class="secondary" data-bo-install="'+esc(m.id)+'">'+(b.installedAt?'Update 🔩':'Install 🔩')+'</button><button class="secondary" data-act="communication-off" data-id="'+esc(m.id)+'" '+(canCommunication?'':'disabled')+'>Disable communication</button><button class="secondary" data-act="communication-on" data-id="'+esc(m.id)+'" '+(canCommunication?'':'disabled')+'>Enable communication</button><button class="danger" data-act="shutdown" data-id="'+esc(m.id)+'" '+(canShutdown?'':'disabled')+' title="Requires running VPS, healthy 🔩, and provider API">Shutdown</button><button class="secondary" data-act="wake" data-id="'+esc(m.id)+'" '+(canWake?'':'disabled')+' title="Requires provider API status off">Wake</button><button class="ghost" data-edit="'+esc(m.id)+'">Edit</button><button class="danger" data-delete="'+esc(m.id)+'">Delete</button></div></article>'}).join(''):'<p class="muted">No VPS machines registered yet.</p>';by('machineList').innerHTML=out}

@@ -9,6 +9,8 @@ does not reuse database machine credentials.
 Each VPS can have:
 
 - a display host and SSH host/port/user, used only for a TCP reachability check;
+- an optional managed SSH private-key path on the MultiDev VPS, preferred for
+  🔩 package upload and installation over a saved password;
 - a provider type: `oracle`, `gns`, `agent`, or `manual`;
 - a VPS agent URL and token;
 - an optional provider action endpoint, bearer token, and provider resource ID;
