@@ -56,7 +56,7 @@ root-only MultiDev VPS registry. The installer enables `bo-reg.service`.
 For a manually managed VPS, the equivalent command is:
 
 ```bash
-npm install -g --omit=dev https://codeload.github.com/hinbit/bo.reg/tar.gz/refs/heads/main
+npm install -g --omit=dev /path/to/bo.reg-latest.tgz
 bo-reg install --token "a-long-random-token" --host 0.0.0.0 --port 9088
 ```
 

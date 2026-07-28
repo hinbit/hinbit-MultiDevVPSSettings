@@ -14,7 +14,9 @@ const SYSTEM_ENV_FILE = '/etc/vps-system.env';
 const SYSTEM_DOMAIN_FILE = '/etc/vps-system-domain';
 const DB_MACHINES_FILE = '/etc/vps-db-machines.json';
 const VPS_WAKE_MACHINES_FILE = '/etc/vps-wake-machines.json';
-const BO_REG_PACKAGE_URL = process.env.BO_REG_PACKAGE_URL || 'https://codeload.github.com/hinbit/bo.reg/tar.gz/refs/heads/main';
+const BO_REG_SOURCE_REPO = process.env.BO_REG_SOURCE_REPO || 'git@github-hinbit:hinbit/bo.reg.git';
+const BO_REG_SOURCE_DIR = process.env.BO_REG_SOURCE_DIR || '/opt/vps-bo-reg-source';
+const BO_REG_PACKAGE_CACHE_DIR = process.env.BO_REG_PACKAGE_CACHE_DIR || '/opt/vps-bo-reg-package';
 const SSH_KEYS_FILE = '/etc/vps-ssh-keys.json';
 const SSH_KEYS_DIR = '/root/.ssh/vps-managed-keys';
 const SSH_CONFIG_FILE = '/root/.ssh/config';
@@ -2586,6 +2588,36 @@ function runVpsSsh(machine, remoteCommand, timeout = 120000) {
   }
 }
 
+function buildBoRegPackage() {
+  if (fs.existsSync(path.join(BO_REG_SOURCE_DIR, '.git'))) {
+    execFileSync('git', ['fetch', 'origin', 'main'], { cwd: BO_REG_SOURCE_DIR, encoding: 'utf8', timeout: 60000 });
+    execFileSync('git', ['reset', '--hard', 'origin/main'], { cwd: BO_REG_SOURCE_DIR, encoding: 'utf8', timeout: 60000 });
+  } else {
+    fs.mkdirSync(path.dirname(BO_REG_SOURCE_DIR), { recursive: true, mode: 0o755 });
+    execFileSync('git', ['clone', '--branch', 'main', '--depth', '1', BO_REG_SOURCE_REPO, BO_REG_SOURCE_DIR], { encoding: 'utf8', timeout: 90000 });
+  }
+  fs.mkdirSync(BO_REG_PACKAGE_CACHE_DIR, { recursive: true, mode: 0o700 });
+  const output = execFileSync('npm', ['pack', '--pack-destination', BO_REG_PACKAGE_CACHE_DIR], { cwd: BO_REG_SOURCE_DIR, encoding: 'utf8', timeout: 60000 }).trim();
+  const packageName = output.split(/\r?\n/).filter(Boolean).pop();
+  const packagePath = path.join(BO_REG_PACKAGE_CACHE_DIR, packageName || '');
+  if (!packageName || !fs.existsSync(packagePath)) throw new Error('Could not build bo.reg package tarball');
+  fs.chmodSync(packagePath, 0o600);
+  return packagePath;
+}
+
+function uploadBoRegPackage(machine, packagePath) {
+  try {
+    execFileSync('sshpass', [
+      '-p', machine.sshPassword,
+      'scp', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'PreferredAuthentications=password',
+      '-o', 'PubkeyAuthentication=no', '-o', 'PasswordAuthentication=yes', '-o', 'ConnectTimeout=20',
+      '-P', machine.sshPort || '22', packagePath, `${machine.sshUser}@${machine.sshHost}:/tmp/bo.reg-latest.tgz`,
+    ], { encoding: 'utf8', timeout: 120000, maxBuffer: 5 * 1024 * 1024 });
+  } catch (error) {
+    throw new Error(`bo.reg package upload failed: ${String(error.stderr || error.message || error).trim()}`);
+  }
+}
+
 function installBoRegOnVps(id, { update = false } = {}) {
   const machines = readVpsWakeMachines();
   const index = machines.findIndex((machine) => machine.id === String(id || ''));
@@ -2594,8 +2626,10 @@ function installBoRegOnVps(id, { update = false } = {}) {
   const agentToken = machine.agentToken || randomBytes(32).toString('hex');
   const port = String(machine.boReg?.port || '9088');
   const bindHost = String(machine.boReg?.bindHost || '0.0.0.0');
+  const packagePath = buildBoRegPackage();
+  uploadBoRegPackage(machine, packagePath);
   const installCommand = [
-    `npm install -g --omit=dev ${BO_REG_PACKAGE_URL}`,
+    'npm install -g --omit=dev /tmp/bo.reg-latest.tgz',
     `bo-reg install --token ${agentToken} --host ${bindHost} --port ${port}`,
     'systemctl is-active bo-reg.service',
     'node -p "require(\'/usr/local/lib/node_modules/bo.reg/package.json\').version"',
