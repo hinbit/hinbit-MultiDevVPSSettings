@@ -51,7 +51,7 @@ const LOCAL_DB_MACHINE = {
   originHost: '',
   phpMyAdminUrl: '',
 };
-const VPS_CONTROL_ACTIONS = new Set(['communication-off', 'communication-on', 'shutdown', 'wake', 'status']);
+const VPS_CONTROL_ACTIONS = new Set(['communication-off', 'communication-on', 'process-start', 'process-stop', 'shutdown', 'wake', 'status']);
 const VPS_PROVIDERS = new Set(['manual', 'oracle', 'gns', 'agent']);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -2803,14 +2803,25 @@ async function checkVpsWakeMachine(id) {
   return sanitizeVpsMachine(machine);
 }
 
-async function runVpsControlAction(id, action) {
+async function runVpsControlAction(id, action, options = {}) {
   if (!VPS_CONTROL_ACTIONS.has(action)) throw new Error('Unsupported VPS control action');
   let machines = readVpsWakeMachines();
   let index = machines.findIndex((machine) => machine.id === String(id || ''));
   if (index < 0) throw new Error('VPS machine not found');
   let machine = machines[index];
   if (action === 'status') return checkVpsWakeMachine(id);
-  const payload = { action, machineId: machine.id, resourceId: machine.providerResourceId, policy: machine.policy, requestedAt: new Date().toISOString() };
+  const processName = String(options.processName || '').trim();
+  if ((action === 'process-start' || action === 'process-stop') && !processName) {
+    throw new Error('PM2 process name is required');
+  }
+  const payload = {
+    action,
+    machineId: machine.id,
+    resourceId: machine.providerResourceId,
+    policy: machine.policy,
+    requestedAt: new Date().toISOString(),
+    ...(processName ? { processName } : {}),
+  };
   await checkVpsWakeMachine(id);
   machines = readVpsWakeMachines();
   index = machines.findIndex((entry) => entry.id === String(id || ''));
@@ -3922,6 +3933,9 @@ function edit(m){by('machineId').value=m.id||'';fields.forEach(k=>{if(k==='polic
 async function refresh(){const d=await api('/vps-wake-machines');machines=d.machines||[];render()}async function refreshAndCheck(){await refresh();await Promise.allSettled(machines.map(m=>api('/vps-wake-machines/'+encodeURIComponent(m.id)+'/check',{method:'POST'})));await refresh()}
 by('saveBtn').onclick=async()=>{try{const p={id:by('machineId').value};fields.forEach(k=>p[k]=by(k).value);const d=await api('/vps-wake-machines',{method:'POST',body:JSON.stringify(p)});message(by('formResult'),d.message);await refreshAndCheck();clear()}catch(e){message(by('formResult'),e.message,false)}};by('clearBtn').onclick=clear;by('refreshBtn').onclick=async()=>{try{await refreshAndCheck();message(by('listResult'),'All VPS statuses refreshed')}catch(e){message(by('listResult'),e.message,false)}};
 document.addEventListener('click',async e=>{const preset=e.target.closest('[data-policy-preset]');if(preset){by('policy').value=JSON.stringify(policyPresets[preset.dataset.policyPreset]||{},null,2);return}const editBtn=e.target.closest('[data-edit]');if(editBtn){const m=machines.find(x=>x.id===editBtn.dataset.edit);if(m)edit(m);return}const del=e.target.closest('[data-delete]');if(del){if(confirm('Delete this VPS registry entry?')){await api('/vps-wake-machines/'+encodeURIComponent(del.dataset.delete),{method:'DELETE'});await refresh()}return}const install=e.target.closest('[data-bo-install]');if(install){if(!confirm('Install or update 🔩 on this VPS over password SSH? A random token will be written to /opt/bo.reg/.env.'))return;install.disabled=true;try{const d=await api('/vps-wake-machines/'+encodeURIComponent(install.dataset.boInstall)+'/bo-reg',{method:'POST',body:JSON.stringify({update:true})});message(by('listResult'),d.message||'🔩 installed');await refreshAndCheck()}catch(err){message(by('listResult'),err.message,false)}finally{install.disabled=false}return}const b=e.target.closest('[data-act]');if(!b)return;const action=b.dataset.act;if(['shutdown','communication-off'].includes(action)&&!confirm('Send '+action+' to this VPS?'))return;b.disabled=true;try{const path=action==='status'?'/vps-wake-machines/'+encodeURIComponent(b.dataset.id)+'/check':'/vps-wake-machines/'+encodeURIComponent(b.dataset.id)+'/actions';const d=await api(path,{method:'POST',body:action==='status'?undefined:JSON.stringify({action})});message(by('listResult'),d.message||('Action '+action+' sent'));await refreshAndCheck()}catch(err){message(by('listResult'),err.message,false)}finally{b.disabled=false}});render();refreshAndCheck().catch(error=>message(by('listResult'),error.message,false));
+</script><script>
+function renderPm2Processes(){const cards=document.querySelectorAll('#machineList .machine');cards.forEach((card,index)=>{const machine=machines[index]||{};const reported=machine.lastStatus?.agent?.raw?.processes;const pm2=Array.isArray(reported)?reported.filter(p=>p&&p.kind==='pm2'&&p.name):[];card.querySelector('.pm2-processes')?.remove();if(!machine.lastStatus?.boReg?.installed)return;const section=document.createElement('div');section.className='pm2-processes';section.style.cssText='margin-top:14px;padding-top:12px;border-top:1px solid #263752';if(!pm2.length){section.innerHTML='<div class="small">PM2 processes: none reported by 🔩.</div>';card.append(section);return}section.innerHTML='<div class="small" style="margin-bottom:8px">PM2 processes</div>'+pm2.map(p=>{const online=String(p.status||'').toLowerCase()==='online';return '<div class="actions" style="margin:6px 0"><code style="align-self:center">'+esc(p.name)+' #'+esc(p.id)+'</code>'+statusChip(p.status,online?'enabled':'disabled')+'<button class="secondary" data-pm2-action="process-start" data-id="'+esc(machine.id)+'" data-process-name="'+esc(p.name)+'" '+(online?'disabled':'')+'>Start</button><button class="danger" data-pm2-action="process-stop" data-id="'+esc(machine.id)+'" data-process-name="'+esc(p.name)+'" '+(online?'':'disabled')+'>Stop</button></div>'}).join('');card.append(section)})}
+new MutationObserver(renderPm2Processes).observe(by('machineList'),{childList:true});document.addEventListener('click',async e=>{const button=e.target.closest('[data-pm2-action]');if(!button)return;const action=button.dataset.pm2Action;const processName=button.dataset.processName;if(action==='process-stop'&&!confirm('Stop PM2 process '+processName+'?'))return;button.disabled=true;try{const d=await api('/vps-wake-machines/'+encodeURIComponent(button.dataset.id)+'/actions',{method:'POST',body:JSON.stringify({action,processName})});message(by('listResult'),d.message||('PM2 '+action+' accepted'));await refreshAndCheck()}catch(error){message(by('listResult'),error.message,false)}finally{button.disabled=false}});renderPm2Processes();
 </script></body></html>`;
 }
 
@@ -9938,7 +9952,7 @@ async function handleRequest(req, res) {
       if (req.method === 'POST' && operation === 'actions') {
         const body = await readBody(req);
         const action = String(body?.action || '').trim();
-        const response = await runVpsControlAction(machineId, action);
+        const response = await runVpsControlAction(machineId, action, body || {});
         sendJson(res, 200, { ok: true, message: `${action} request accepted for ${response.machine.name}`, ...response });
         return;
       }
