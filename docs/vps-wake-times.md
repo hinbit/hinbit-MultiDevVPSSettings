@@ -1,4 +1,4 @@
-# VPS Wake Times and Control Network
+# VPS Wake Times and 🔩 Control Network
 
 The `VPS Wake Times` portal section is the first phase of the VPS control
 network. It keeps a root-only registry in `/etc/vps-wake-machines.json` and
@@ -66,6 +66,12 @@ The supported action names are `communication-off`, `communication-on`,
 phase it should also accept a process selector or PM2/systemd process list,
 then report per-process state.
 
+`Wake` is sent only to the configured provider adapter and is enabled only
+when that adapter reports `state: "off"`. `Shutdown` is sent first to the
+healthy installed 🔩 agent, then MultiDev asks the provider adapter for status
+and records its confirmation. It is enabled only when the VPS is `awake`, 🔩 is
+healthy, and the provider adapter is reachable.
+
 Control response example:
 
 ```json
@@ -76,7 +82,7 @@ Control response example:
 }
 ```
 
-## bo.reg installation
+## 🔩 bo.reg installation
 
 The portal's `Install bo.reg` button fetches `hinbit/bo.reg` with the
 controller's configured GitHub key, builds a package tarball, uploads it over
@@ -103,6 +109,12 @@ small adapter endpoint that validates the portal bearer token, translates the
 generic control request into the current Oracle Cloud or GNS Console API call,
 and returns the response shape above. This keeps provider API changes isolated
 and allows the same policy to work for local, Oracle, and GNS VPS machines.
+
+The adapter must accept `POST` JSON requests with `action: "status"` and
+return a state such as `awake`, `off`, `starting`, or `shutting-down`. It also
+accepts `action: "wake"` to start a stopped VPS. MultiDev never uses the
+provider adapter to request shutdown; it uses 🔩 for that command and the
+provider only for verification.
 
 The portal intentionally does not run shutdown commands through SSH. SSH
 credentials are only a reachability probe. A power or communication action

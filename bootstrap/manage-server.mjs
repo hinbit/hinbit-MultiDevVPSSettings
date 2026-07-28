@@ -2690,6 +2690,29 @@ async function fetchControlJson(endpoint, token, body, method = 'POST') {
   return data && typeof data === 'object' ? data : { message: String(data || '') };
 }
 
+function normalizeProviderState(value) {
+  const state = String(value || '').trim().toLowerCase();
+  if (['running', 'on', 'active', 'awake', 'up'].includes(state)) return 'awake';
+  if (['off', 'stopped', 'shutdown', 'shutoff', 'powered-off', 'down'].includes(state)) return 'off';
+  if (['shutting-down', 'stopping', 'terminating'].includes(state)) return 'shutting-down';
+  if (['starting', 'booting', 'waking'].includes(state)) return 'starting';
+  return state || 'unknown';
+}
+
+async function checkVpsProvider(machine) {
+  if (!machine.providerEndpoint || !machine.providerToken) {
+    return { configured: false, reachable: false, state: 'unknown', error: 'No provider API endpoint/token configured' };
+  }
+  try {
+    const data = await fetchControlJson(machine.providerEndpoint, machine.providerToken, {
+      action: 'status', machineId: machine.id, resourceId: machine.providerResourceId, requestedAt: new Date().toISOString(),
+    });
+    return { configured: true, reachable: true, state: normalizeProviderState(data.state || data.status || data.powerState), raw: data };
+  } catch (error) {
+    return { configured: true, reachable: false, state: 'unknown', error: error.message };
+  }
+}
+
 async function checkVpsWakeMachine(id) {
   const machines = readVpsWakeMachines();
   const index = machines.findIndex((machine) => machine.id === String(id || ''));
@@ -2706,9 +2729,13 @@ async function checkVpsWakeMachine(id) {
       agent = { configured: true, reachable: false, error: error.message };
     }
   }
-  const state = agent.reachable ? String(agent.state || 'awake') : (ssh.reachable ? 'awake' : 'offline');
+  const provider = await checkVpsProvider(machine);
+  const state = provider.reachable
+    ? provider.state
+    : (agent.reachable ? String(agent.state || 'awake') : (ssh.reachable ? 'awake' : 'offline'));
   const communication = agent.reachable ? (agent.communication === false || agent.communication === 'disabled' ? 'disabled' : 'enabled') : 'unknown';
-  machine.lastStatus = { checkedAt, state, communication, ssh, agent };
+  const boReg = { installed: Boolean(agent.reachable && agent.raw?.service === 'bo.reg'), version: String(agent.raw?.version || ''), checkedAt };
+  machine.lastStatus = { checkedAt, state, communication, ssh, agent, provider, boReg };
   machines[index] = machine;
   writeVpsWakeMachines(machines);
   return sanitizeVpsMachine(machine);
@@ -2716,23 +2743,37 @@ async function checkVpsWakeMachine(id) {
 
 async function runVpsControlAction(id, action) {
   if (!VPS_CONTROL_ACTIONS.has(action)) throw new Error('Unsupported VPS control action');
-  const machines = readVpsWakeMachines();
-  const index = machines.findIndex((machine) => machine.id === String(id || ''));
+  let machines = readVpsWakeMachines();
+  let index = machines.findIndex((machine) => machine.id === String(id || ''));
   if (index < 0) throw new Error('VPS machine not found');
-  const machine = machines[index];
+  let machine = machines[index];
   if (action === 'status') return checkVpsWakeMachine(id);
   const payload = { action, machineId: machine.id, resourceId: machine.providerResourceId, policy: machine.policy, requestedAt: new Date().toISOString() };
+  await checkVpsWakeMachine(id);
+  machines = readVpsWakeMachines();
+  index = machines.findIndex((entry) => entry.id === String(id || ''));
+  machine = machines[index];
+  const status = machine.lastStatus || {};
   let result;
-  if (machine.agentUrl) {
-    result = await fetchControlJson(`${machine.agentUrl}/v1/control`, machine.agentToken, payload);
-  } else if (machine.providerEndpoint && machine.providerToken) {
+  if (action === 'wake') {
+    if (status.state !== 'off') throw new Error(`Wake is available only when provider status is off (current: ${status.state || 'unknown'})`);
+    if (!machine.providerEndpoint || !machine.providerToken) throw new Error('Wake requires a configured provider API endpoint and token');
     result = await fetchControlJson(machine.providerEndpoint, machine.providerToken, payload);
+  } else if (action === 'shutdown') {
+    if (status.state !== 'awake') throw new Error(`Shutdown is available only when the VPS is running (current: ${status.state || 'unknown'})`);
+    if (!status.boReg?.installed || !machine.agentUrl || !machine.agentToken) throw new Error('Shutdown requires a healthy installed bo.reg agent');
+    if (!machine.providerEndpoint || !machine.providerToken) throw new Error('Shutdown requires a provider API endpoint and token so MultiDev can confirm the VPS is off');
+    result = await fetchControlJson(`${machine.agentUrl}/v1/control`, machine.agentToken, payload);
+    const provider = await checkVpsProvider(machine);
+    machine.lastStatus = { ...machine.lastStatus, checkedAt: payload.requestedAt, state: provider.reachable ? provider.state : 'shutting-down', provider };
+    result.providerConfirmation = provider;
   } else {
-    throw new Error('No VPS agent or provider endpoint is configured. SSH is used only for reachability checks; install/configure the token agent before sending power or communication commands.');
+    if (!status.boReg?.installed || !machine.agentUrl || !machine.agentToken) throw new Error(`${action} requires a healthy installed bo.reg agent`);
+    result = await fetchControlJson(`${machine.agentUrl}/v1/control`, machine.agentToken, payload);
   }
   machine.lastAction = { action, requestedAt: payload.requestedAt, result: result.message || result.status || 'accepted' };
   if (result.state || result.communication !== undefined) {
-    machine.lastStatus = { ...machine.lastStatus, checkedAt: payload.requestedAt, state: result.state || machine.lastStatus?.state || 'unknown', communication: result.communication === false || result.communication === 'disabled' ? 'disabled' : (result.communication ? 'enabled' : machine.lastStatus?.communication || 'unknown') };
+    machine.lastStatus = { ...machine.lastStatus, checkedAt: payload.requestedAt, state: typeof result.state === 'string' ? result.state : (machine.lastStatus?.state || 'unknown'), communication: result.communication === false || result.communication === 'disabled' ? 'disabled' : (result.communication ? 'enabled' : machine.lastStatus?.communication || 'unknown') };
   }
   machines[index] = machine;
   writeVpsWakeMachines(machines);
@@ -3804,7 +3845,7 @@ function renderVpsWakeTimesPage() {
 <label>SSH host<input id="sshHost" placeholder="108.175.8.172"></label><label>SSH port<input id="sshPort" value="22"></label><label>SSH user<input id="sshUser" value="root"></label><label>SSH password <span class="small">leave empty to keep existing</span><input id="sshPassword" type="password"></label>
 <label>Agent base URL<input id="agentUrl" placeholder="https://agent.example.com"></label><label>Agent token <span class="small">leave empty to keep existing</span><input id="agentToken" type="password"></label><label>Provider action endpoint<input id="providerEndpoint" placeholder="https://provider.example/api/control"></label>
 <label>Provider token <span class="small">leave empty to keep existing</span><input id="providerToken" type="password"></label><label>Provider resource ID<input id="providerResourceId" placeholder="Oracle OCID / GNS server id"></label><label>Notes<input id="notes" placeholder="Oracle VPS, speaker allowed after Shabbat"></label>
-<label>bo.reg port<input id="boRegPort" value="9088"></label><label>bo.reg bind host<input id="boRegBindHost" value="0.0.0.0"></label><div class="small">Install creates <code>/opt/bo.reg/.env</code> with a random token and enabled systemd service.</div>
+<label>🔩 port<input id="boRegPort" value="9088"></label><label>🔩 bind host<input id="boRegBindHost" value="0.0.0.0"></label><div class="small">Install creates <code>/opt/bo.reg/.env</code> with a random token and enabled systemd service.</div>
 <label class="wide">Living policy JSON<textarea id="policy" placeholder='{"timezone":"Asia/Jerusalem","rules":[{"when":"shabbat","communication":"off"},{"when":"night","power":"off"}],"processes":{"speaker":"disabled"}}'></textarea></label>
 <div class="wide"><div class="small">Quick policy presets. They only fill the JSON editor; save the VPS to store it.</div><div class="actions"><button type="button" class="ghost" data-policy-preset="shabbat">Off in Shabbat</button><button type="button" class="ghost" data-policy-preset="shabbat-shutdown">Shutdown in Shabbat</button><button type="button" class="ghost" data-policy-preset="night">Off nightly 20:00-06:00</button><button type="button" class="ghost" data-policy-preset="weekly">Weekly wake for 2 hours</button><button type="button" class="ghost" data-policy-preset="combined">Safe combined policy</button></div></div>
 </div><div class="actions"><button id="saveBtn">Save VPS</button><button id="clearBtn" class="ghost">Clear</button></div><div id="formResult" class="flash" hidden></div></section>
@@ -3813,12 +3854,12 @@ function renderVpsWakeTimesPage() {
 const API='/manage/api';let machines=${initialMachines};const by=id=>document.getElementById(id);const fields=['name','provider','host','sshHost','sshPort','sshUser','sshPassword','agentUrl','agentToken','providerEndpoint','providerToken','providerResourceId','notes','boRegPort','boRegBindHost','policy'];const policyPresets={shabbat:{timezone:'Asia/Jerusalem',rules:[{when:'shabbat',communication:'off',start:'friday-sunset',end:'saturday-nightfall'}],processes:{speaker:'disabled'}},'shabbat-shutdown':{timezone:'Asia/Jerusalem',rules:[{when:'shabbat',power:'shutdown',start:'friday-sunset',end:'saturday-nightfall',requires:'BO_REG_ALLOW_SHUTDOWN=true'}],processes:{}},night:{timezone:'Asia/Jerusalem',rules:[{when:'daily',power:'off',start:'20:00',end:'06:00'}],processes:{}},weekly:{timezone:'Asia/Jerusalem',rules:[{when:'weekly',power:'on',day:'sunday',start:'10:00',end:'12:00',minimumDurationMinutes:120}],processes:{}},combined:{timezone:'Asia/Jerusalem',rules:[{when:'shabbat',communication:'off',start:'friday-sunset',end:'saturday-nightfall'},{when:'daily',power:'off',start:'20:00',end:'06:00'},{when:'weekly',power:'on',day:'sunday',start:'10:00',end:'12:00',minimumDurationMinutes:120}],processes:{speaker:'disabled'}}};
 function esc(v){return String(v??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}function message(el,text,ok=true){el.hidden=false;el.textContent=text;el.style.borderColor=ok?'#166534':'#991b1b'}
 async function api(p,o={}){const r=await fetch(API+p,{headers:{'Content-Type':'application/json'},credentials:'same-origin',...o});const t=await r.text();let d;try{d=t?JSON.parse(t):{}}catch{d={message:t}}if(!r.ok)throw Error(d.error||d.message||'Request failed');return d}
-function statusChip(value,kind){return '<span class="chip '+esc(value)+' '+(kind||'')+'">'+esc(value||'unknown')+'</span>'}function render(){const out=machines.length?machines.map(m=>{const s=m.lastStatus||{},a=m.lastAction||{},b=m.boReg||{};const bo=b.installedAt?'<span class="chip enabled">bo.reg '+esc(b.version||'installed')+'</span>':'<span class="chip">bo.reg not installed</span>';return '<article class="machine"><div class="machine-head"><div><strong>'+esc(m.name)+'</strong><div class="small">'+esc(m.host||m.agentUrl||m.providerEndpoint||'no host')+' · '+esc(m.provider)+'</div></div><div class="chips">'+statusChip(s.state,'state')+statusChip(s.communication,'communication')+bo+'</div></div><div class="small">Last checked: '+esc(s.checkedAt||'never')+' · Last action: '+esc(a.action||'none')+(a.result?' ('+esc(a.result)+')':'')+'</div><div class="actions"><button class="secondary" data-act="status" data-id="'+esc(m.id)+'">Check status</button><button class="secondary" data-bo-install="'+esc(m.id)+'">'+(b.installedAt?'Update bo.reg':'Install bo.reg')+'</button><button class="secondary" data-act="communication-off" data-id="'+esc(m.id)+'">Disable communication</button><button class="secondary" data-act="communication-on" data-id="'+esc(m.id)+'">Enable communication</button><button class="danger" data-act="shutdown" data-id="'+esc(m.id)+'">Shutdown</button><button class="secondary" data-act="wake" data-id="'+esc(m.id)+'">Wake</button><button class="ghost" data-edit="'+esc(m.id)+'">Edit</button><button class="danger" data-delete="'+esc(m.id)+'">Delete</button></div></article>'}).join(''):'<p class="muted">No VPS machines registered yet.</p>';by('machineList').innerHTML=out}
+function statusChip(value,kind){return '<span class="chip '+esc(value)+' '+(kind||'')+'">'+esc(value||'unknown')+'</span>'}function render(){const out=machines.length?machines.map(m=>{const s=m.lastStatus||{},a=m.lastAction||{},b=m.boReg||{},agent=s.boReg||{};const installed=Boolean(agent.installed);const bo=installed?'<span class="chip enabled" title="bo.reg installed">🔩 '+esc(agent.version||b.version||'installed')+'</span>':'<span class="chip" title="bo.reg not installed or unreachable">🔩 not installed</span>';const canWake=s.state==='off'&&Boolean(s.provider&&s.provider.reachable);const canShutdown=s.state==='awake'&&installed&&Boolean(s.provider&&s.provider.reachable);const canCommunication=installed;return '<article class="machine"><div class="machine-head"><div><strong>'+esc(m.name)+'</strong><div class="small">'+esc(m.host||m.agentUrl||m.providerEndpoint||'no host')+' · '+esc(m.provider)+'</div></div><div class="chips">'+statusChip(s.state,'state')+statusChip(s.communication,'communication')+bo+'</div></div><div class="small">Last checked: '+esc(s.checkedAt||'checking...')+' · Provider: '+esc(s.provider?.state||'not configured')+' · Last action: '+esc(a.action||'none')+(a.result?' ('+esc(a.result)+')':'')+'</div><div class="actions"><button class="secondary" data-act="status" data-id="'+esc(m.id)+'">Check status</button><button class="secondary" data-bo-install="'+esc(m.id)+'">'+(b.installedAt?'Update 🔩':'Install 🔩')+'</button><button class="secondary" data-act="communication-off" data-id="'+esc(m.id)+'" '+(canCommunication?'':'disabled')+'>Disable communication</button><button class="secondary" data-act="communication-on" data-id="'+esc(m.id)+'" '+(canCommunication?'':'disabled')+'>Enable communication</button><button class="danger" data-act="shutdown" data-id="'+esc(m.id)+'" '+(canShutdown?'':'disabled')+' title="Requires running VPS, healthy 🔩, and provider API">Shutdown</button><button class="secondary" data-act="wake" data-id="'+esc(m.id)+'" '+(canWake?'':'disabled')+' title="Requires provider API status off">Wake</button><button class="ghost" data-edit="'+esc(m.id)+'">Edit</button><button class="danger" data-delete="'+esc(m.id)+'">Delete</button></div></article>'}).join(''):'<p class="muted">No VPS machines registered yet.</p>';by('machineList').innerHTML=out}
 function clear(){by('machineId').value='';fields.forEach(k=>{if(k==='provider')by(k).value='agent';else if(k==='sshPort')by(k).value='22';else if(k==='sshUser')by(k).value='root';else if(k==='boRegPort')by(k).value='9088';else if(k==='boRegBindHost')by(k).value='0.0.0.0';else by(k).value=''});by('formTitle').textContent='Add VPS machine'}
 function edit(m){by('machineId').value=m.id||'';fields.forEach(k=>{if(k==='policy')by(k).value=JSON.stringify(m.policy||{},null,2);else if(k==='boRegPort')by(k).value=(m.boReg||{}).port||'9088';else if(k==='boRegBindHost')by(k).value=(m.boReg||{}).bindHost||'0.0.0.0';else if(!/Password|Token/.test(k))by(k).value=m[k]||'';else by(k).value=''});by('formTitle').textContent='Edit VPS machine';by('name').focus()}
-async function refresh(){const d=await api('/vps-wake-machines');machines=d.machines||[];render()}
-by('saveBtn').onclick=async()=>{try{const p={id:by('machineId').value};fields.forEach(k=>p[k]=by(k).value);const d=await api('/vps-wake-machines',{method:'POST',body:JSON.stringify(p)});message(by('formResult'),d.message);await refresh();clear()}catch(e){message(by('formResult'),e.message,false)}};by('clearBtn').onclick=clear;by('refreshBtn').onclick=async()=>{try{for(const m of machines)await api('/vps-wake-machines/'+encodeURIComponent(m.id)+'/check',{method:'POST'});await refresh();message(by('listResult'),'All VPS statuses refreshed')}catch(e){message(by('listResult'),e.message,false)}};
-document.addEventListener('click',async e=>{const preset=e.target.closest('[data-policy-preset]');if(preset){by('policy').value=JSON.stringify(policyPresets[preset.dataset.policyPreset]||{},null,2);return}const editBtn=e.target.closest('[data-edit]');if(editBtn){const m=machines.find(x=>x.id===editBtn.dataset.edit);if(m)edit(m);return}const del=e.target.closest('[data-delete]');if(del){if(confirm('Delete this VPS registry entry?')){await api('/vps-wake-machines/'+encodeURIComponent(del.dataset.delete),{method:'DELETE'});await refresh()}return}const install=e.target.closest('[data-bo-install]');if(install){if(!confirm('Install or update bo.reg on this VPS over password SSH? A random token will be written to /opt/bo.reg/.env.'))return;install.disabled=true;try{const d=await api('/vps-wake-machines/'+encodeURIComponent(install.dataset.boInstall)+'/bo-reg',{method:'POST',body:JSON.stringify({update:true})});message(by('listResult'),d.message||'bo.reg installed');await refresh()}catch(err){message(by('listResult'),err.message,false)}finally{install.disabled=false}return}const b=e.target.closest('[data-act]');if(!b)return;const action=b.dataset.act;if(['shutdown','communication-off'].includes(action)&&!confirm('Send '+action+' to this VPS? The agent/provider decides the actual operation.'))return;b.disabled=true;try{const path=action==='status'?'/vps-wake-machines/'+encodeURIComponent(b.dataset.id)+'/check':'/vps-wake-machines/'+encodeURIComponent(b.dataset.id)+'/actions';const d=await api(path,{method:'POST',body:action==='status'?undefined:JSON.stringify({action})});message(by('listResult'),d.message||('Action '+action+' sent'));await refresh()}catch(err){message(by('listResult'),err.message,false)}finally{b.disabled=false}});render();
+async function refresh(){const d=await api('/vps-wake-machines');machines=d.machines||[];render()}async function refreshAndCheck(){await refresh();await Promise.allSettled(machines.map(m=>api('/vps-wake-machines/'+encodeURIComponent(m.id)+'/check',{method:'POST'})));await refresh()}
+by('saveBtn').onclick=async()=>{try{const p={id:by('machineId').value};fields.forEach(k=>p[k]=by(k).value);const d=await api('/vps-wake-machines',{method:'POST',body:JSON.stringify(p)});message(by('formResult'),d.message);await refreshAndCheck();clear()}catch(e){message(by('formResult'),e.message,false)}};by('clearBtn').onclick=clear;by('refreshBtn').onclick=async()=>{try{await refreshAndCheck();message(by('listResult'),'All VPS statuses refreshed')}catch(e){message(by('listResult'),e.message,false)}};
+document.addEventListener('click',async e=>{const preset=e.target.closest('[data-policy-preset]');if(preset){by('policy').value=JSON.stringify(policyPresets[preset.dataset.policyPreset]||{},null,2);return}const editBtn=e.target.closest('[data-edit]');if(editBtn){const m=machines.find(x=>x.id===editBtn.dataset.edit);if(m)edit(m);return}const del=e.target.closest('[data-delete]');if(del){if(confirm('Delete this VPS registry entry?')){await api('/vps-wake-machines/'+encodeURIComponent(del.dataset.delete),{method:'DELETE'});await refresh()}return}const install=e.target.closest('[data-bo-install]');if(install){if(!confirm('Install or update 🔩 on this VPS over password SSH? A random token will be written to /opt/bo.reg/.env.'))return;install.disabled=true;try{const d=await api('/vps-wake-machines/'+encodeURIComponent(install.dataset.boInstall)+'/bo-reg',{method:'POST',body:JSON.stringify({update:true})});message(by('listResult'),d.message||'🔩 installed');await refreshAndCheck()}catch(err){message(by('listResult'),err.message,false)}finally{install.disabled=false}return}const b=e.target.closest('[data-act]');if(!b)return;const action=b.dataset.act;if(['shutdown','communication-off'].includes(action)&&!confirm('Send '+action+' to this VPS?'))return;b.disabled=true;try{const path=action==='status'?'/vps-wake-machines/'+encodeURIComponent(b.dataset.id)+'/check':'/vps-wake-machines/'+encodeURIComponent(b.dataset.id)+'/actions';const d=await api(path,{method:'POST',body:action==='status'?undefined:JSON.stringify({action})});message(by('listResult'),d.message||('Action '+action+' sent'));await refreshAndCheck()}catch(err){message(by('listResult'),err.message,false)}finally{b.disabled=false}});render();refreshAndCheck().catch(error=>message(by('listResult'),error.message,false));
 </script></body></html>`;
 }
 

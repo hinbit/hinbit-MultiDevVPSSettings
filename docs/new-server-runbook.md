@@ -45,7 +45,7 @@ The installer will set up:
 - the `/manage/` system portal
 - `projectctl`
 
-## VPS control agent
+## 🔩 VPS control agent
 
 When this VPS is added in `/manage/vps-wake-times/`, use the `Install bo.reg`
 button. MultiDev connects with the saved password SSH credentials, installs the
