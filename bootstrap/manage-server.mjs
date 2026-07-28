@@ -2,6 +2,7 @@
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
+import net from 'net';
 import { execFileSync, spawn, spawnSync } from 'child_process';
 import os from 'os';
 import { randomUUID } from 'crypto';
@@ -12,6 +13,7 @@ const AUTH_DIR = '/etc/nginx/project-auth';
 const SYSTEM_ENV_FILE = '/etc/vps-system.env';
 const SYSTEM_DOMAIN_FILE = '/etc/vps-system-domain';
 const DB_MACHINES_FILE = '/etc/vps-db-machines.json';
+const VPS_WAKE_MACHINES_FILE = '/etc/vps-wake-machines.json';
 const SSH_KEYS_FILE = '/etc/vps-ssh-keys.json';
 const SSH_KEYS_DIR = '/root/.ssh/vps-managed-keys';
 const SSH_CONFIG_FILE = '/root/.ssh/config';
@@ -46,6 +48,8 @@ const LOCAL_DB_MACHINE = {
   originHost: '',
   phpMyAdminUrl: '',
 };
+const VPS_CONTROL_ACTIONS = new Set(['communication-off', 'communication-on', 'shutdown', 'wake', 'status']);
+const VPS_PROVIDERS = new Set(['manual', 'oracle', 'gns', 'agent']);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -2455,6 +2459,194 @@ function deleteDbMachine(id) {
   writeDbMachines(next);
 }
 
+function sanitizeVpsMachine(machine, { includeSecrets = false } = {}) {
+  const value = { ...machine };
+  if (!includeSecrets) {
+    delete value.sshPassword;
+    delete value.agentToken;
+    delete value.providerToken;
+  }
+  value.hasSshPassword = Boolean(machine.sshPassword);
+  value.hasAgentToken = Boolean(machine.agentToken);
+  value.hasProviderToken = Boolean(machine.providerToken);
+  return value;
+}
+
+function readVpsWakeMachines({ includeSecrets = true } = {}) {
+  try {
+    if (!fs.existsSync(VPS_WAKE_MACHINES_FILE)) return [];
+    const data = JSON.parse(fs.readFileSync(VPS_WAKE_MACHINES_FILE, 'utf8'));
+    if (!Array.isArray(data)) return [];
+    return data.map((entry, index) => {
+      const machine = {
+        id: String(entry.id || `vps-${index + 1}`),
+        name: String(entry.name || '').trim(),
+        provider: VPS_PROVIDERS.has(String(entry.provider || '').trim()) ? String(entry.provider).trim() : 'manual',
+        host: String(entry.host || '').trim(),
+        sshHost: String(entry.sshHost || entry.host || '').trim(),
+        sshPort: String(entry.sshPort || '22').trim() || '22',
+        sshUser: String(entry.sshUser || 'root').trim() || 'root',
+        sshPassword: String(entry.sshPassword || ''),
+        agentUrl: String(entry.agentUrl || '').trim(),
+        agentToken: String(entry.agentToken || ''),
+        providerEndpoint: String(entry.providerEndpoint || '').trim(),
+        providerToken: String(entry.providerToken || ''),
+        providerResourceId: String(entry.providerResourceId || '').trim(),
+        policy: entry.policy && typeof entry.policy === 'object' && !Array.isArray(entry.policy) ? entry.policy : {},
+        notes: String(entry.notes || '').trim(),
+        lastStatus: entry.lastStatus && typeof entry.lastStatus === 'object' ? entry.lastStatus : {},
+        lastAction: entry.lastAction && typeof entry.lastAction === 'object' ? entry.lastAction : {},
+      };
+      return includeSecrets ? machine : sanitizeVpsMachine(machine);
+    }).filter((machine) => machine.name || machine.host || machine.agentUrl || machine.providerEndpoint);
+  } catch {
+    return [];
+  }
+}
+
+function writeVpsWakeMachines(machines) {
+  fs.writeFileSync(VPS_WAKE_MACHINES_FILE, `${JSON.stringify(machines, null, 2)}\n`);
+  fs.chmodSync(VPS_WAKE_MACHINES_FILE, 0o600);
+}
+
+function validateOptionalUrl(value, label) {
+  if (!value) return '';
+  try {
+    const parsed = new URL(value);
+    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('unsupported protocol');
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    throw new Error(`${label} must be an http or https URL`);
+  }
+}
+
+function normalizeVpsWakeMachine(input, existing = {}) {
+  const name = String(input?.name || existing.name || '').trim();
+  const provider = String(input?.provider || existing.provider || 'manual').trim().toLowerCase();
+  const host = String(input?.host || existing.host || '').trim();
+  const sshHost = String(input?.sshHost || host || existing.sshHost || '').trim();
+  const sshUser = String(input?.sshUser || existing.sshUser || 'root').trim() || 'root';
+  const sshPort = String(input?.sshPort || existing.sshPort || '22').trim() || '22';
+  const agentUrl = validateOptionalUrl(String(input?.agentUrl || existing.agentUrl || '').trim(), 'Agent URL');
+  const providerEndpoint = validateOptionalUrl(String(input?.providerEndpoint || existing.providerEndpoint || '').trim(), 'Provider endpoint');
+  const providerResourceId = String(input?.providerResourceId || existing.providerResourceId || '').trim();
+  const notes = String(input?.notes || existing.notes || '').trim();
+  const sshPassword = Object.prototype.hasOwnProperty.call(input || {}, 'sshPassword') && String(input.sshPassword || '')
+    ? String(input.sshPassword) : String(existing.sshPassword || '');
+  const agentToken = Object.prototype.hasOwnProperty.call(input || {}, 'agentToken') && String(input.agentToken || '')
+    ? String(input.agentToken) : String(existing.agentToken || '');
+  const providerToken = Object.prototype.hasOwnProperty.call(input || {}, 'providerToken') && String(input.providerToken || '')
+    ? String(input.providerToken) : String(existing.providerToken || '');
+  let policy = input?.policy;
+  if (typeof policy === 'string') {
+    try { policy = policy.trim() ? JSON.parse(policy) : {}; } catch { throw new Error('Policy must be valid JSON'); }
+  }
+  if (!policy || typeof policy !== 'object' || Array.isArray(policy)) policy = existing.policy || {};
+  if (!name) throw new Error('VPS name is required');
+  if (!VPS_PROVIDERS.has(provider)) throw new Error('Provider must be manual, oracle, gns, or agent');
+  if (!host && !agentUrl && !providerEndpoint) throw new Error('Enter a VPS host, agent URL, or provider endpoint');
+  if (host && !/^[A-Za-z0-9._:-]+$/.test(host)) throw new Error(`Invalid VPS host: ${host}`);
+  if (sshHost && !/^[A-Za-z0-9._:-]+$/.test(sshHost)) throw new Error(`Invalid SSH host: ${sshHost}`);
+  if (!/^[0-9]+$/.test(sshPort) || Number(sshPort) < 1 || Number(sshPort) > 65535) throw new Error('SSH port must be between 1 and 65535');
+  return {
+    id: String(existing.id || input?.id || `vps-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`),
+    name, provider, host, sshHost, sshPort, sshUser, sshPassword, agentUrl, agentToken,
+    providerEndpoint, providerToken, providerResourceId, policy, notes,
+    lastStatus: existing.lastStatus || {}, lastAction: existing.lastAction || {},
+  };
+}
+
+function saveVpsWakeMachine(payload) {
+  const machines = readVpsWakeMachines();
+  const index = machines.findIndex((machine) => machine.id === String(payload?.id || ''));
+  const machine = normalizeVpsWakeMachine(payload || {}, index >= 0 ? machines[index] : {});
+  if (index >= 0) machines[index] = machine;
+  else machines.push(machine);
+  machines.sort((a, b) => a.name.localeCompare(b.name));
+  writeVpsWakeMachines(machines);
+  return sanitizeVpsMachine(machine);
+}
+
+function deleteVpsWakeMachine(id) {
+  const machines = readVpsWakeMachines().filter((machine) => machine.id !== String(id || ''));
+  writeVpsWakeMachines(machines);
+}
+
+function probeTcp(host, port, timeout = 2500) {
+  return new Promise((resolve) => {
+    if (!host) return resolve({ reachable: false, error: 'No host configured' });
+    const socket = net.createConnection({ host, port: Number(port) || 22 });
+    const finish = (result) => { socket.destroy(); resolve(result); };
+    socket.setTimeout(timeout);
+    socket.once('connect', () => finish({ reachable: true }));
+    socket.once('timeout', () => finish({ reachable: false, error: 'Connection timed out' }));
+    socket.once('error', (error) => finish({ reachable: false, error: error.message }));
+  });
+}
+
+async function fetchControlJson(endpoint, token, body, method = 'POST') {
+  const response = await fetch(endpoint, {
+    method,
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: method === 'GET' ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(7000),
+  });
+  const raw = await response.text();
+  let data = {};
+  try { data = raw ? JSON.parse(raw) : {}; } catch { data = { message: raw }; }
+  if (!response.ok) throw new Error(data.error || data.message || `HTTP ${response.status}`);
+  return data && typeof data === 'object' ? data : { message: String(data || '') };
+}
+
+async function checkVpsWakeMachine(id) {
+  const machines = readVpsWakeMachines();
+  const index = machines.findIndex((machine) => machine.id === String(id || ''));
+  if (index < 0) throw new Error('VPS machine not found');
+  const machine = machines[index];
+  const checkedAt = new Date().toISOString();
+  const ssh = await probeTcp(machine.sshHost || machine.host, machine.sshPort);
+  let agent = { configured: Boolean(machine.agentUrl), reachable: false, error: '' };
+  if (machine.agentUrl) {
+    try {
+      const data = await fetchControlJson(`${machine.agentUrl}/health`, machine.agentToken, null, 'GET');
+      agent = { configured: true, reachable: true, state: data.state || data.status || 'awake', communication: data.communication || data.communicationEnabled, raw: data };
+    } catch (error) {
+      agent = { configured: true, reachable: false, error: error.message };
+    }
+  }
+  const state = agent.reachable ? String(agent.state || 'awake') : (ssh.reachable ? 'awake' : 'offline');
+  const communication = agent.reachable ? (agent.communication === false || agent.communication === 'disabled' ? 'disabled' : 'enabled') : 'unknown';
+  machine.lastStatus = { checkedAt, state, communication, ssh, agent };
+  machines[index] = machine;
+  writeVpsWakeMachines(machines);
+  return sanitizeVpsMachine(machine);
+}
+
+async function runVpsControlAction(id, action) {
+  if (!VPS_CONTROL_ACTIONS.has(action)) throw new Error('Unsupported VPS control action');
+  const machines = readVpsWakeMachines();
+  const index = machines.findIndex((machine) => machine.id === String(id || ''));
+  if (index < 0) throw new Error('VPS machine not found');
+  const machine = machines[index];
+  if (action === 'status') return checkVpsWakeMachine(id);
+  const payload = { action, machineId: machine.id, resourceId: machine.providerResourceId, policy: machine.policy, requestedAt: new Date().toISOString() };
+  let result;
+  if (machine.agentUrl) {
+    result = await fetchControlJson(`${machine.agentUrl}/v1/control`, machine.agentToken, payload);
+  } else if (machine.providerEndpoint && machine.providerToken) {
+    result = await fetchControlJson(machine.providerEndpoint, machine.providerToken, payload);
+  } else {
+    throw new Error('No VPS agent or provider endpoint is configured. SSH is used only for reachability checks; install/configure the token agent before sending power or communication commands.');
+  }
+  machine.lastAction = { action, requestedAt: payload.requestedAt, result: result.message || result.status || 'accepted' };
+  if (result.state || result.communication !== undefined) {
+    machine.lastStatus = { ...machine.lastStatus, checkedAt: payload.requestedAt, state: result.state || machine.lastStatus?.state || 'unknown', communication: result.communication === false || result.communication === 'disabled' ? 'disabled' : (result.communication ? 'enabled' : machine.lastStatus?.communication || 'unknown') };
+  }
+  machines[index] = machine;
+  writeVpsWakeMachines(machines);
+  return { machine: sanitizeVpsMachine(machine), result };
+}
+
 function runPython(script, args = []) {
   const res = spawnSync('python3', ['-c', script, ...args], {
     encoding: 'utf8',
@@ -3506,6 +3698,36 @@ function renderDbMachinesPage() {
 </html>`;
 }
 
+function renderVpsWakeTimesPage() {
+  const machines = readVpsWakeMachines({ includeSecrets: false });
+  const initialMachines = JSON.stringify(machines).replace(/</g, '\\u003c');
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VPS Wake Times</title><style>
+:root{color-scheme:dark}body{margin:0;padding:36px;font-family:Inter,system-ui,sans-serif;background:radial-gradient(circle at top,#15345a,#07101d 55%,#03060b);color:#e5eef8}main{max-width:1280px;margin:auto}.head{display:flex;justify-content:space-between;align-items:end;gap:16px;margin-bottom:20px}.panel{background:#08111fe8;border:1px solid #263752;border-radius:18px;padding:20px;margin:16px 0}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.wide{grid-column:span 3}label{display:grid;gap:5px;font-size:13px;color:#cbd5e1}input,select,textarea{background:#0b1628;color:#e5eef8;border:1px solid #2a4164;border-radius:9px;padding:10px}textarea{min-height:100px}button,.btn{border:0;border-radius:999px;padding:9px 13px;font-weight:700;background:#38bdf8;color:#00111d;cursor:pointer;text-decoration:none}.secondary{background:#17263d;color:#dbeafe;border:1px solid #375172}.danger{background:#ef4444;color:#210303}.ghost{background:transparent;color:#dbeafe;border:1px solid #375172}.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}.muted,.small{color:#94a3b8}.small{font-size:12px}.machine{border-top:1px solid #263752;padding:16px 0}.machine:first-child{border-top:0}.machine-head{display:flex;justify-content:space-between;gap:16px;align-items:start}.chips{display:flex;gap:7px;flex-wrap:wrap}.chip{padding:4px 8px;border-radius:999px;background:#17263d;font-size:12px}.chip.awake,.chip.enabled{color:#86efac;border:1px solid #166534}.chip.offline,.chip.disabled{color:#fca5a5;border:1px solid #991b1b}.flash{white-space:pre-wrap;margin-top:12px;padding:10px;border:1px solid #375172;border-radius:9px}@media(max-width:800px){body{padding:18px}.grid{grid-template-columns:1fr}.wide{grid-column:auto}.head{align-items:start;flex-direction:column}}
+</style></head><body><main>
+<div class="head"><div><h1>VPS Wake Times</h1><div class="muted">Control registry for awake state, communication state, and JSON living policies.</div><div class="small">Power and communication actions require a configured VPS token agent or provider endpoint. SSH is a reachability probe only.</div></div><div class="actions"><a class="btn ghost" href="/manage/">Back to manage</a><a class="btn ghost" href="/manage/db-machines/">DB Machines</a><button class="secondary" id="refreshBtn">Refresh all</button></div></div>
+<section class="panel"><h2 id="formTitle">Add VPS machine</h2><div class="grid">
+<input id="machineId" type="hidden"><label>Name<input id="name" placeholder="multilisten.hinbit.com"></label><label>Provider<select id="provider"><option value="agent">Agent</option><option value="oracle">Oracle</option><option value="gns">GNS</option><option value="manual">Manual</option></select></label><label>Display / VPS host<input id="host" placeholder="108.175.8.172"></label>
+<label>SSH host<input id="sshHost" placeholder="108.175.8.172"></label><label>SSH port<input id="sshPort" value="22"></label><label>SSH user<input id="sshUser" value="root"></label><label>SSH password <span class="small">leave empty to keep existing</span><input id="sshPassword" type="password"></label>
+<label>Agent base URL<input id="agentUrl" placeholder="https://agent.example.com"></label><label>Agent token <span class="small">leave empty to keep existing</span><input id="agentToken" type="password"></label><label>Provider action endpoint<input id="providerEndpoint" placeholder="https://provider.example/api/control"></label>
+<label>Provider token <span class="small">leave empty to keep existing</span><input id="providerToken" type="password"></label><label>Provider resource ID<input id="providerResourceId" placeholder="Oracle OCID / GNS server id"></label><label>Notes<input id="notes" placeholder="Oracle VPS, speaker allowed after Shabbat"></label>
+<label class="wide">Living policy JSON<textarea id="policy" placeholder='{"timezone":"Asia/Jerusalem","rules":[{"when":"shabbat","communication":"off"},{"when":"night","power":"off"}],"processes":{"speaker":"disabled"}}'></textarea></label>
+</div><div class="actions"><button id="saveBtn">Save VPS</button><button id="clearBtn" class="ghost">Clear</button></div><div id="formResult" class="flash" hidden></div></section>
+<section class="panel"><h2>Connected VPS machines</h2><div id="machineList"></div><div id="listResult" class="flash" hidden></div></section>
+</main><script>
+const API='/manage/api';let machines=${initialMachines};const by=id=>document.getElementById(id);const fields=['name','provider','host','sshHost','sshPort','sshUser','sshPassword','agentUrl','agentToken','providerEndpoint','providerToken','providerResourceId','notes','policy'];
+function esc(v){return String(v??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}function message(el,text,ok=true){el.hidden=false;el.textContent=text;el.style.borderColor=ok?'#166534':'#991b1b'}
+async function api(p,o={}){const r=await fetch(API+p,{headers:{'Content-Type':'application/json'},credentials:'same-origin',...o});const t=await r.text();let d;try{d=t?JSON.parse(t):{}}catch{d={message:t}}if(!r.ok)throw Error(d.error||d.message||'Request failed');return d}
+function statusChip(value,kind){return '<span class="chip '+esc(value)+' '+(kind||'')+'">'+esc(value||'unknown')+'</span>'}function render(){const out=machines.length?machines.map(m=>{const s=m.lastStatus||{},a=m.lastAction||{};return '<article class="machine"><div class="machine-head"><div><strong>'+esc(m.name)+'</strong><div class="small">'+esc(m.host||m.agentUrl||m.providerEndpoint||'no host')+' · '+esc(m.provider)+'</div></div><div class="chips">'+statusChip(s.state,'state')+statusChip(s.communication,'communication')+(m.agentUrl?'<span class="chip">agent</span>':'')+'</div></div><div class="small">Last checked: '+esc(s.checkedAt||'never')+' · Last action: '+esc(a.action||'none')+(a.result?' ('+esc(a.result)+')':'')+'</div><div class="actions"><button class="secondary" data-act="status" data-id="'+esc(m.id)+'">Check status</button><button class="secondary" data-act="communication-off" data-id="'+esc(m.id)+'">Disable communication</button><button class="secondary" data-act="communication-on" data-id="'+esc(m.id)+'">Enable communication</button><button class="danger" data-act="shutdown" data-id="'+esc(m.id)+'">Shutdown</button><button class="secondary" data-act="wake" data-id="'+esc(m.id)+'">Wake</button><button class="ghost" data-edit="'+esc(m.id)+'">Edit</button><button class="danger" data-delete="'+esc(m.id)+'">Delete</button></div></article>'}).join(''):'<p class="muted">No VPS machines registered yet.</p>';by('machineList').innerHTML=out}
+function clear(){by('machineId').value='';fields.forEach(k=>{if(k==='provider')by(k).value='agent';else if(k==='sshPort')by(k).value='22';else if(k==='sshUser')by(k).value='root';else by(k).value=''});by('formTitle').textContent='Add VPS machine'}
+function edit(m){by('machineId').value=m.id||'';fields.forEach(k=>{if(k==='policy')by(k).value=JSON.stringify(m.policy||{},null,2);else if(!/Password|Token/.test(k))by(k).value=m[k]||'';else by(k).value=''});by('formTitle').textContent='Edit VPS machine';by('name').focus()}
+async function refresh(){const d=await api('/vps-wake-machines');machines=d.machines||[];render()}
+by('saveBtn').onclick=async()=>{try{const p={id:by('machineId').value};fields.forEach(k=>p[k]=by(k).value);const d=await api('/vps-wake-machines',{method:'POST',body:JSON.stringify(p)});message(by('formResult'),d.message);await refresh();clear()}catch(e){message(by('formResult'),e.message,false)}};by('clearBtn').onclick=clear;by('refreshBtn').onclick=async()=>{try{for(const m of machines)await api('/vps-wake-machines/'+encodeURIComponent(m.id)+'/check',{method:'POST'});await refresh();message(by('listResult'),'All VPS statuses refreshed')}catch(e){message(by('listResult'),e.message,false)}};
+document.addEventListener('click',async e=>{const editBtn=e.target.closest('[data-edit]');if(editBtn){const m=machines.find(x=>x.id===editBtn.dataset.edit);if(m)edit(m);return}const del=e.target.closest('[data-delete]');if(del){if(confirm('Delete this VPS registry entry?')){await api('/vps-wake-machines/'+encodeURIComponent(del.dataset.delete),{method:'DELETE'});await refresh()}return}const b=e.target.closest('[data-act]');if(!b)return;const action=b.dataset.act;if(['shutdown','communication-off'].includes(action)&&!confirm('Send '+action+' to this VPS? The agent/provider decides the actual operation.'))return;b.disabled=true;try{const path=action==='status'?'/vps-wake-machines/'+encodeURIComponent(b.dataset.id)+'/check':'/vps-wake-machines/'+encodeURIComponent(b.dataset.id)+'/actions';const d=await api(path,{method:'POST',body:action==='status'?undefined:JSON.stringify({action})});message(by('listResult'),d.message||('Action '+action+' sent'));await refresh()}catch(err){message(by('listResult'),err.message,false)}finally{b.disabled=false}});render();
+</script></body></html>`;
+}
+
 function renderSshKeyRows(keys) {
   if (!keys.length) {
     return '<tr><td colspan="7" class="muted">No SSH keys found on this machine.</td></tr>';
@@ -4206,6 +4428,7 @@ function escapeHtml(value) {
 function renderPortalPage() {
   const projects = projectView();
   const dbMachines = readDbMachines();
+  const vpsWakeMachines = readVpsWakeMachines({ includeSecrets: false });
   const sshKeys = readSshKeys();
   const updateStatus = getManageUpdateStatus();
   const versionBadgeClass = updateStatus.runningMatchesRemote ? 'ver-good' : 'ver-bad';
@@ -4318,7 +4541,7 @@ function renderPortalPage() {
     <div>
       <h1>MultiDev Portal</h1>
       <div class="muted">Choose the area you want to manage.</div>
-      <div class="small">${escapeHtml(String(projects.length))} projects, ${escapeHtml(String(sshKeys.length))} SSH keys, ${escapeHtml(String(dbMachines.length))} DB machines</div>
+      <div class="small">${escapeHtml(String(projects.length))} projects, ${escapeHtml(String(sshKeys.length))} SSH keys, ${escapeHtml(String(dbMachines.length))} DB machines, ${escapeHtml(String(vpsWakeMachines.length))} VPS machines</div>
       <div id="versionBadge" class="version-badge ${versionBadgeClass}">
         <span>${escapeHtml(versionBadgeLabel)}</span>
         <span>running <code>${escapeHtml(runningShort)}</code></span>
@@ -4334,6 +4557,7 @@ function renderPortalPage() {
       <a class="btn ghost" href="/manage/ssh-keys/">SSH Keys</a>
       <a class="btn ghost" href="/manage/vault/">DB Vault</a>
       <a class="btn ghost" href="/manage/db-machines/">DB Machines</a>
+      <a class="btn ghost" href="/manage/vps-wake-times/">VPS Wake Times</a>
       <a class="btn ghost" href="/manage/tls/">TLS / Certificates</a>
       <button class="btn secondary" id="updateVerBtn" type="button">UpdateVer</button>
     </div>
@@ -4358,6 +4582,11 @@ function renderPortalPage() {
       <div class="card-meta">Machines</div>
       <h2 class="card-title">DB Machines</h2>
       <div class="card-desc">Register and edit local or remote DB machines, root credentials, and allowed IPs.</div>
+    </a>
+    <a class="card" href="/manage/vps-wake-times/">
+      <div class="card-meta">VPS control</div>
+      <h2 class="card-title">VPS Wake Times</h2>
+      <div class="card-desc">Register VPS agents, check awake and communication status, and attach JSON policies for Shabbat, holidays, and scheduled power actions.</div>
     </a>
     <a class="card" href="/manage/proxy/">
       <div class="card-meta">Proxy</div>
@@ -9016,6 +9245,15 @@ async function handleRequest(req, res) {
       return;
     }
 
+    if (req.method === 'GET' && routePath === '/vps-wake-times') {
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+      });
+      res.end(renderVpsWakeTimesPage());
+      return;
+    }
+
     if (req.method === 'GET' && routePath === '/ssh-keys') {
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8',
@@ -9464,6 +9702,47 @@ async function handleRequest(req, res) {
           machine,
           machines: readDbMachines(),
         });
+        return;
+      }
+    }
+
+    if (routePath === '/api/vps-wake-machines') {
+      if (req.method === 'GET') {
+        sendJson(res, 200, { machines: readVpsWakeMachines({ includeSecrets: false }) });
+        return;
+      }
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        const machine = saveVpsWakeMachine(body || {});
+        sendJson(res, 200, {
+          ok: true,
+          message: `Saved VPS ${machine.name}`,
+          machine,
+          machines: readVpsWakeMachines({ includeSecrets: false }),
+        });
+        return;
+      }
+    }
+
+    const vpsWakeMachineMatch = routePath.match(/^\/api\/vps-wake-machines\/([^/]+)(?:\/(check|actions))?$/);
+    if (vpsWakeMachineMatch) {
+      const machineId = decodeURIComponent(vpsWakeMachineMatch[1]);
+      const operation = vpsWakeMachineMatch[2] || '';
+      if (req.method === 'DELETE' && !operation) {
+        deleteVpsWakeMachine(machineId);
+        sendJson(res, 200, { ok: true, message: 'VPS registry entry deleted', machines: readVpsWakeMachines({ includeSecrets: false }) });
+        return;
+      }
+      if (req.method === 'POST' && operation === 'check') {
+        const machine = await checkVpsWakeMachine(machineId);
+        sendJson(res, 200, { ok: true, message: `Checked ${machine.name}`, machine });
+        return;
+      }
+      if (req.method === 'POST' && operation === 'actions') {
+        const body = await readBody(req);
+        const action = String(body?.action || '').trim();
+        const response = await runVpsControlAction(machineId, action);
+        sendJson(res, 200, { ok: true, message: `${action} request accepted for ${response.machine.name}`, ...response });
         return;
       }
     }

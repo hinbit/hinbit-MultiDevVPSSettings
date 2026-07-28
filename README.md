@@ -142,6 +142,7 @@ The root path `/` now serves the portal landing page, and `/manage/` serves the 
 Use `/manage/tls/` to paste a server-default certificate for the manage host domain and a per-project certificate for any app domain. Custom certs are stored under `/etc/vps-custom-certs/` and override Let’s Encrypt on sync.
 You can also save a default app-domain certificate such as `seach.co.il`; new subdomains like `mon2026.seach.co.il` will use it unless a project-specific certificate is set.
 Use `/manage/proxy/` to configure the VPS proxy service. The page exposes `Proxy bypass list`, `Proxy username`, and `Proxy password`, then writes the active config to `/etc/vps-proxy-service.json` and renders Tinyproxy from it.
+Use `/manage/vps-wake-times/` to register VPS control agents, view awake/communication state, and attach a JSON living policy. See [VPS Wake Times](docs/vps-wake-times.md) for the agent and provider-adapter protocol.
 
 ## Runtime layout
 
@@ -155,4 +156,5 @@ Use `/manage/proxy/` to configure the VPS proxy service. The page exposes `Proxy
 - `/usr/local/bin/manage-server.mjs` powers the web UI at `/manage/`
 - `/etc/vps-system.env` stores manage-panel credentials if configured
 - `/etc/vps-proxy-service.json` stores the proxy service settings used by `/manage/proxy/`
+- `/etc/vps-wake-machines.json` stores root-only VPS control registry entries and policies
 - `/etc/systemd/system/pm2-root.service` resurrects PM2 at boot
