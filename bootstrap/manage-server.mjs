@@ -2700,6 +2700,20 @@ async function fetchControlJson(endpoint, token, body, method = 'POST') {
   return data && typeof data === 'object' ? data : { message: String(data || '') };
 }
 
+async function fetchJsonWithHeaders(endpoint, { method = 'GET', headers = {}, body } = {}) {
+  const response = await fetch(endpoint, {
+    method,
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(10000),
+  });
+  const raw = await response.text();
+  let data = {};
+  try { data = raw ? JSON.parse(raw) : {}; } catch { data = { message: raw }; }
+  if (!response.ok) throw new Error(data.error || data.message || data.errors?.[0]?.info || `HTTP ${response.status}`);
+  return data && typeof data === 'object' ? data : { message: String(data || '') };
+}
+
 function normalizeProviderState(value) {
   const state = String(value || '').trim().toLowerCase();
   if (['running', 'on', 'active', 'awake', 'up'].includes(state)) return 'awake';
@@ -2710,6 +2724,24 @@ function normalizeProviderState(value) {
 }
 
 async function checkVpsProvider(machine) {
+  if (machine.provider === 'gns') {
+    if (!machine.providerEndpoint || !machine.providerAccessKey || !machine.providerSecretKey || !machine.providerResourceId) {
+      return { configured: false, reachable: false, state: 'unknown', error: 'GNS API server, access key, secret key, or server ID is missing' };
+    }
+    try {
+      const base = machine.providerEndpoint.replace(/\/$/, '');
+      const authenticated = await fetchJsonWithHeaders(`${base}/authenticate`, {
+        method: 'POST', body: { clientId: machine.providerAccessKey, secret: machine.providerSecretKey },
+      });
+      if (!authenticated.authentication) throw new Error('GNS did not return an authentication token');
+      const server = await fetchJsonWithHeaders(`${base}/server/${encodeURIComponent(machine.providerResourceId)}`, {
+        headers: { Authorization: `Bearer ${authenticated.authentication}` },
+      });
+      return { configured: true, reachable: true, state: normalizeProviderState(server.power), raw: { server: { id: server.id, name: server.name, power: server.power } } };
+    } catch (error) {
+      return { configured: true, reachable: false, state: 'unknown', error: error.message };
+    }
+  }
   if (!machine.providerEndpoint || !machine.providerToken) {
     return { configured: false, reachable: false, state: 'unknown', error: 'No provider API endpoint/token configured' };
   }
@@ -2721,6 +2753,25 @@ async function checkVpsProvider(machine) {
   } catch (error) {
     return { configured: true, reachable: false, state: 'unknown', error: error.message };
   }
+}
+
+async function wakeVpsProvider(machine, payload) {
+  if (machine.provider === 'gns') {
+    if (!machine.providerEndpoint || !machine.providerAccessKey || !machine.providerSecretKey || !machine.providerResourceId) {
+      throw new Error('GNS API server, access key, secret key, and server ID are required for Wake');
+    }
+    const base = machine.providerEndpoint.replace(/\/$/, '');
+    const authenticated = await fetchJsonWithHeaders(`${base}/authenticate`, {
+      method: 'POST', body: { clientId: machine.providerAccessKey, secret: machine.providerSecretKey },
+    });
+    if (!authenticated.authentication) throw new Error('GNS did not return an authentication token');
+    const result = await fetchJsonWithHeaders(`${base}/server/${encodeURIComponent(machine.providerResourceId)}/power`, {
+      method: 'PUT', headers: { Authorization: `Bearer ${authenticated.authentication}` }, body: { power: 'on' },
+    });
+    return { status: 'accepted', state: 'starting', provider: 'gns', command: result.command || result.id || '' };
+  }
+  if (!machine.providerEndpoint || !machine.providerToken) throw new Error('Wake requires a configured provider API endpoint and token');
+  return fetchControlJson(machine.providerEndpoint, machine.providerToken, payload);
 }
 
 async function checkVpsWakeMachine(id) {
@@ -2767,8 +2818,7 @@ async function runVpsControlAction(id, action) {
   let result;
   if (action === 'wake') {
     if (status.state !== 'off') throw new Error(`Wake is available only when provider status is off (current: ${status.state || 'unknown'})`);
-    if (!machine.providerEndpoint || !machine.providerToken) throw new Error('Wake requires a configured provider API endpoint and token');
-    result = await fetchControlJson(machine.providerEndpoint, machine.providerToken, payload);
+    result = await wakeVpsProvider(machine, payload);
   } else if (action === 'shutdown') {
     if (status.state !== 'awake') throw new Error(`Shutdown is available only when the VPS is running (current: ${status.state || 'unknown'})`);
     if (!status.boReg?.installed || !machine.agentUrl || !machine.agentToken) throw new Error('Shutdown requires a healthy installed bo.reg agent');

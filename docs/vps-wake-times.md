@@ -116,6 +116,16 @@ accepts `action: "wake"` to start a stopped VPS. MultiDev never uses the
 provider adapter to request shutdown; it uses 🔩 for that command and the
 provider only for verification.
 
+### Native GNS connection
+
+For provider `gns`, MultiDev connects directly to the configured API server,
+for example `https://console.gns.co.il/service`. It stores the GNS Access Key,
+GNS Secret Key, and GNS Server ID only in the root-only VPS registry. MultiDev
+authenticates with `POST /authenticate` using `{ "clientId", "secret" }`,
+checks power using `GET /server/{serverId}`, and wakes a stopped VPS with
+`PUT /server/{serverId}/power` and `{ "power": "on" }`. The short-lived GNS
+bearer token is never stored.
+
 The portal intentionally does not run shutdown commands through SSH. SSH
 credentials are only a reachability probe. A power or communication action
 needs an authenticated agent or configured provider endpoint.
