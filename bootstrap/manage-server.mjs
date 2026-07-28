@@ -14,7 +14,7 @@ const SYSTEM_ENV_FILE = '/etc/vps-system.env';
 const SYSTEM_DOMAIN_FILE = '/etc/vps-system-domain';
 const DB_MACHINES_FILE = '/etc/vps-db-machines.json';
 const VPS_WAKE_MACHINES_FILE = '/etc/vps-wake-machines.json';
-const BO_REG_REPOSITORY = process.env.BO_REG_REPOSITORY || 'git+https://github.com/hinbit/bo.reg.git#main';
+const BO_REG_PACKAGE_URL = process.env.BO_REG_PACKAGE_URL || 'https://codeload.github.com/hinbit/bo.reg/tar.gz/refs/heads/main';
 const SSH_KEYS_FILE = '/etc/vps-ssh-keys.json';
 const SSH_KEYS_DIR = '/root/.ssh/vps-managed-keys';
 const SSH_CONFIG_FILE = '/root/.ssh/config';
@@ -2595,7 +2595,7 @@ function installBoRegOnVps(id, { update = false } = {}) {
   const port = String(machine.boReg?.port || '9088');
   const bindHost = String(machine.boReg?.bindHost || '0.0.0.0');
   const installCommand = [
-    `npm install -g --omit=dev ${BO_REG_REPOSITORY}`,
+    `npm install -g --omit=dev ${BO_REG_PACKAGE_URL}`,
     `bo-reg install --token ${agentToken} --host ${bindHost} --port ${port}`,
     'systemctl is-active bo-reg.service',
     'node -p "require(\'/usr/local/lib/node_modules/bo.reg/package.json\').version"',

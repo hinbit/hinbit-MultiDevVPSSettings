@@ -79,7 +79,7 @@ Control response example:
 ## bo.reg installation
 
 The portal's `Install bo.reg` button uses the VPS root password saved in the
-VPS registry, installs `git+https://github.com/hinbit/bo.reg.git#main`, creates
+VPS registry, installs the GitHub source tarball for `hinbit/bo.reg`, creates
 `/opt/bo.reg/.env` with a generated 256-bit token, and enables
 `bo-reg.service`. The VPS card then displays the installed package version and
 offers `Update bo.reg`.
