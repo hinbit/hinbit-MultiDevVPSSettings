@@ -52,7 +52,7 @@ const LOCAL_DB_MACHINE = {
   phpMyAdminUrl: '',
 };
 const VPS_CONTROL_ACTIONS = new Set(['communication-off', 'communication-on', 'process-start', 'process-stop', 'process-restart', 'shutdown', 'wake', 'status']);
-const VPS_PROVIDERS = new Set(['manual', 'oracle', 'gns', 'aws', 'agent']);
+const VPS_PROVIDERS = new Set(['manual', 'oracle', 'gns', 'aws', 'azure', 'gcp', 'ibm', 'alibaba', 'tencent', 'digitalocean', 'hetzner', 'linode', 'agent']);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -2568,7 +2568,7 @@ function normalizeVpsWakeMachine(input, existing = {}) {
   }
   if (!policy || typeof policy !== 'object' || Array.isArray(policy)) policy = existing.policy || {};
   if (!name) throw new Error('VPS name is required');
-  if (!VPS_PROVIDERS.has(provider)) throw new Error('Provider must be manual, oracle, gns, aws, or agent');
+  if (!VPS_PROVIDERS.has(provider)) throw new Error('Unsupported cloud provider');
   if (!host && !agentUrl && !providerEndpoint) throw new Error('Enter a VPS host, agent URL, or provider endpoint');
   if (host && !/^[A-Za-z0-9._:-]+$/.test(host)) throw new Error(`Invalid VPS host: ${host}`);
   if (sshHost && !/^[A-Za-z0-9._:-]+$/.test(sshHost)) throw new Error(`Invalid SSH host: ${sshHost}`);
@@ -4016,6 +4016,8 @@ const awsProviderOption=document.querySelector('#provider');if(awsProviderOption
 function usageBadge(label,percent){const value=Number(percent||0);const danger=value>60;return '<span style="display:inline-block;padding:4px 8px;border-radius:999px;margin-right:6px;background:'+(danger?'#7f1d1d':'#14532d')+';color:'+(danger?'#fecaca':'#bbf7d0')+';border:1px solid '+(danger?'#ef4444':'#22c55e')+'">'+label+' '+esc(value.toFixed(1))+'%</span>'}
 function showVpsUsage(){document.querySelectorAll('#machineList .machine').forEach((card,index)=>{card.querySelector('.vps-usage')?.remove();const usage=machines[index]?.lastStatus?.agent?.raw?.usage;if(!usage)return;const chips=card.querySelector('.machine-head .chips');if(!chips)return;let stack=card.querySelector('.status-stack');if(!stack){stack=document.createElement('div');stack.className='status-stack';stack.style.cssText='display:flex;flex-direction:column;align-items:flex-end;gap:7px';chips.parentElement.replaceChild(stack,chips);stack.append(chips)}const line=document.createElement('div');line.className='vps-usage';line.style.cssText='display:flex;gap:4px;align-items:center;font-size:12px';line.innerHTML=usageBadge('CPU',usage.cpuPercent)+usageBadge('RAM',usage.ram?.percent)+usageBadge('DISK',usage.disk?.percent);stack.append(line)})}
 new MutationObserver(showVpsUsage).observe(document.getElementById('machineList'),{childList:true});showVpsUsage();
+</script><script>
+const cloudProviderLabels={azure:'Microsoft Azure',gcp:'Google Cloud Platform',ibm:'IBM Cloud',alibaba:'Alibaba Cloud',tencent:'Tencent Cloud',digitalocean:'DigitalOcean',hetzner:'Hetzner',linode:'Linode'};const cloudProviderSelect=document.getElementById('provider');if(cloudProviderSelect)Object.entries(cloudProviderLabels).forEach(([value,label])=>{if(cloudProviderSelect.querySelector('option[value="'+value+'"]'))return;const option=document.createElement('option');option.value=value;option.textContent=label;cloudProviderSelect.append(option)});
 </script></body></html>`;
 }
 
