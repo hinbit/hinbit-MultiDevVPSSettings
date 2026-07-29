@@ -106,11 +106,33 @@ enabled.
 
 ## Oracle and GNS adapters
 
-Do not put provider-specific calls directly in the portal UI. Configure a
-small adapter endpoint that validates the portal bearer token, translates the
-generic control request into the current Oracle Cloud or GNS Console API call,
-and returns the response shape above. This keeps provider API changes isolated
-and allows the same policy to work for local, Oracle, and GNS VPS machines.
+Provider-specific calls stay in the MultiDev provider adapter. The portal stores
+the credentials in the root-only VPS registry and does not expose private keys
+in the list response.
+
+### Native Oracle OCI connection
+
+For an Oracle machine select provider `oracle` and enter:
+
+- `providerResourceId`: the Compute instance OCID;
+- `providerUserOcid`: the OCI user OCID;
+- `providerTenancyOcid`: the tenancy OCID;
+- `providerFingerprint`: the API-key fingerprint;
+- `providerRegion`: for example `il-jerusalem-1`;
+- `providerPrivateKey`: the PEM private key matching the fingerprint.
+
+The controller signs OCI Compute requests directly. It reads lifecycle state
+from `GET /20160918/instances/{instanceOcid}` and uses the Compute start/stop
+actions for Wake and provider verification. For the IAM user/group, create a
+policy in the compartment containing the instance with:
+
+```text
+Allow group <group-name> to manage instance-family in compartment <compartment-name>
+```
+
+If the user is in `Administrators`, replace `<group-name>` with
+`Administrators`. The statement must cover the instance compartment, not only
+the tenancy root. See the [OCI request signing reference](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/signingrequests.htm).
 
 The adapter must accept `POST` JSON requests with `action: "status"` and
 return a state such as `awake`, `off`, `starting`, or `shutting-down`. It also
