@@ -2552,6 +2552,7 @@ function normalizeVpsWakeMachine(input, existing = {}) {
   const boRegInput = input?.boReg && typeof input.boReg === 'object' ? input.boReg : input || {};
   const boRegPort = String(boRegInput.boRegPort || boRegInput.port || existing.boReg?.port || '7211').trim() || '7211';
   const boRegBindHost = String(boRegInput.boRegBindHost || boRegInput.bindHost || existing.boReg?.bindHost || '127.0.0.1').trim() || '127.0.0.1';
+  const allowShutdown = String(input?.boRegAllowShutdown ?? input?.allowShutdown ?? existing.allowShutdown ?? 'false').toLowerCase() === 'true';
   const sshPassword = Object.prototype.hasOwnProperty.call(input || {}, 'sshPassword') && String(input.sshPassword || '')
     ? String(input.sshPassword) : String(existing.sshPassword || '');
   const agentToken = Object.prototype.hasOwnProperty.call(input || {}, 'agentToken') && String(input.agentToken || '')
@@ -2579,7 +2580,7 @@ function normalizeVpsWakeMachine(input, existing = {}) {
   return {
     id: String(existing.id || input?.id || `vps-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`),
     name, provider, host, sshHost, sshPort, sshUser, sshPassword, sshKeyPath, agentUrl, agentToken,
-    providerEndpoint, providerToken, providerAccessKey, providerSecretKey, providerResourceId, policy, notes,
+    providerEndpoint, providerToken, providerAccessKey, providerSecretKey, providerResourceId, policy, notes, allowShutdown,
     boReg: { port: boRegPort, bindHost: boRegBindHost, installedAt: existing.boReg?.installedAt || '', version: existing.boReg?.version || '', updatedAt: existing.boReg?.updatedAt || '' },
     lastStatus: existing.lastStatus || {}, lastAction: existing.lastAction || {},
   };
@@ -2664,6 +2665,7 @@ function installBoRegOnVps(id, { update = false } = {}) {
     `$ELEVATE env PATH="$PATH" bo-reg install --mode client --token ${agentToken} --host ${bindHost} --port ${port}${publicHost ? ` --public-host ${publicHost}` : ''}`,
     `$ELEVATE sh -c "grep -q '^BO_REG_BUILD_COMMIT=' /opt/bo.reg/.env && sed -i 's#^BO_REG_BUILD_COMMIT=.*#BO_REG_BUILD_COMMIT=${buildCommit}#' /opt/bo.reg/.env || echo 'BO_REG_BUILD_COMMIT=${buildCommit}' >> /opt/bo.reg/.env"`,
     `$ELEVATE sh -c "grep -q '^BO_REG_BUILD_DATE=' /opt/bo.reg/.env && sed -i 's#^BO_REG_BUILD_DATE=.*#BO_REG_BUILD_DATE=${buildDate}#' /opt/bo.reg/.env || echo 'BO_REG_BUILD_DATE=${buildDate}' >> /opt/bo.reg/.env"`,
+    `$ELEVATE sh -c "grep -q '^BO_REG_ALLOW_SHUTDOWN=' /opt/bo.reg/.env && sed -i 's#^BO_REG_ALLOW_SHUTDOWN=.*#BO_REG_ALLOW_SHUTDOWN=${machine.allowShutdown ? 'true' : 'false'}#' /opt/bo.reg/.env || echo 'BO_REG_ALLOW_SHUTDOWN=${machine.allowShutdown ? 'true' : 'false'}' >> /opt/bo.reg/.env"`,
     '$ELEVATE systemctl restart bo-reg.service',
     '$ELEVATE systemctl is-active bo-reg.service',
     'BO_REG_ROOT="$(npm root -g)" node -p "require(process.env.BO_REG_ROOT + \'/bo.reg/package.json\').version"',
@@ -4023,6 +4025,7 @@ function showVpsUsage(){document.querySelectorAll('#machineList .machine').forEa
 new MutationObserver(showVpsUsage).observe(document.getElementById('machineList'),{childList:true});showVpsUsage();
 </script><script>
 const cloudProviderLabels={azure:'Microsoft Azure',gcp:'Google Cloud Platform',ibm:'IBM Cloud',alibaba:'Alibaba Cloud',tencent:'Tencent Cloud',digitalocean:'DigitalOcean',hetzner:'Hetzner',linode:'Linode'};const cloudProviderSelect=document.getElementById('provider');if(cloudProviderSelect)Object.entries(cloudProviderLabels).forEach(([value,label])=>{if(cloudProviderSelect.querySelector('option[value="'+value+'"]'))return;const option=document.createElement('option');option.value=value;option.textContent=label;cloudProviderSelect.append(option)});
+const shutdownSelect=document.createElement('select');shutdownSelect.id='boRegAllowShutdown';shutdownSelect.innerHTML='<option value="false">Shutdown disabled</option><option value="true">Allow agent shutdown</option>';const shutdownLabel=document.createElement('label');shutdownLabel.textContent='🔩 shutdown capability ';shutdownLabel.append(shutdownSelect);document.getElementById('boRegBindHost')?.parentElement?.after(shutdownLabel);if(!fields.includes('boRegAllowShutdown'))fields.push('boRegAllowShutdown');window.addEventListener('click',event=>{const editButton=event.target.closest('[data-edit]');if(!editButton)return;setTimeout(()=>{const machine=machines.find(item=>item.id===editButton.dataset.edit);if(machine)shutdownSelect.value=machine.allowShutdown?'true':'false'},0)},true);function enrichVpsCards(){document.querySelectorAll('#machineList .machine').forEach((card,index)=>{const machine=machines[index]||{},raw=machine.lastStatus?.agent?.raw||{},shutdown=card.querySelector('[data-act="shutdown"]');if(shutdown&&raw.allowShutdown!==true){shutdown.disabled=true;shutdown.title='Enable Allow agent shutdown and update 🔩 before shutdown is available'}const domains=Array.isArray(raw.domains)?raw.domains:[];if(domains.length&&!card.querySelector('.vps-domains')){const line=document.createElement('div');line.className='small vps-domains';line.textContent='Domains: '+domains.join(', ');card.querySelector('.machine-head>div')?.append(line)}})}new MutationObserver(enrichVpsCards).observe(document.getElementById('machineList'),{childList:true});enrichVpsCards();window.addEventListener('click',async event=>{const button=event.target.closest('[data-delete]');if(!button)return;event.preventDefault();event.stopImmediatePropagation();const machine=machines.find(item=>item.id===button.dataset.delete);if(!confirm('Delete VPS '+(machine?.name||button.dataset.delete)+'? This only removes its MultiDev registry entry.'))return;if(!confirm('Final confirmation: permanently remove this VPS from MultiDev now?'))return;try{await api('/vps-wake-machines/'+encodeURIComponent(button.dataset.delete),{method:'DELETE'});message(by('listResult'),'VPS registry entry deleted.');await refresh()}catch(error){message(by('listResult'),error.message,false)}},true);
 </script></body></html>`;
 }
 
