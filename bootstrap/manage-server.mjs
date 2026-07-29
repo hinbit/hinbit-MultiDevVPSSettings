@@ -2655,11 +2655,16 @@ function installBoRegOnVps(id, { update = false } = {}) {
   const bindHost = String(machine.boReg?.bindHost || '127.0.0.1');
   const publicHost = String(machine.host || machine.sshHost || '').trim();
   const packagePath = buildBoRegPackage();
+  const buildCommit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: BO_REG_SOURCE_DIR, encoding: 'utf8' }).trim();
+  const buildDate = new Date().toISOString();
   uploadBoRegPackage(machine, packagePath);
   const installCommand = [
     'if [ "$(id -u)" -eq 0 ]; then ELEVATE=""; else ELEVATE="sudo -n"; fi',
     '$ELEVATE npm install -g --omit=dev /tmp/bo.reg-latest.tgz',
     `$ELEVATE env PATH="$PATH" bo-reg install --mode client --token ${agentToken} --host ${bindHost} --port ${port}${publicHost ? ` --public-host ${publicHost}` : ''}`,
+    `$ELEVATE sh -c "grep -q '^BO_REG_BUILD_COMMIT=' /opt/bo.reg/.env && sed -i 's#^BO_REG_BUILD_COMMIT=.*#BO_REG_BUILD_COMMIT=${buildCommit}#' /opt/bo.reg/.env || echo 'BO_REG_BUILD_COMMIT=${buildCommit}' >> /opt/bo.reg/.env"`,
+    `$ELEVATE sh -c "grep -q '^BO_REG_BUILD_DATE=' /opt/bo.reg/.env && sed -i 's#^BO_REG_BUILD_DATE=.*#BO_REG_BUILD_DATE=${buildDate}#' /opt/bo.reg/.env || echo 'BO_REG_BUILD_DATE=${buildDate}' >> /opt/bo.reg/.env"`,
+    '$ELEVATE systemctl restart bo-reg.service',
     '$ELEVATE systemctl is-active bo-reg.service',
     'BO_REG_ROOT="$(npm root -g)" node -p "require(process.env.BO_REG_ROOT + \'/bo.reg/package.json\').version"',
   ].join(' && ');
