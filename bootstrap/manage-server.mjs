@@ -5,7 +5,7 @@ import http from 'http';
 import net from 'net';
 import { execFileSync, spawn, spawnSync } from 'child_process';
 import os from 'os';
-import { createHash, createHmac, randomUUID, randomBytes } from 'crypto';
+import { createHash, createHmac, createSign, randomUUID, randomBytes } from 'crypto';
 import { fileURLToPath } from 'url';
 
 const META_DIR = '/etc/vps-projects';
@@ -2470,12 +2470,21 @@ function sanitizeVpsMachine(machine, { includeSecrets = false } = {}) {
     delete value.providerToken;
     delete value.providerAccessKey;
     delete value.providerSecretKey;
+    delete value.providerUserOcid;
+    delete value.providerTenancyOcid;
+    delete value.providerFingerprint;
+    delete value.providerPrivateKey;
+    delete value.providerRegion;
   }
   value.hasSshPassword = Boolean(machine.sshPassword);
   value.hasAgentToken = Boolean(machine.agentToken);
   value.hasProviderToken = Boolean(machine.providerToken);
   value.hasProviderAccessKey = Boolean(machine.providerAccessKey);
   value.hasProviderSecretKey = Boolean(machine.providerSecretKey);
+  value.hasProviderUserOcid = Boolean(machine.providerUserOcid);
+  value.hasProviderTenancyOcid = Boolean(machine.providerTenancyOcid);
+  value.hasProviderFingerprint = Boolean(machine.providerFingerprint);
+  value.hasProviderPrivateKey = Boolean(machine.providerPrivateKey);
   return value;
 }
 
@@ -2501,6 +2510,11 @@ function readVpsWakeMachines({ includeSecrets = true } = {}) {
         providerToken: String(entry.providerToken || ''),
         providerAccessKey: String(entry.providerAccessKey || ''),
         providerSecretKey: String(entry.providerSecretKey || ''),
+        providerUserOcid: String(entry.providerUserOcid || ''),
+        providerTenancyOcid: String(entry.providerTenancyOcid || ''),
+        providerFingerprint: String(entry.providerFingerprint || ''),
+        providerPrivateKey: String(entry.providerPrivateKey || ''),
+        providerRegion: String(entry.providerRegion || 'il-jerusalem-1'),
         providerResourceId: String(entry.providerResourceId || '').trim(),
         allowShutdown: String(entry.allowShutdown ?? 'false').toLowerCase() === 'true',
         boReg: entry.boReg && typeof entry.boReg === 'object' ? {
@@ -2564,6 +2578,15 @@ function normalizeVpsWakeMachine(input, existing = {}) {
     ? String(input.providerAccessKey) : String(existing.providerAccessKey || '');
   const providerSecretKey = Object.prototype.hasOwnProperty.call(input || {}, 'providerSecretKey') && String(input.providerSecretKey || '')
     ? String(input.providerSecretKey) : String(existing.providerSecretKey || '');
+  const providerUserOcid = Object.prototype.hasOwnProperty.call(input || {}, 'providerUserOcid') && String(input.providerUserOcid || '')
+    ? String(input.providerUserOcid) : String(existing.providerUserOcid || '');
+  const providerTenancyOcid = Object.prototype.hasOwnProperty.call(input || {}, 'providerTenancyOcid') && String(input.providerTenancyOcid || '')
+    ? String(input.providerTenancyOcid) : String(existing.providerTenancyOcid || '');
+  const providerFingerprint = Object.prototype.hasOwnProperty.call(input || {}, 'providerFingerprint') && String(input.providerFingerprint || '')
+    ? String(input.providerFingerprint) : String(existing.providerFingerprint || '');
+  const providerPrivateKey = Object.prototype.hasOwnProperty.call(input || {}, 'providerPrivateKey') && String(input.providerPrivateKey || '')
+    ? String(input.providerPrivateKey) : String(existing.providerPrivateKey || '');
+  const providerRegion = String(input?.providerRegion || existing.providerRegion || 'il-jerusalem-1').trim();
   let policy = input?.policy;
   if (typeof policy === 'string') {
     try { policy = policy.trim() ? JSON.parse(policy) : {}; } catch { throw new Error('Policy must be valid JSON'); }
@@ -2581,7 +2604,8 @@ function normalizeVpsWakeMachine(input, existing = {}) {
   return {
     id: String(existing.id || input?.id || `vps-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`),
     name, provider, host, sshHost, sshPort, sshUser, sshPassword, sshKeyPath, agentUrl, agentToken,
-    providerEndpoint, providerToken, providerAccessKey, providerSecretKey, providerResourceId, policy, notes, allowShutdown,
+    providerEndpoint, providerToken, providerAccessKey, providerSecretKey, providerUserOcid, providerTenancyOcid,
+    providerFingerprint, providerPrivateKey, providerRegion, providerResourceId, policy, notes, allowShutdown,
     boReg: { port: boRegPort, bindHost: boRegBindHost, installedAt: existing.boReg?.installedAt || '', version: existing.boReg?.version || '', updatedAt: existing.boReg?.updatedAt || '' },
     lastStatus: existing.lastStatus || {}, lastAction: existing.lastAction || {},
   };
@@ -2751,6 +2775,9 @@ function normalizeProviderState(value) {
 }
 
 function hasProviderConfirmationConfig(machine) {
+  if (machine.provider === 'oracle') {
+    return Boolean(machine.providerUserOcid && machine.providerTenancyOcid && machine.providerFingerprint && machine.providerPrivateKey && machine.providerRegion && machine.providerResourceId);
+  }
   if (machine.provider === 'gns') {
     return Boolean(machine.providerEndpoint && machine.providerAccessKey && machine.providerSecretKey && machine.providerResourceId);
   }
@@ -2789,7 +2816,49 @@ async function awsEc2Request(machine, action) {
   return { state: normalizeProviderState(state), raw: { awsState: state } };
 }
 
+function ociConfig(machine) {
+  if (!hasProviderConfirmationConfig(machine)) throw new Error('Oracle tenancy OCID, user OCID, fingerprint, private key, region, and instance OCID are required');
+  const host = `iaas.${machine.providerRegion}.oraclecloud.com`;
+  return { host, keyId: `${machine.providerTenancyOcid}/${machine.providerUserOcid}/${machine.providerFingerprint}` };
+}
+
+async function ociComputeRequest(machine, operation) {
+  const { host, keyId } = ociConfig(machine);
+  const instancePath = `/20160918/instances/${encodeURIComponent(machine.providerResourceId)}`;
+  const method = operation === 'status' ? 'get' : 'post';
+  const pathName = operation === 'status' ? instancePath : `${instancePath}/actions/${operation}`;
+  const body = '';
+  const date = new Date().toUTCString();
+  const contentType = 'application/json';
+  const contentHash = createHash('sha256').update(body).digest('base64');
+  const signingHeaders = operation === 'status'
+    ? ['(request-target)', 'host', 'date']
+    : ['(request-target)', 'host', 'date', 'x-content-sha256', 'content-type', 'content-length'];
+  const signingLines = [`(request-target): ${method} ${pathName}`, `host: ${host}`, `date: ${date}`];
+  if (operation !== 'status') signingLines.push(`x-content-sha256: ${contentHash}`, `content-type: ${contentType}`, 'content-length: 0');
+  const signer = createSign('RSA-SHA256');
+  signer.update(signingLines.join('\n'));
+  const signature = signer.sign(machine.providerPrivateKey, 'base64');
+  const authorization = `Signature version="1",keyId="${keyId}",algorithm="rsa-sha256",headers="${signingHeaders.join(' ')}",signature="${signature}"`;
+  const response = await fetch(`https://${host}${pathName}`, {
+    method: method.toUpperCase(), headers: {
+      host, date, Authorization: authorization,
+      ...(operation === 'status' ? {} : { 'x-content-sha256': contentHash, 'content-type': contentType, 'content-length': '0' }),
+    }, signal: AbortSignal.timeout(15000),
+  });
+  const raw = await response.text();
+  let data = {}; try { data = raw ? JSON.parse(raw) : {}; } catch { data = { message: raw }; }
+  if (!response.ok) throw new Error(data.message || data.code || `Oracle API returned HTTP ${response.status}`);
+  const lifecycle = String(data.lifecycleState || data.lifecycleStateDetails || '').toLowerCase();
+  return { state: normalizeProviderState(lifecycle), raw: data };
+}
+
 async function checkVpsProvider(machine) {
+  if (machine.provider === 'oracle') {
+    if (!hasProviderConfirmationConfig(machine)) return { configured: false, reachable: false, state: 'unknown', error: 'Oracle API credentials or instance OCID are missing' };
+    try { const result = await ociComputeRequest(machine, 'status'); return { configured: true, reachable: true, ...result }; }
+    catch (error) { return { configured: true, reachable: false, state: 'unknown', error: error.message }; }
+  }
   if (machine.provider === 'aws') {
     if (!hasProviderConfirmationConfig(machine)) return { configured: false, reachable: false, state: 'unknown', error: 'AWS endpoint, access key, secret key, or instance ID is missing' };
     try {
@@ -2831,6 +2900,10 @@ async function checkVpsProvider(machine) {
 }
 
 async function wakeVpsProvider(machine, payload) {
+  if (machine.provider === 'oracle') {
+    const result = await ociComputeRequest(machine, 'start');
+    return { status: 'accepted', state: result.state === 'awake' ? 'awake' : 'starting', provider: 'oracle', ...result };
+  }
   if (machine.provider === 'aws') {
     if (!hasProviderConfirmationConfig(machine)) throw new Error('AWS endpoint, access key, secret key, and instance ID are required for Wake');
     const result = await awsEc2Request(machine, 'StartInstances');
@@ -4038,6 +4111,8 @@ const vpsButtonStyle=document.createElement('style');vpsButtonStyle.textContent=
 (()=>{const addPm2HaltResume=()=>document.querySelectorAll('[data-pm2-action="process-restart"]').forEach(restart=>{const row=restart.closest('.actions');if(!row||row.querySelector('[data-pm2-halt-resume]'))return;for(const [action,label] of [['pm2-suspend','Halt'],['pm2-resume','Resume']]){const button=document.createElement('button');button.className='secondary';button.textContent=label;button.dataset.pm2HaltResume=action;button.dataset.id=restart.dataset.id;button.dataset.processName=restart.dataset.processName;row.append(button)}});document.addEventListener('click',async event=>{const button=event.target.closest('[data-pm2-halt-resume]');if(!button)return;const action=button.dataset.pm2HaltResume,processName=button.dataset.processName;if(action==='pm2-suspend'&&!confirm('Halt PM2 process '+processName+'? It will remain stopped until Resume is used.'))return;button.disabled=true;try{const result=await api('/vps-wake-machines/'+encodeURIComponent(button.dataset.id)+'/actions',{method:'POST',body:JSON.stringify({action,processName})});message(by('listResult'),result.message||('PM2 '+action+' accepted'));await refreshAndCheck()}catch(error){message(by('listResult'),error.message,false)}finally{button.disabled=false}});new MutationObserver(addPm2HaltResume).observe(document.getElementById('machineList'),{childList:true,subtree:true});addPm2HaltResume()})();
 </script><script>
 (()=>{const renderNodeProcesses=()=>document.querySelectorAll('#machineList .machine').forEach((card,index)=>{card.querySelector('.independent-node-processes')?.remove();const machine=machines[index]||{},nodes=machine.lastStatus?.agent?.raw?.nodeProcesses||[];if(!machine.lastStatus?.boReg?.installed)return;const section=document.createElement('details');section.className='independent-node-processes';section.style.cssText='margin-top:10px';section.innerHTML='<summary style="cursor:pointer;color:#c4b5fd;font-weight:700">▸ Node processes ('+nodes.length+')</summary>'+(nodes.length?nodes.map(node=>'<div class="actions" style="margin:7px 0"><code style="align-self:center">PID '+esc(node.pid)+' · '+esc(node.user)+' · '+esc(node.command)+'</code><button class="secondary" data-node-action="node-suspend" data-id="'+esc(machine.id)+'" data-pid="'+esc(node.pid)+'">Suspend</button><button class="secondary" data-node-action="node-resume" data-id="'+esc(machine.id)+'" data-pid="'+esc(node.pid)+'">Resume</button></div>').join(''):'<div class="small" style="margin-top:8px">No Node processes reported.</div>');card.append(section)});new MutationObserver(renderNodeProcesses).observe(document.getElementById('machineList'),{childList:true});renderNodeProcesses()})();
+</script><script>
+(()=>{const oracleFields=[['providerUserOcid','Oracle user OCID',''],['providerTenancyOcid','Oracle tenancy OCID',''],['providerFingerprint','Oracle API fingerprint',''],['providerRegion','Oracle region','il-jerusalem-1'],['providerPrivateKey','Oracle private API key PEM','']];const anchor=document.getElementById('providerSecretKey')?.parentElement;if(anchor&&!document.getElementById('providerUserOcid')){let after=anchor;oracleFields.forEach(([id,label,placeholder])=>{const wrap=document.createElement('label');wrap.textContent=label;const input=id==='providerPrivateKey'?document.createElement('textarea'):document.createElement('input');input.id=id;input.placeholder=placeholder;input.autocomplete='off';if(id==='providerPrivateKey'){input.rows=5;input.placeholder='-----BEGIN PRIVATE KEY-----'}wrap.append(input);after.after(wrap);after=wrap;if(!fields.includes(id))fields.push(id)})}})();
 </script></body></html>`;
 }
 
