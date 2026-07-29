@@ -5,7 +5,7 @@ import http from 'http';
 import net from 'net';
 import { execFileSync, spawn, spawnSync } from 'child_process';
 import os from 'os';
-import { randomUUID, randomBytes } from 'crypto';
+import { createHash, createHmac, randomUUID, randomBytes } from 'crypto';
 import { fileURLToPath } from 'url';
 
 const META_DIR = '/etc/vps-projects';
@@ -52,7 +52,7 @@ const LOCAL_DB_MACHINE = {
   phpMyAdminUrl: '',
 };
 const VPS_CONTROL_ACTIONS = new Set(['communication-off', 'communication-on', 'process-start', 'process-stop', 'process-restart', 'shutdown', 'wake', 'status']);
-const VPS_PROVIDERS = new Set(['manual', 'oracle', 'gns', 'agent']);
+const VPS_PROVIDERS = new Set(['manual', 'oracle', 'gns', 'aws', 'agent']);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -2568,7 +2568,7 @@ function normalizeVpsWakeMachine(input, existing = {}) {
   }
   if (!policy || typeof policy !== 'object' || Array.isArray(policy)) policy = existing.policy || {};
   if (!name) throw new Error('VPS name is required');
-  if (!VPS_PROVIDERS.has(provider)) throw new Error('Provider must be manual, oracle, gns, or agent');
+  if (!VPS_PROVIDERS.has(provider)) throw new Error('Provider must be manual, oracle, gns, aws, or agent');
   if (!host && !agentUrl && !providerEndpoint) throw new Error('Enter a VPS host, agent URL, or provider endpoint');
   if (host && !/^[A-Za-z0-9._:-]+$/.test(host)) throw new Error(`Invalid VPS host: ${host}`);
   if (sshHost && !/^[A-Za-z0-9._:-]+$/.test(sshHost)) throw new Error(`Invalid SSH host: ${sshHost}`);
@@ -2745,10 +2745,51 @@ function hasProviderConfirmationConfig(machine) {
   if (machine.provider === 'gns') {
     return Boolean(machine.providerEndpoint && machine.providerAccessKey && machine.providerSecretKey && machine.providerResourceId);
   }
+  if (machine.provider === 'aws') {
+    return Boolean(machine.providerEndpoint && machine.providerAccessKey && machine.providerSecretKey && machine.providerResourceId);
+  }
   return Boolean(machine.providerEndpoint && machine.providerToken);
 }
 
+function awsSigningKey(secret, date, region) {
+  const sign = (key, value) => createHmac('sha256', key).update(value, 'utf8').digest();
+  return sign(sign(sign(sign(`AWS4${secret}`, date), region), 'ec2'), 'aws4_request');
+}
+
+async function awsEc2Request(machine, action) {
+  const endpoint = new URL(machine.providerEndpoint);
+  const match = endpoint.hostname.match(/^ec2\.([a-z0-9-]+)\.amazonaws\.com$/);
+  if (!match) throw new Error('AWS endpoint must be like https://ec2.eu-west-1.amazonaws.com');
+  const region = match[1];
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '').replace('Z', 'Z');
+  const date = amzDate.slice(0, 8);
+  const body = new URLSearchParams({ Action: action, Version: '2016-11-15', 'InstanceId.1': machine.providerResourceId }).toString();
+  const payloadHash = createHash('sha256').update(body).digest('hex');
+  const canonicalHeaders = `content-type:application/x-www-form-urlencoded; charset=utf-8\nhost:${endpoint.host}\nx-amz-date:${amzDate}\n`;
+  const signedHeaders = 'content-type;host;x-amz-date';
+  const canonicalRequest = `POST\n/\n\n${canonicalHeaders}\n${signedHeaders}\n${payloadHash}`;
+  const scope = `${date}/${region}/ec2/aws4_request`;
+  const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${createHash('sha256').update(canonicalRequest).digest('hex')}`;
+  const signature = createHmac('sha256', awsSigningKey(machine.providerSecretKey, date, region)).update(stringToSign).digest('hex');
+  const authorization = `AWS4-HMAC-SHA256 Credential=${machine.providerAccessKey}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+  const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8', 'X-Amz-Date': amzDate, Authorization: authorization }, body });
+  const xml = await response.text();
+  if (!response.ok) throw new Error(`AWS ${action} failed: ${xml.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 240)}`);
+  const state = xml.match(/<(?:instanceState|currentState)>\s*<code>\d+<\/code>\s*<name>([^<]+)<\/name>/)?.[1] || xml.match(/<name>(running|stopped|stopping|pending)<\/name>/)?.[1] || 'unknown';
+  return { state: normalizeProviderState(state), raw: { awsState: state } };
+}
+
 async function checkVpsProvider(machine) {
+  if (machine.provider === 'aws') {
+    if (!hasProviderConfirmationConfig(machine)) return { configured: false, reachable: false, state: 'unknown', error: 'AWS endpoint, access key, secret key, or instance ID is missing' };
+    try {
+      const result = await awsEc2Request(machine, 'DescribeInstances');
+      return { configured: true, reachable: true, ...result };
+    } catch (error) {
+      return { configured: true, reachable: false, state: 'unknown', error: error.message };
+    }
+  }
   if (machine.provider === 'gns') {
     if (!machine.providerEndpoint || !machine.providerAccessKey || !machine.providerSecretKey || !machine.providerResourceId) {
       return { configured: false, reachable: false, state: 'unknown', error: 'GNS API server, access key, secret key, or server ID is missing' };
@@ -2781,6 +2822,11 @@ async function checkVpsProvider(machine) {
 }
 
 async function wakeVpsProvider(machine, payload) {
+  if (machine.provider === 'aws') {
+    if (!hasProviderConfirmationConfig(machine)) throw new Error('AWS endpoint, access key, secret key, and instance ID are required for Wake');
+    const result = await awsEc2Request(machine, 'StartInstances');
+    return { status: 'accepted', state: result.state === 'awake' ? 'awake' : 'starting', provider: 'aws', ...result };
+  }
   if (machine.provider === 'gns') {
     if (!machine.providerEndpoint || !machine.providerAccessKey || !machine.providerSecretKey || !machine.providerResourceId) {
       throw new Error('GNS API server, access key, secret key, and server ID are required for Wake');
@@ -2806,13 +2852,14 @@ async function checkVpsWakeMachine(id) {
   const machine = machines[index];
   const checkedAt = new Date().toISOString();
   const ssh = await probeTcp(machine.sshHost || machine.host, machine.sshPort);
+  const previousAgentRaw = machine.lastStatus?.agent?.raw || {};
   let agent = { configured: Boolean(machine.agentUrl), reachable: false, error: '' };
   if (machine.agentUrl) {
     try {
       const data = await fetchControlJson(`${machine.agentUrl}/health`, machine.agentToken, null, 'GET');
       agent = { configured: true, reachable: true, state: data.state || data.status || 'awake', communication: data.communication || data.communicationEnabled, raw: data };
     } catch (error) {
-      agent = { configured: true, reachable: false, error: error.message };
+      agent = { configured: true, reachable: false, error: error.message, raw: previousAgentRaw };
     }
   }
   const provider = await checkVpsProvider(machine);
@@ -3963,6 +4010,11 @@ const BO_REG_GITHUB_VERSION=${availableBoRegVersion};function versionParts(v){re
 function foldPm2Processes(){document.querySelectorAll('.pm2-processes').forEach((section,index)=>{if(section.dataset.folded)return;section.dataset.folded='1';const rows=[...section.querySelectorAll('.actions')];rows.forEach(row=>{const stop=row.querySelector('[data-pm2-action="process-stop"]');if(!stop)return;const restart=document.createElement('button');restart.className='secondary';restart.textContent='Restart';restart.dataset.pm2Action='process-restart';restart.dataset.id=stop.dataset.id;restart.dataset.processName=stop.dataset.processName;row.append(restart)});const detail=document.createElement('details');detail.style.marginTop='2px';const summary=document.createElement('summary');summary.textContent='▸ PM2 processes ('+rows.length+')';summary.style.cssText='cursor:pointer;color:#bae6fd;font-weight:700;margin-bottom:8px';detail.append(summary);while(section.firstChild)detail.append(section.firstChild);section.append(detail);const nodes=machines[index]?.lastStatus?.agent?.raw?.nodeProcesses||[];const nodeDetail=document.createElement('details');nodeDetail.style.cssText='margin-top:10px';const nodeSummary=document.createElement('summary');nodeSummary.textContent='▸ Node processes ('+nodes.length+')';nodeSummary.style.cssText='cursor:pointer;color:#c4b5fd;font-weight:700';nodeDetail.append(nodeSummary);const list=document.createElement('div');list.className='small';list.style.cssText='margin-top:8px;display:grid;gap:5px';list.innerHTML=nodes.length?nodes.map(p=>'<code>PID '+esc(p.pid)+' · '+esc(p.user)+' · '+esc(p.command)+'</code>').join(''):'No Node processes reported.';nodeDetail.append(list);section.append(nodeDetail)})}
 window.addEventListener('click',async e=>{const preset=e.target.closest('[data-policy-preset]');if(!preset)return;e.preventDefault();e.stopImmediatePropagation();let current={};try{current=by('policy').value.trim()?JSON.parse(by('policy').value):{}}catch{message(by('formResult'),'Current policy JSON is invalid; fix it before adding a preset.',false);return}try{const machineId=by('machineId').value;if(machineId){message(by('formResult'),'Reading current PM2 and Node processes...');await api('/vps-wake-machines/'+encodeURIComponent(machineId)+'/check',{method:'POST'});await refresh()}const machine=machines.find(item=>item.id===machineId);const raw=machine?.lastStatus?.agent?.raw||{};const pm2=(raw.processes||[]).filter(process=>process.kind==='pm2').map(({name,id,status})=>({name,id,status}));const node=(raw.nodeProcesses||[]).map(({pid,ppid,user,command})=>({pid,ppid,user,command}));const addition={...(policyPresets[preset.dataset.policyPreset]||{}),processes:{}};const allRules=[...(Array.isArray(current.rules)?current.rules:[]),...(Array.isArray(addition.rules)?addition.rules:[])];const uniqueRules=allRules.filter((rule,index)=>allRules.findIndex(item=>JSON.stringify(item)===JSON.stringify(rule))===index);const existingProcesses={...(current.processes||{})};delete existingProcesses.speaker;by('policy').value=JSON.stringify({...current,...addition,timezone:current.timezone||addition.timezone,rules:uniqueRules,processes:{...existingProcesses,pm2,node}},null,2);message(by('formResult'),'Preset added with current PM2 ('+pm2.length+') and Node ('+node.length+') process lists.')}catch(error){message(by('formResult'),error.message,false)}},true);new MutationObserver(()=>{renderBoRegVersions();renderPm2Processes();foldPm2Processes()}).observe(by('machineList'),{childList:true});document.addEventListener('click',e=>{const preset=e.target.closest('[data-policy-preset]');if(!preset)return;e.preventDefault();e.stopImmediatePropagation();let current={};try{current=by('policy').value.trim()?JSON.parse(by('policy').value):{}}catch{message(by('formResult'),'Current policy JSON is invalid; fix it before adding a preset.',false);return}const addition=policyPresets[preset.dataset.policyPreset]||{};const allRules=[...(Array.isArray(current.rules)?current.rules:[]),...(Array.isArray(addition.rules)?addition.rules:[])];const uniqueRules=allRules.filter((rule,index)=>allRules.findIndex(item=>JSON.stringify(item)===JSON.stringify(rule))===index);by('policy').value=JSON.stringify({...current,...addition,timezone:current.timezone||addition.timezone,rules:uniqueRules,processes:{...(current.processes||{}),...(addition.processes||{})}},null,2)},true);const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));document.addEventListener('click',async e=>{const button=e.target.closest('[data-act="wake"],[data-act="shutdown"]');if(!button)return;e.preventDefault();e.stopImmediatePropagation();const action=button.dataset.act,target=action==='wake'?'awake':'off';if(action==='shutdown'&&!confirm('Shutdown this VPS now? MultiDev will wait for provider confirmation.'))return;button.disabled=true;const original=button.textContent;try{message(by('listResult'),action==='wake'?'Sending wake request to provider...':'Sending shutdown request to 🔩...');const d=await api('/vps-wake-machines/'+encodeURIComponent(button.dataset.id)+'/actions',{method:'POST',body:JSON.stringify({action})});message(by('listResult'),(d.message||'Request accepted')+' Waiting for '+target+' confirmation...');for(let attempt=1;attempt<=24;attempt++){await pause(2500);await api('/vps-wake-machines/'+encodeURIComponent(button.dataset.id)+'/check',{method:'POST'});await refresh();const machine=machines.find(m=>m.id===button.dataset.id);const state=machine?.lastStatus?.state||'unknown';message(by('listResult'),'Checking '+(action==='wake'?'wake':'shutdown')+' progress: '+state+' ('+attempt+'/24)');if(state===target){message(by('listResult'),(action==='wake'?'Wake complete: VPS is awake.':'Shutdown complete: provider confirms VPS is off.'));return}}throw Error('Timed out waiting for provider confirmation. Use Check status to continue polling.')}catch(error){message(by('listResult'),error.message,false)}finally{button.disabled=false;button.textContent=original}},true);document.addEventListener('click',async e=>{const button=e.target.closest('[data-pm2-action]');if(!button)return;const action=button.dataset.pm2Action;const processName=button.dataset.processName;if(action==='process-stop'&&!confirm('Stop PM2 process '+processName+'?'))return;button.disabled=true;try{const d=await api('/vps-wake-machines/'+encodeURIComponent(button.dataset.id)+'/actions',{method:'POST',body:JSON.stringify({action,processName})});message(by('listResult'),d.message||('PM2 '+action+' accepted'));await refreshAndCheck()}catch(error){message(by('listResult'),error.message,false)}finally{button.disabled=false}});renderBoRegVersions();renderPm2Processes();foldPm2Processes();
 function showLastBoRegState(){document.querySelectorAll('#machineList .machine').forEach((card,index)=>{const machine=machines[index]||{},known=machine.boReg||{},live=machine.lastStatus?.boReg?.installed;if(live||!known.installedAt)return;const chip=card.querySelector('[title="bo.reg not installed or unreachable"]');if(!chip)return;chip.textContent='🔩 '+(known.version||'installed')+' · last known';chip.title='🔩 was installed on '+known.installedAt+'; agent is currently unreachable';chip.style.cssText='background:#78350f;color:#fde68a;border:1px solid #d97706'})}new MutationObserver(showLastBoRegState).observe(by('machineList'),{childList:true});const processPolicyBar=document.querySelector('[data-policy-preset]')?.parentElement;if(processPolicyBar&&!by('addProcessesBtn')){const button=document.createElement('button');button.type='button';button.id='addProcessesBtn';button.className='ghost';button.textContent='Add processes';processPolicyBar.append(button)}window.addEventListener('click',async e=>{const button=e.target.closest('#addProcessesBtn');if(!button)return;e.preventDefault();e.stopImmediatePropagation();const machineId=by('machineId').value;if(!machineId){message(by('formResult'),'Edit a saved VPS first, then use Add processes.',false);return}let current={};try{current=by('policy').value.trim()?JSON.parse(by('policy').value):{}}catch{message(by('formResult'),'Current policy JSON is invalid; fix it before adding processes.',false);return}button.disabled=true;try{message(by('formResult'),'Reading current PM2 and Node processes...');await api('/vps-wake-machines/'+encodeURIComponent(machineId)+'/check',{method:'POST'});await refresh();const raw=machines.find(item=>item.id===machineId)?.lastStatus?.agent?.raw||{};const priorPm2=new Map((current.processes?.pm2||[]).map(process=>[process.name,process]));const priorNode=new Map((current.processes?.node||[]).map(process=>[String(process.pid),process]));const pm2=(raw.processes||[]).filter(process=>process.kind==='pm2').map(({name,id,status})=>({name,id,status,action:priorPm2.get(name)?.action||'untouched',allowedActions:['untouched','enable','disable']}));const node=(raw.nodeProcesses||[]).map(({pid,ppid,user,command})=>({pid,ppid,user,command,action:priorNode.get(String(pid))?.action||'untouched',allowedActions:['untouched','enable','disable']}));const processes={...(current.processes||{}),pm2,node};delete processes.speaker;by('policy').value=JSON.stringify({...current,processes},null,2);message(by('formResult'),'Added PM2 ('+pm2.length+') and Node ('+node.length+') processes. New actions default to untouched.')}catch(error){message(by('formResult'),error.message,false)}finally{button.disabled=false}},true);showLastBoRegState();
+</script><script>
+const awsProviderOption=document.querySelector('#provider');if(awsProviderOption&&!awsProviderOption.querySelector('option[value="aws"]')){const option=document.createElement('option');option.value='aws';option.textContent='AWS EC2';awsProviderOption.append(option)}
+function usageBadge(label,percent){const value=Number(percent||0);const danger=value>60;return '<span style="display:inline-block;padding:4px 8px;border-radius:999px;margin-right:6px;background:'+(danger?'#7f1d1d':'#14532d')+';color:'+(danger?'#fecaca':'#bbf7d0')+';border:1px solid '+(danger?'#ef4444':'#22c55e')+'">'+label+' '+esc(value.toFixed(1))+'%</span>'}
+function showVpsUsage(){document.querySelectorAll('#machineList .machine').forEach((card,index)=>{card.querySelector('.vps-usage')?.remove();const usage=machines[index]?.lastStatus?.agent?.raw?.usage;if(!usage)return;const line=document.createElement('div');line.className='vps-usage';line.style.cssText='margin-top:10px;font-size:12px';line.innerHTML=usageBadge('CPU',usage.cpuPercent)+usageBadge('RAM',usage.ram?.percent)+usageBadge('DISK',usage.disk?.percent);card.append(line)})}
+new MutationObserver(showVpsUsage).observe(document.getElementById('machineList'),{childList:true});showVpsUsage();
 </script></body></html>`;
 }
 
