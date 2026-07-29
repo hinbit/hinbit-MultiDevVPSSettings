@@ -2741,6 +2741,13 @@ function normalizeProviderState(value) {
   return state || 'unknown';
 }
 
+function hasProviderConfirmationConfig(machine) {
+  if (machine.provider === 'gns') {
+    return Boolean(machine.providerEndpoint && machine.providerAccessKey && machine.providerSecretKey && machine.providerResourceId);
+  }
+  return Boolean(machine.providerEndpoint && machine.providerToken);
+}
+
 async function checkVpsProvider(machine) {
   if (machine.provider === 'gns') {
     if (!machine.providerEndpoint || !machine.providerAccessKey || !machine.providerSecretKey || !machine.providerResourceId) {
@@ -2851,7 +2858,7 @@ async function runVpsControlAction(id, action, options = {}) {
   } else if (action === 'shutdown') {
     if (status.state !== 'awake') throw new Error(`Shutdown is available only when the VPS is running (current: ${status.state || 'unknown'})`);
     if (!status.boReg?.installed || !machine.agentUrl || !machine.agentToken) throw new Error('Shutdown requires a healthy installed bo.reg agent');
-    if (!machine.providerEndpoint || !machine.providerToken) throw new Error('Shutdown requires a provider API endpoint and token so MultiDev can confirm the VPS is off');
+    if (!hasProviderConfirmationConfig(machine)) throw new Error('Shutdown requires configured provider credentials so MultiDev can confirm the VPS is off');
     result = await fetchControlJson(`${machine.agentUrl}/v1/control`, machine.agentToken, payload);
     const provider = await checkVpsProvider(machine);
     machine.lastStatus = { ...machine.lastStatus, checkedAt: payload.requestedAt, state: provider.reachable ? provider.state : 'shutting-down', provider };
