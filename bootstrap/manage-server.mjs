@@ -2502,6 +2502,7 @@ function readVpsWakeMachines({ includeSecrets = true } = {}) {
         providerAccessKey: String(entry.providerAccessKey || ''),
         providerSecretKey: String(entry.providerSecretKey || ''),
         providerResourceId: String(entry.providerResourceId || '').trim(),
+        allowShutdown: String(entry.allowShutdown ?? 'false').toLowerCase() === 'true',
         boReg: entry.boReg && typeof entry.boReg === 'object' ? {
           port: String(entry.boReg.port || '7211').trim() || '7211',
           bindHost: String(entry.boReg.bindHost || '0.0.0.0').trim() || '0.0.0.0',
