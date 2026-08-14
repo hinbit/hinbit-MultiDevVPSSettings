@@ -26,6 +26,7 @@ const PROJECT_ENV_BACKUP_DIR = '/etc/vps-project-env-backups';
 const MANAGE_VERSION_FILE = '/etc/vps-manage-version.json';
 const MANAGE_SELF_UPDATE_STATE_FILE = '/etc/vps-manage-self-update.json';
 const MANAGE_SELF_UPDATE_LOG_FILE = '/var/log/vps-manage-self-update.log';
+const PROJECTCTL_ACTIVE_JOBS_DIR = '/run/multidev-projectctl-jobs';
 const MANAGE_SELF_UPDATE_DIR = '/opt/hinbit-MultiDevVPSSettings';
 const MANAGE_SELF_UPDATE_REPO = 'git@github-hinbit:hinbit/hinbit-MultiDevVPSSettings.git';
 const MANAGE_SELF_UPDATE_BRANCH = process.env.MANAGE_SELF_UPDATE_BRANCH || 'main';
@@ -773,6 +774,7 @@ CHECKOUT_DIR=${shellQuote(MANAGE_SELF_UPDATE_DIR)}
 REPO_URL=${shellQuote(MANAGE_SELF_UPDATE_REPO)}
 BRANCH=${shellQuote(MANAGE_SELF_UPDATE_BRANCH)}
 VERSION_FILE=${shellQuote(MANAGE_VERSION_FILE)}
+ACTIVE_JOBS_DIR=${shellQuote(PROJECTCTL_ACTIVE_JOBS_DIR)}
 write_state() {
   local status="$1"
   local message="$2"
@@ -807,6 +809,51 @@ on_error() {
   local exit_code="$2"
   write_state "error" "Self-update failed at line \${line} (exit \${exit_code}). See \${LOG_FILE}." "" "" ""
 }
+count_active_jobs() {
+  local count=0
+  local job_file=""
+  local pid=""
+
+  [[ -d "$ACTIVE_JOBS_DIR" ]] || {
+    printf '0'
+    return 0
+  }
+
+  shopt -s nullglob
+  for job_file in "$ACTIVE_JOBS_DIR"/*.job; do
+    pid="$(awk -F= '/^PID=/{print $2; exit}' "$job_file" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      count=$((count + 1))
+    else
+      rm -f -- "$job_file" 2>/dev/null || true
+    fi
+  done
+  shopt -u nullglob
+
+  printf '%s' "$count"
+}
+
+wait_for_active_jobs() {
+  local deadline=$(( $(date +%s) + 3600 ))
+  local active_jobs=0
+
+  active_jobs="$(count_active_jobs)"
+  if [[ "$active_jobs" -gt 0 ]]; then
+    write_state "running" "Waiting for \${active_jobs} active projectctl job(s) to finish before restarting vps-manage." "" "" ""
+  fi
+
+  while [[ "$active_jobs" -gt 0 ]]; do
+    if (( $(date +%s) >= deadline )); then
+      write_state "error" "Timed out waiting for \${active_jobs} active projectctl job(s) before vps-manage restart. See \${LOG_FILE}." "" "" ""
+      return 1
+    fi
+    sleep 5
+    active_jobs="$(count_active_jobs)"
+    if [[ "$active_jobs" -gt 0 ]]; then
+      write_state "running" "Waiting for \${active_jobs} active projectctl job(s) to finish before restarting vps-manage." "" "" ""
+    fi
+  done
+}
 trap 'on_error "$LINENO" "$?"' ERR
 mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$STATE_FILE")" /opt
 exec >>"$LOG_FILE" 2>&1
@@ -835,6 +882,7 @@ date="$(git -C "$CHECKOUT_DIR" log -1 --format=%cI)"
 cat > "$VERSION_FILE" <<JSON
 {"commit":"$commit","commitShort":"$short","commitDate":"$date","repo":"hinbit/hinbit-MultiDevVPSSettings"}
 JSON
+wait_for_active_jobs
 systemctl restart vps-manage
 write_state "ok" "Updated to latest GitHub version and restarted vps-manage." "$commit" "$short" "$date"
 `;

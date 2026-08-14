@@ -9,6 +9,7 @@ APP_MAP="/etc/app-map.csv"
 AUTH_DIR="/etc/nginx/project-auth"
 DB_MACHINES_FILE="/etc/vps-db-machines.json"
 AUTH_USER="project"
+ACTIVE_JOBS_DIR="${PROJECTCTL_ACTIVE_JOB_DIR:-/run/multidev-projectctl-jobs}"
 PORT_MIN="${PROJECT_PORT_START:-3000}"
 PORT_MAX="${PROJECT_PORT_END:-9999}"
 LOCAL_DB_MACHINE_ID="local-current"
@@ -40,11 +41,23 @@ ENV_CANDIDATES=(
   .env.development
   .env.duplicate
 )
+ACTIVE_JOB_FILE=""
+ACTIVE_JOB_REGISTERED="no"
 
 die() {
   printf '[projectctl] %s\n' "$*" >&2
   exit 1
 }
+
+cleanup_active_job_registration() {
+  if [[ "${ACTIVE_JOB_REGISTERED}" == "yes" && -n "${ACTIVE_JOB_FILE}" ]]; then
+    rm -f -- "${ACTIVE_JOB_FILE}" 2>/dev/null || true
+    ACTIVE_JOB_FILE=""
+    ACTIVE_JOB_REGISTERED="no"
+  fi
+}
+
+trap cleanup_active_job_registration EXIT
 
 usage() {
   cat <<'EOF'
@@ -260,6 +273,32 @@ strip_nested_shell_quotes() {
   done
 
   printf '%s' "${value}"
+}
+
+ensure_active_jobs_dir() {
+  mkdir -p "${ACTIVE_JOBS_DIR}"
+  chmod 0755 "${ACTIVE_JOBS_DIR}" >/dev/null 2>&1 || true
+}
+
+register_active_job() {
+  local command_name="$1"
+  local ref="${2:-}"
+  local slug_ref=""
+  local stamp=""
+
+  [[ "${ACTIVE_JOB_REGISTERED}" == "yes" ]] && return 0
+
+  ensure_active_jobs_dir
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  slug_ref="$(slug_from_ref "$(project_ref_from_arg "${ref:-global/global}")")"
+  ACTIVE_JOB_FILE="${ACTIVE_JOBS_DIR}/${stamp}-${$}-${command_name}-${slug_ref}.job"
+  cat > "${ACTIVE_JOB_FILE}" <<EOF
+PID=$$
+COMMAND=${command_name}
+REPO_REF=${ref}
+STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+  ACTIVE_JOB_REGISTERED="yes"
 }
 
 ensure_env_file_accessible() {
@@ -5716,6 +5755,7 @@ main() {
         esac
       done
       [[ $# -eq 1 ]] || { usage; exit 1; }
+      register_active_job "install" "$1"
       do_install "$1" "${domain}" "${https}" "${branch}" "${pm2_name}" "${port}" "${db_machine_id}" "${deploy_runtime}" "${vpn_profile}" "${env_file}" "${entrypoint}"
       ;;
     duplicate)
@@ -5756,10 +5796,12 @@ main() {
         esac
       done
       [[ $# -eq 1 ]] || { usage; exit 1; }
+      register_active_job "duplicate" "$1"
       do_duplicate "$1" "${duplicate_domain}" "${duplicate_env_mode}" "${duplicate_db_mode}" "${duplicate_port}" "${duplicate_pm2_name}"
       ;;
     update)
       [[ $# -eq 1 ]] || { usage; exit 1; }
+      register_active_job "update" "$1"
       do_update "$1"
       ;;
     build)
@@ -5780,14 +5822,17 @@ main() {
         esac
       done
       [[ $# -eq 1 ]] || { usage; exit 1; }
+      register_active_job "build" "$1"
       do_build "$1" "${build_mode}"
       ;;
     restart)
       [[ $# -eq 1 ]] || { usage; exit 1; }
+      register_active_job "restart" "$1"
       do_restart "$1"
       ;;
     stop)
       [[ $# -eq 1 ]] || { usage; exit 1; }
+      register_active_job "stop" "$1"
       do_stop "$1"
       ;;
     status)
@@ -5817,6 +5862,7 @@ main() {
         esac
       done
       [[ $# -eq 2 ]] || { usage; exit 1; }
+      register_active_job "script" "$1"
       do_script "$1" "$2" "${pm2_mode}" "${script_dir}"
       ;;
     password)
@@ -5927,6 +5973,7 @@ main() {
         esac
       done
       [[ $# -eq 1 ]] || { usage; exit 1; }
+      register_active_job "mysql" "$1"
       do_mysql "$1" "${ips}" "${machine_id}" "${machine_name}" "${machine_host}" "${machine_origin_host}" "${machine_phpmyadmin_url}" "${machine_port}" "${machine_root_user}" "${machine_root_password}" "${machine_notes}" "${db_name}" "${db_user}" "${db_password}" "${move_data}"
       ;;
     ssh)
@@ -5984,6 +6031,7 @@ main() {
       if [[ "${preview}" == "yes" ]]; then
         do_uninstall_preview "$1"
       else
+        register_active_job "uninstall" "$1"
         do_uninstall "$1" "${drop_db}"
       fi
       ;;
