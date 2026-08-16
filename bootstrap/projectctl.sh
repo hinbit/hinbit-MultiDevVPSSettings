@@ -2350,32 +2350,44 @@ update_meta_value() {
   local value="$3"
   local encoded_value="${value}"
   local tmp
+  local value_file
   tmp="$(mktemp)"
+  value_file="$(mktemp)"
   if [[ "${key}" == *_JSON || ! "${value}" =~ ^[A-Za-z0-9._/@%:+,=-]*$ ]]; then
     encoded_value="$(shell_quote "${value}")"
   fi
-  awk -v key="${key}" -v value="${encoded_value}" '
-    BEGIN { updated = 0 }
-    {
-      line = $0
-      split(line, parts, "=")
-      current = parts[1]
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", current)
-      if (current == key) {
-        if (!updated) {
-          print key "=" value
-          updated = 1
-        }
-        next
-      }
-      print line
-    }
-    END {
-      if (!updated) {
-        print key "=" value
-      }
-    }
-  ' "${meta}" > "${tmp}"
+  printf '%s' "${encoded_value}" > "${value_file}"
+  python3 - "${meta}" "${key}" "${value_file}" "${tmp}" <<'PY'
+import sys
+
+meta_path, key, value_path, tmp_path = sys.argv[1:5]
+with open(value_path, 'r', encoding='utf-8') as fh:
+    value = fh.read()
+try:
+    with open(meta_path, 'r', encoding='utf-8') as fh:
+        lines = fh.readlines()
+except FileNotFoundError:
+    lines = []
+
+updated = False
+out_lines = []
+for raw_line in lines:
+    line = raw_line.rstrip('\n')
+    current = line.split('=', 1)[0].strip()
+    if current == key:
+        if not updated:
+            out_lines.append(f"{key}={value}\n")
+            updated = True
+        continue
+    out_lines.append(raw_line if raw_line.endswith('\n') else raw_line + '\n')
+
+if not updated:
+    out_lines.append(f"{key}={value}\n")
+
+with open(tmp_path, 'w', encoding='utf-8') as fh:
+    fh.writelines(out_lines)
+PY
+  rm -f -- "${value_file}"
   mv "${tmp}" "${meta}"
   if [[ "${meta}" == /var/www/* ]]; then
     normalize_env_file_shell_safe "${meta}"
