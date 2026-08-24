@@ -6942,7 +6942,7 @@ function renderPage() {
     <div class="body">
       <div id="installDomainsFlash" class="flash" hidden></div>
       <div class="kv-item">
-        <div class="small">This repository declares multiple listeners in <code>VPS-INSTALL.MD</code>. Enter each required public domain and the port its process listens on.</div>
+        <div class="small">This repository declares multiple public domains in <code>VPS-INSTALL.MD</code>. Extra domains share the primary project port.</div>
       </div>
       <div id="installDomainsList" class="stack"></div>
       <div class="copy-actions" style="margin-top: 12px; justify-content: flex-end;">
@@ -9542,9 +9542,9 @@ function renderPage() {
               <label>Domain
                 <input data-install-domain type="text" value="\${escapeHtml(domainValue)}" placeholder="\${primary ? 'app.example.com' : 'api.example.com'}">
               </label>
-              <label>Listener port
-                <input data-install-port type="number" min="1" max="65535" value="\${escapeHtml(portValue)}" placeholder="\${primary ? 'e.g. 8787' : 'blank = primary port'}">
-              </label>
+              \${primary ? \`<label>Primary listener port
+                <input data-install-port type="number" min="1" max="65535" value="\${escapeHtml(portValue)}" placeholder="e.g. 8787">
+              </label>\` : '<div class="small">Uses the primary project port.</div>'}
               <label>HTTPS
                 <select data-install-https>
                   <option value="yes"\${String(requirement.https || 'yes').toLowerCase() === 'yes' ? ' selected' : ''}>yes</option>
@@ -9577,8 +9577,9 @@ function renderPage() {
           const domain = String(row.querySelector('[data-install-domain]')?.value || '').trim().toLowerCase();
           const required = row.dataset.required === 'yes';
           const primary = row.dataset.primary === 'yes';
-          const enteredPort = String(row.querySelector('[data-install-port]')?.value || '').trim();
-          const port = enteredPort || (!primary ? primaryPort : '');
+          const port = primary
+            ? String(row.querySelector('[data-install-port]')?.value || '').trim()
+            : primaryPort;
           if (!domain && !required) continue;
           if (!domain || !/^[a-z0-9.-]+$/.test(domain) || domain.includes('..') || domain.startsWith('.') || domain.endsWith('.')) {
             showMessage(installDomainsFlash, 'Enter a valid domain for every required mapping.', false);
@@ -9586,9 +9587,7 @@ function renderPage() {
           }
           const numericPort = Number(port);
           if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65535) {
-            showMessage(installDomainsFlash, primary
-              ? 'Enter a valid primary listener port (1-65535) for ' + domain + '.'
-              : 'Enter a valid listener port for ' + domain + ', or leave it blank to share the primary port.', false);
+            showMessage(installDomainsFlash, 'Enter a valid primary listener port (1-65535) for ' + domain + '.', false);
             return;
           }
           if (primary) {
@@ -9711,9 +9710,20 @@ function renderPage() {
             false,
           );
         }
-        if (openMergeMode) {
-          await loadEnv(payload.repo, { mergeMode: true });
-          showMessage(envFlash, 'Paste extra .env keys in the overlay and click Merge overlay & save.');
+        try {
+          await loadEnv(payload.repo, { mergeMode: openMergeMode });
+          showMessage(
+            envFlash,
+            openMergeMode
+              ? 'Installation complete. Upload a local env file, or paste extra keys in the overlay and click Merge overlay & save.'
+              : 'Installation complete. You can now upload a local env file into the selected env file, or close this popup without changing it.',
+          );
+        } catch (envError) {
+          showMessage(
+            installResult,
+            installSummary + '\\nWarning: the environment popup could not be opened: ' + (envError.message || String(envError)),
+            false,
+          );
         }
       } catch (error) {
         renderInstallDbScripts('', []);

@@ -1,5 +1,6 @@
 # Server Change Log
 
+- Changed successful UI installs to open the env popup automatically and made extra install domains share the single primary listener port.
 - Added streamed project installation and local-env imports to avoid reverse-proxy timeouts during long installs/builds.
 - Added per-file `Upload local env` with VPS-value preservation, automatic env backup, full build, and restart.
 - Fixed multi-domain installs so an empty alias port inherits the primary listener instead of requiring or implying a second process.

@@ -103,6 +103,7 @@ Rules:
 - seed and merge env templates in the repo root, `server/`, `client/`, and `dashboard/` when those folders exist
 - the Multidev env editor shows a read-only merged summary, grouped by key source, and it can switch between individual files such as `.env`, `.env.local`, `.env.production`, `.env.machine`, `server/.env`, `client/.env`, and `dashboard/.env`
 - `Upload local env` may be used on the selected env file to import local application credentials and keys. Multidev preserves the installed VPS database/machine credentials, assigned ports, domains/public URLs, and production-mode values, creates an env backup, then runs the full build and PM2 restart.
+- after every successful UI install, open the env popup automatically so the operator can optionally upload a local env file; closing the popup leaves the generated VPS env unchanged
 - duplicate keys inside a file or across files must be marked clearly in red in the merged summary
 - save actions write back to the selected file, not the merged view
 - if one project should answer to more than one domain, store a primary domain plus alias bindings, and let each alias carry its own env-file path for management and editing
@@ -424,7 +425,7 @@ The intended result is a one-run install that ends with:
 - correct runtime state
 - no manual rescue steps
 - if a project has multiple domains, verify every alias is present in the app map and that each alias points at the intended env file before reporting success
-- a domain contract entry with an empty `port` shares the primary app port; declare a separate port only when the repository actually starts a listener on that port
+- all additional public domains in the install popup share the primary app port; the operator is asked for only one listener port
 - install/update should run `build all` automatically after the dependency step, so root, `server/`, `client/`, and `dashboard/` builds are verified before handoff
 - after install, update, or restart, rerun app-sync after PM2 is online so `/etc/app-map.csv` and nginx are regenerated from the current project metadata
 - if the repo name is too long for a MySQL username, shorten the generated DB user to stay within MySQL's 32-character limit while keeping the repo name as the base; existing overlong DB usernames should be normalized on update too
