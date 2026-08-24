@@ -24,6 +24,50 @@ Recommended folders:
 
 Also include a root `VPS-INSTALL.MD` when the app needs extra runtime wiring. Multidev looks for it during install/update and can use a machine-readable JSON route block inside it to generate extra nginx locations.
 
+### Multi-domain install contract
+
+When one installation exposes two or more public listeners, declare every required domain in the same machine-readable block. Multidev inspects this block before cloning the full project and opens an install popup for the domain and listener port of every declared component.
+
+```vps-install
+{
+  "domains": [
+    {
+      "name": "web",
+      "label": "Public website",
+      "description": "Browser-facing application",
+      "primary": true,
+      "required": true,
+      "domain": "",
+      "port": "5100",
+      "https": "yes",
+      "env_file": ".env"
+    },
+    {
+      "name": "api",
+      "label": "Public API",
+      "description": "API listener started by the production runtime",
+      "primary": false,
+      "required": true,
+      "domain": "",
+      "port": "8787",
+      "https": "yes",
+      "env_file": "server/.env"
+    }
+  ],
+  "proxy_routes": []
+}
+```
+
+Rules:
+- keep exactly one entry marked `primary`; it becomes the project's main domain and port
+- every additional entry becomes an explicit `domain -> port` nginx/app-map binding and is displayed in the project list
+- `required: true` prevents continuing until both domain and port are supplied
+- `env_file` identifies the component env file associated with that domain; it must be a safe repo-relative path
+- two domains may share one port when the same process handles both hostnames
+- a distinct extra port must be free and must be opened by a real long-running process from the repo; nginx mapping does not create that process
+- Multidev verifies every generated vhost after install and fails with a clear error if a mapping is missing or points to the wrong port
+- use `proxy_routes` only for path-based routing within a domain; use `domains` for separate hostnames
+
 If `server/`, `client/`, or `dashboard/` contain the real runtime logic, the root scripts must proxy to them so Multidev can still detect and run the app from the root.
 
 ## 2. Required script names

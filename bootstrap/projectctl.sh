@@ -62,7 +62,8 @@ trap cleanup_active_job_registration EXIT
 usage() {
   cat <<'EOF'
 Usage:
-  projectctl install [--domain example.com] [--https yes|no] [--branch main] [--pm2-name name] [--port N] [--db-machine id] [--runtime auto|node|docker] [--vpn-profile name] [--env-file path] [--entrypoint path] owner/repo
+  projectctl inspect [--branch main] owner/repo
+  projectctl install [--domain example.com] [--domain-bindings-json json] [--https yes|no] [--branch main] [--pm2-name name] [--port N] [--db-machine id] [--runtime auto|node|docker] [--vpn-profile name] [--env-file path] [--entrypoint path] owner/repo
   projectctl update owner/repo
   projectctl build [--all] owner/repo
   projectctl duplicate [--domain example.com] [--env-mode share|copy] [--db-mode same|separate] [--pm2-name name] [--port N] owner/repo
@@ -84,6 +85,8 @@ Defaults:
   - default branch is the repo's current branch or "main"
   - port is auto-assigned if not provided
   - domain is optional, but when provided it is added to /etc/app-map.csv and synced to nginx
+  - `projectctl inspect` reads the repo's VPS-INSTALL.MD contract before installation
+  - `--domain-bindings-json` adds extra domain-to-port mappings declared by the install UI
   - when a domain is provided, VITE_ALLOWED_HOSTS and CORS_ORIGIN are exported for the PM2 runtime
   - `projectctl script` runs a package.json script, with optional `--pm2` for runtime scripts and `--dir` for scripts living in `server/` or `client/`
   - `projectctl password` enables or clears nginx basic auth for a project's domain
@@ -2605,6 +2608,142 @@ raise SystemExit(0)
 PY
 }
 
+vps_install_contract_json_from_file() {
+  local install_file="${1:-}"
+
+  python3 - "${install_file}" <<'PY'
+import json
+import os
+import re
+import sys
+
+path = sys.argv[1] if len(sys.argv) > 1 else ""
+result = {"found": False, "file": "", "domains": [], "proxyRoutes": []}
+if not path or not os.path.isfile(path):
+    print(json.dumps(result))
+    raise SystemExit(0)
+
+result["found"] = True
+result["file"] = os.path.basename(path)
+with open(path, "r", encoding="utf-8", errors="surrogateescape") as handle:
+    text = handle.read()
+
+block_re = re.compile(r"```(?:vps-install|json)\s*(.*?)```", re.I | re.S)
+contract = {}
+for match in block_re.finditer(text):
+    try:
+        candidate = json.loads(match.group(1).strip())
+    except Exception:
+        continue
+    if isinstance(candidate, dict):
+        contract = candidate
+        if any(key in candidate for key in ("domains", "domain_requirements", "domainRequirements", "proxy_routes", "proxyRoutes")):
+            break
+
+raw_domains = contract.get("domains") or contract.get("domain_requirements") or contract.get("domainRequirements") or []
+if isinstance(raw_domains, list):
+    normalized = []
+    for index, item in enumerate(raw_domains):
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("name") or item.get("id") or item.get("role") or f"domain-{index + 1}").strip()
+        normalized.append({
+            "name": role,
+            "label": str(item.get("label") or role).strip(),
+            "description": str(item.get("description") or item.get("purpose") or "").strip(),
+            "required": bool(item.get("required", True)),
+            "primary": bool(item.get("primary", index == 0)),
+            "domain": str(item.get("domain") or item.get("suggested_domain") or item.get("suggestedDomain") or "").strip().lower(),
+            "port": str(item.get("port") or item.get("suggested_port") or item.get("suggestedPort") or "").strip(),
+            "https": str(item.get("https", "yes")).strip().lower() or "yes",
+            "envFile": str(item.get("env_file") or item.get("envFile") or ".env").strip() or ".env",
+            "type": str(item.get("type") or "project").strip() or "project",
+        })
+    result["domains"] = normalized
+
+routes = contract.get("proxy_routes") or contract.get("proxyRoutes") or contract.get("routes") or []
+if isinstance(routes, list):
+    result["proxyRoutes"] = routes
+print(json.dumps(result, ensure_ascii=False))
+PY
+}
+
+do_inspect() {
+  local ref="$1"
+  local requested_branch="${2:-}"
+  local repo_ref=""
+  local repo_url=""
+  local branch=""
+  local inspect_dir=""
+  local install_file=""
+
+  repo_ref="$(repo_ref_from_arg "${ref}")"
+  repo_url="$(repo_url_from_ref "${repo_ref}")"
+  branch="$(branch_from_repo "${repo_ref}" "${requested_branch}")"
+  inspect_dir="$(mktemp -d)"
+  if ! git clone --quiet --depth 1 --branch "${branch}" "${repo_url}" "${inspect_dir}"; then
+    rm -rf -- "${inspect_dir}"
+    die "Unable to inspect ${repo_ref} branch ${branch}"
+  fi
+  install_file="$(find_vps_install_file "${inspect_dir}" || true)"
+  vps_install_contract_json_from_file "${install_file}"
+  rm -rf -- "${inspect_dir}"
+}
+
+normalize_install_domain_bindings_json() {
+  local raw="${1:-[]}"
+  local primary_domain="${2:-}"
+  local primary_port="${3:-}"
+  local primary_https="${4:-yes}"
+  local primary_type="${5:-project}"
+
+  python3 - "${raw}" "${primary_domain}" "${primary_port}" "${primary_https}" "${primary_type}" <<'PY'
+import json
+import re
+import sys
+
+raw, primary_domain, primary_port, primary_https, primary_type = sys.argv[1:6]
+try:
+    data = json.loads(raw or "[]")
+except Exception as exc:
+    raise SystemExit(f"Invalid domain bindings JSON: {exc}")
+if not isinstance(data, list):
+    raise SystemExit("Domain bindings must be a JSON array")
+
+seen = set()
+normalized = []
+for item in data:
+    if not isinstance(item, dict):
+        raise SystemExit("Each domain binding must be an object")
+    domain = str(item.get("domain", "")).strip().lower()
+    if not domain:
+        continue
+    if not re.fullmatch(r"[a-z0-9.-]+", domain) or ".." in domain or domain.startswith(".") or domain.endswith("."):
+        raise SystemExit(f"Invalid domain: {domain}")
+    if domain == primary_domain or domain in seen:
+        continue
+    port = str(item.get("port", "") or primary_port).strip()
+    if not port.isdigit() or not 1 <= int(port) <= 65535:
+        raise SystemExit(f"Invalid port for {domain}: {port or 'missing'}")
+    https = str(item.get("https", primary_https) or primary_https).strip().lower()
+    if https not in ("yes", "no"):
+        raise SystemExit(f"Invalid HTTPS value for {domain}: {https}")
+    env_file = str(item.get("envFile", item.get("env_file", ".env")) or ".env").strip()
+    if env_file.startswith("/") or ".." in env_file.split("/"):
+        raise SystemExit(f"Invalid env file for {domain}: {env_file}")
+    normalized.append({
+        "domain": domain,
+        "port": port,
+        "https": https,
+        "envFile": env_file,
+        "primary": False,
+        "type": str(item.get("type", primary_type) or primary_type).strip(),
+    })
+    seen.add(domain)
+print(json.dumps(normalized, ensure_ascii=False, separators=(",", ":")))
+PY
+}
+
 project_preinstall_requirements_packages() {
   local project_dir="${1:-${APP_DIR}}"
 
@@ -3895,6 +4034,11 @@ finalize_project_mapping() {
   sync_app_map
   verify_project_mapping "${label}" "${domain}" "${port}" "${https}"
   verify_https_vhost "${domain}" "${https}"
+  while IFS=$'\t' read -r extra_domain extra_port extra_type extra_https; do
+    [[ -n "${extra_domain:-}" && -n "${extra_port:-}" ]] || continue
+    verify_project_mapping "${label}" "${extra_domain}" "${extra_port}" "${extra_https:-${https}}"
+    verify_https_vhost "${extra_domain}" "${extra_https:-${https}}"
+  done < <(project_domain_binding_rows)
 }
 
 verify_https_vhost() {
@@ -4516,6 +4660,7 @@ do_install() {
   local vpn_profile="${9:-}"
   local env_file="${10:-}"
   local entrypoint="${11:-}"
+  local domain_bindings_json="${12:-[]}"
   local build_failed="no"
 
   REPO_REF="$(repo_ref_from_arg "${ref}")"
@@ -4548,6 +4693,21 @@ do_install() {
   if [[ -n "${APP_DOMAIN}" ]]; then
     APP_DOMAIN="$(validate_domain "${APP_DOMAIN}")"
   fi
+  APP_DOMAIN_BINDINGS_JSON="$(normalize_install_domain_bindings_json "${domain_bindings_json}" "${APP_DOMAIN}" "${APP_PORT}" "${APP_HTTPS}" "${APP_TYPE}")" || die "Invalid extra domain mappings"
+  local checked_extra_ports=" "
+  local extra_domain=""
+  local extra_port=""
+  local extra_type=""
+  local extra_https=""
+  while IFS=$'\t' read -r extra_domain extra_port extra_type extra_https; do
+    [[ -n "${extra_domain:-}" && -n "${extra_port:-}" ]] || continue
+    if [[ "${extra_port}" != "${APP_PORT}" && "${checked_extra_ports}" != *" ${extra_port} "* ]]; then
+      if ! is_port_available_for_multidev "${extra_port}"; then
+        die "Port ${extra_port} requested for ${extra_domain} is already occupied or assigned to another project"
+      fi
+      checked_extra_ports+="${extra_port} "
+    fi
+  done < <(project_domain_binding_rows)
 
   MYSQL_ALLOWED_IPS="$(project_env_value MYSQL_ALLOWED_IPS)"
 
@@ -5704,6 +5864,26 @@ main() {
   shift
 
   case "${cmd}" in
+    inspect)
+      local inspect_branch=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --branch)
+            inspect_branch="${2:-}"
+            shift 2
+            ;;
+          --help|-h)
+            usage
+            exit 0
+            ;;
+          *)
+            break
+            ;;
+        esac
+      done
+      [[ $# -eq 1 ]] || { usage; exit 1; }
+      do_inspect "$1" "${inspect_branch}"
+      ;;
     install)
       local port=""
       local domain=""
@@ -5715,6 +5895,7 @@ main() {
       local vpn_profile=""
       local env_file=""
       local entrypoint=""
+      local domain_bindings_json="[]"
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --domain)
@@ -5757,6 +5938,10 @@ main() {
             entrypoint="${2:-}"
             shift 2
             ;;
+          --domain-bindings-json)
+            domain_bindings_json="${2:-[]}"
+            shift 2
+            ;;
           --help|-h)
             usage
             exit 0
@@ -5768,7 +5953,7 @@ main() {
       done
       [[ $# -eq 1 ]] || { usage; exit 1; }
       register_active_job "install" "$1"
-      do_install "$1" "${domain}" "${https}" "${branch}" "${pm2_name}" "${port}" "${db_machine_id}" "${deploy_runtime}" "${vpn_profile}" "${env_file}" "${entrypoint}"
+      do_install "$1" "${domain}" "${https}" "${branch}" "${pm2_name}" "${port}" "${db_machine_id}" "${deploy_runtime}" "${vpn_profile}" "${env_file}" "${entrypoint}" "${domain_bindings_json}"
       ;;
     duplicate)
       local duplicate_domain=""

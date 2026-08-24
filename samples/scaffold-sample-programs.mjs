@@ -355,6 +355,19 @@ function vpsInstallDoc(app, runnable = false) {
     '```vps-install',
     JSON.stringify(
       {
+        domains: [
+          {
+            name: 'web',
+            label: 'Public web application',
+            description: 'Primary browser-facing domain and listener.',
+            primary: true,
+            required: true,
+            domain: '',
+            port: String(runtimePort),
+            https: 'yes',
+            env_file: '.env',
+          },
+        ],
         proxy_routes: routes,
       },
       null,

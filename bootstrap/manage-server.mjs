@@ -6912,6 +6912,25 @@ function renderPage() {
       <div id="envList" class="kv-list"></div>
     </div>
   </div>
+  <div id="installDomainsPanel" class="scripts-panel modal-panel" hidden>
+    <header>
+      <div>
+        <h2 id="installDomainsTitle">Required Project Domains</h2>
+        <div id="installDomainsSubtitle" class="muted"></div>
+      </div>
+      <button id="installDomainsCancelBtn" class="ghost" type="button">Cancel</button>
+    </header>
+    <div class="body">
+      <div id="installDomainsFlash" class="flash" hidden></div>
+      <div class="kv-item">
+        <div class="small">This repository declares multiple listeners in <code>VPS-INSTALL.MD</code>. Enter each required public domain and the port its process listens on.</div>
+      </div>
+      <div id="installDomainsList" class="stack"></div>
+      <div class="copy-actions" style="margin-top: 12px; justify-content: flex-end;">
+        <button id="installDomainsContinueBtn" class="secondary" type="button">Continue install</button>
+      </div>
+    </div>
+  </div>
   <div id="domainsPanel" class="scripts-panel modal-panel" hidden>
     <header>
       <div>
@@ -7137,6 +7156,7 @@ function renderPage() {
     let currentDomainBindings = [];
     let currentDomainEnvFiles = [];
     let currentDuplicateRef = '';
+    let installDomainsResolve = null;
     const envPanel = document.getElementById('envPanel');
     const envTitle = document.getElementById('envTitle');
     const envSubtitle = document.getElementById('envSubtitle');
@@ -7162,6 +7182,13 @@ function renderPage() {
     const envMergeSaveBtn = document.getElementById('envMergeSaveBtn');
     const closeEnvBtn = document.getElementById('closeEnvBtn');
     const envBackupsList = document.getElementById('envBackupsList');
+    const installDomainsPanel = document.getElementById('installDomainsPanel');
+    const installDomainsTitle = document.getElementById('installDomainsTitle');
+    const installDomainsSubtitle = document.getElementById('installDomainsSubtitle');
+    const installDomainsFlash = document.getElementById('installDomainsFlash');
+    const installDomainsList = document.getElementById('installDomainsList');
+    const installDomainsCancelBtn = document.getElementById('installDomainsCancelBtn');
+    const installDomainsContinueBtn = document.getElementById('installDomainsContinueBtn');
     const domainsPanel = document.getElementById('domainsPanel');
     const domainsTitle = document.getElementById('domainsTitle');
     const domainsSubtitle = document.getElementById('domainsSubtitle');
@@ -7513,9 +7540,10 @@ function renderPage() {
             \${project.duplicateSourceRepoRef ? '<div class="small">source: <code>' + escapeHtml(project.duplicateSourceRepoRef) + '</code></div>' : ''}
           </td>
           <td>
-            <div>\${project.domain ? \`<a href="https://\${escapeHtml(project.domain)}/" target="_blank" rel="noreferrer">\${escapeHtml(project.domain)}</a>\` : '<span class="muted">n/a</span>'}</div>
+            \${Array.isArray(project.domainBindings) && project.domainBindings.length
+              ? project.domainBindings.map((binding) => '<div class="small"><a href="' + (binding.https === 'no' ? 'http://' : 'https://') + escapeHtml(binding.domain) + '/" target="_blank" rel="noreferrer">' + escapeHtml(binding.domain) + '</a> → <code>' + escapeHtml(String(binding.port || project.port || '')) + '</code> <span class="pill neutral">' + (binding.primary ? 'primary' : 'alias') + '</span></div>').join('')
+              : (project.domain ? \`<div class="small"><a href="https://\${escapeHtml(project.domain)}/" target="_blank" rel="noreferrer">\${escapeHtml(project.domain)}</a> → <code>\${escapeHtml(String(project.port || ''))}</code></div>\` : '<span class="muted">n/a</span>')}
             <div class="small">domains: \${escapeHtml(String(project.domainCount || (project.domain ? 1 : 0)))}</div>
-            \${Array.isArray(project.aliasBindings) && project.aliasBindings.length ? '<div class="small">aliases: ' + escapeHtml(project.aliasBindings.map((item) => item.domain).join(', ')) + '</div>' : ''}
             <div class="small">\${project.https === 'yes' ? 'HTTPS' : 'HTTP only'} · <span class="pill \${escapeHtml(project.sslStatusClass || 'neutral')}">\${escapeHtml(project.sslStatus || 'n/a')}</span></div>
           </td>
           <td>
@@ -9406,19 +9434,143 @@ function renderPage() {
       });
     }
 
+    function closeInstallDomainsPrompt(result = null) {
+      installDomainsPanel.hidden = true;
+      installDomainsFlash.hidden = true;
+      installDomainsList.innerHTML = '';
+      setModalLocked(false);
+      const resolve = installDomainsResolve;
+      installDomainsResolve = null;
+      if (resolve) resolve(result);
+    }
+
+    function promptInstallDomains(repo, contract, currentDomain, currentPort) {
+      const requirements = Array.isArray(contract?.domains) ? contract.domains : [];
+      if (requirements.length <= 1) {
+        return Promise.resolve({ primaryDomain: currentDomain, primaryPort: currentPort, bindings: [] });
+      }
+      const declaredPrimary = requirements.findIndex((item) => item && item.primary);
+      const primaryIndex = declaredPrimary >= 0 ? declaredPrimary : 0;
+      installDomainsTitle.textContent = 'Required Project Domains';
+      installDomainsSubtitle.textContent = repo + ' · ' + (contract.file || 'VPS-INSTALL.MD');
+      installDomainsFlash.hidden = true;
+      installDomainsList.innerHTML = requirements.map((requirement, index) => {
+        const primary = index === primaryIndex;
+        const domainValue = primary && currentDomain ? currentDomain : String(requirement.domain || '');
+        const portValue = primary && currentPort ? currentPort : String(requirement.port || '');
+        const required = requirement.required !== false;
+        return \`
+          <div class="kv-item" data-install-domain-row data-primary="\${primary ? 'yes' : 'no'}" data-required="\${required ? 'yes' : 'no'}" data-type="\${escapeHtml(requirement.type || 'project')}" data-env-file="\${escapeHtml(requirement.envFile || '.env')}">
+            <div><strong>\${escapeHtml(requirement.label || requirement.name || ('Domain ' + (index + 1)))}</strong> \${primary ? '<span class="pill">primary</span>' : '<span class="pill neutral">extra</span>'} \${required ? '<span class="pill warn">required</span>' : '<span class="pill neutral">optional</span>'}</div>
+            \${requirement.description ? '<div class="small">' + escapeHtml(requirement.description) + '</div>' : ''}
+            <div class="grid two" style="margin-top: 8px;">
+              <label>Domain
+                <input data-install-domain type="text" value="\${escapeHtml(domainValue)}" placeholder="\${primary ? 'app.example.com' : 'api.example.com'}">
+              </label>
+              <label>Listener port
+                <input data-install-port type="number" min="1" max="65535" value="\${escapeHtml(portValue)}" placeholder="e.g. 8787">
+              </label>
+              <label>HTTPS
+                <select data-install-https>
+                  <option value="yes"\${String(requirement.https || 'yes').toLowerCase() === 'yes' ? ' selected' : ''}>yes</option>
+                  <option value="no"\${String(requirement.https || 'yes').toLowerCase() === 'no' ? ' selected' : ''}>no</option>
+                </select>
+              </label>
+              <div class="small">Env source: <code>\${escapeHtml(requirement.envFile || '.env')}</code></div>
+            </div>
+          </div>
+        \`;
+      }).join('');
+      installDomainsPanel.hidden = false;
+      setModalLocked(true);
+      return new Promise((resolve) => {
+        installDomainsResolve = resolve;
+      });
+    }
+
+    if (installDomainsCancelBtn) {
+      installDomainsCancelBtn.addEventListener('click', () => closeInstallDomainsPrompt(null));
+    }
+    if (installDomainsContinueBtn) {
+      installDomainsContinueBtn.addEventListener('click', () => {
+        const rows = [...installDomainsList.querySelectorAll('[data-install-domain-row]')];
+        let primaryDomain = '';
+        let primaryPort = '';
+        const bindings = [];
+        for (const row of rows) {
+          const domain = String(row.querySelector('[data-install-domain]')?.value || '').trim().toLowerCase();
+          const port = String(row.querySelector('[data-install-port]')?.value || '').trim();
+          const required = row.dataset.required === 'yes';
+          const primary = row.dataset.primary === 'yes';
+          if (!domain && !required) continue;
+          if (!domain || !/^[a-z0-9.-]+$/.test(domain) || domain.includes('..') || domain.startsWith('.') || domain.endsWith('.')) {
+            showMessage(installDomainsFlash, 'Enter a valid domain for every required mapping.', false);
+            return;
+          }
+          const numericPort = Number(port);
+          if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65535) {
+            showMessage(installDomainsFlash, 'Enter a valid listener port (1-65535) for ' + domain + '.', false);
+            return;
+          }
+          if (primary) {
+            primaryDomain = domain;
+            primaryPort = port;
+          } else {
+            bindings.push({
+              domain,
+              port,
+              https: String(row.querySelector('[data-install-https]')?.value || 'yes'),
+              envFile: row.dataset.envFile || '.env',
+              primary: false,
+              type: row.dataset.type || 'project',
+            });
+          }
+        }
+        if (!primaryDomain || !primaryPort) {
+          showMessage(installDomainsFlash, 'The primary domain and port are required.', false);
+          return;
+        }
+        closeInstallDomainsPrompt({ primaryDomain, primaryPort, bindings });
+      });
+    }
+
     async function submitInstall(openMergeMode = false) {
       currentInstallScriptsRef = '';
       renderInstallDbScripts('', []);
       const repo = document.getElementById('repo').value.trim();
-      const domain = document.getElementById('domain').value.trim();
+      let domain = document.getElementById('domain').value.trim();
       const branch = document.getElementById('branch').value.trim();
       const pm2Name = document.getElementById('pm2Name').value.trim();
-      const port = document.getElementById('port').value.trim();
+      let port = document.getElementById('port').value.trim();
       const deployRuntime = document.getElementById('deployRuntime').value.trim() || 'auto';
       const dbMachineId = dbMachineSelect ? dbMachineSelect.value : '${LOCAL_DB_MACHINE_ID}';
       const entrypoint = document.getElementById('entrypoint').value.trim();
       const envText = document.getElementById('envText').value;
       const accessPassword = document.getElementById('accessPassword').value;
+      let domainBindings = [];
+      if (!repo) {
+        showMessage(installResult, 'GitHub repo is required', false);
+        return;
+      }
+      try {
+        showMessage(installResult, 'Inspecting VPS-INSTALL.MD for required domains...');
+        const query = new URLSearchParams({ repo });
+        if (branch) query.set('branch', branch);
+        const contract = await api('/projects/install-requirements?' + query.toString());
+        const selection = await promptInstallDomains(repo, contract, domain, port);
+        if (!selection) {
+          installResult.hidden = true;
+          return;
+        }
+        domain = selection.primaryDomain || domain;
+        port = selection.primaryPort || port;
+        domainBindings = selection.bindings || [];
+        document.getElementById('domain').value = domain;
+        document.getElementById('port').value = port;
+      } catch (error) {
+        showMessage(installResult, 'Repository install precheck failed: ' + error.message, false);
+        return;
+      }
       const summary = [
         'Repo: ' + (repo || '(empty)'),
         'Domain: ' + (domain || '(none)'),
@@ -9430,11 +9582,8 @@ function renderPage() {
         'Runtime: ' + (deployRuntime || '(auto)'),
         'DB machine: ' + (dbMachineId || '(local-current)'),
         'Entrypoint: ' + (entrypoint || '(auto-detect)'),
+        ...domainBindings.map((binding) => 'Extra mapping: ' + binding.domain + ' → ' + binding.port + ' (' + binding.https.toUpperCase() + ')'),
       ].join('\\n');
-      if (!repo) {
-        showMessage(installResult, 'GitHub repo is required', false);
-        return;
-      }
       if (!window.confirm('Install project with these settings?\\n\\n' + summary)) {
         return;
       }
@@ -9449,6 +9598,7 @@ function renderPage() {
         entrypoint,
         envText,
         accessPassword,
+        domainBindings,
       };
       try {
         const result = await api('/projects', {
@@ -9748,6 +9898,23 @@ async function handleRequest(req, res) {
         'Cache-Control': 'no-store',
       });
       res.end(renderPage());
+      return;
+    }
+
+    if (req.method === 'GET' && routePath === '/api/projects/install-requirements') {
+      const repo = repoRefFromArg(url.searchParams.get('repo') || '');
+      const branch = String(url.searchParams.get('branch') || '').trim();
+      const args = ['inspect'];
+      if (branch) args.push('--branch', branch);
+      args.push(repo);
+      const output = runProjectCtl(args);
+      let contract;
+      try {
+        contract = JSON.parse(output || '{}');
+      } catch {
+        throw new Error(`Invalid VPS-INSTALL.MD contract returned for ${repo}`);
+      }
+      sendJson(res, 200, contract);
       return;
     }
 
@@ -10290,6 +10457,19 @@ async function handleRequest(req, res) {
       if (body.vpnProfile) args.push('--vpn-profile', String(body.vpnProfile).trim());
       if (body.dbMachineId) args.push('--db-machine', String(body.dbMachineId).trim());
       if (body.entrypoint) args.push('--entrypoint', String(body.entrypoint).trim());
+      const domainBindings = [];
+      const seenDomains = new Set(domain ? [domain] : []);
+      for (const item of Array.isArray(body.domainBindings) ? body.domainBindings : []) {
+        const binding = normalizeDomainBinding(item, {
+          port: String(body.port || '').trim(),
+          https: 'yes',
+          type: 'project',
+        });
+        if (!binding || binding.primary || seenDomains.has(binding.domain)) continue;
+        seenDomains.add(binding.domain);
+        domainBindings.push(binding);
+      }
+      if (domainBindings.length) args.push('--domain-bindings-json', JSON.stringify(domainBindings));
       let tempEnv = '';
       if (body.envText && String(body.envText).trim()) {
         const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vps-manage-'));
@@ -10317,6 +10497,7 @@ async function handleRequest(req, res) {
         project: meta.APP_DOMAIN || meta.PROJECT_SLUG || repo,
         port: meta.APP_PORT || body.port || '',
         pm2Name: meta.PM2_NAME || body.pm2Name || '',
+        domainBindings: parseProjectDomainBindings(meta),
         scripts,
         dbScripts,
       });

@@ -16,6 +16,19 @@ Multidev will look for this file during install and update, and will wire the ro
 
 ```vps-install
 {
+  "domains": [
+    {
+      "name": "web",
+      "label": "Public web application",
+      "description": "Primary browser-facing domain and listener.",
+      "primary": true,
+      "required": true,
+      "domain": "",
+      "port": "8003",
+      "https": "yes",
+      "env_file": ".env"
+    }
+  ],
   "proxy_routes": [
     {
       "path": "/upload_media",
