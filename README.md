@@ -150,6 +150,8 @@ Use `/manage/vps-wake-times/` to register VPS control agents, view awake/communi
 - `/etc/app-watch.csv` lists PM2 apps to monitor
 - `/etc/vps-projects/*.env` stores project metadata for `projectctl`
 - the Manage UI env editor can switch between individual env files and saves back to the selected file
+- `Upload local env` imports a developer `.env`/`local.env` into the selected root or component env file, keeps VPS-owned DB, port, domain, URL, and production values, creates a backup, then builds all components and restarts PM2
+- installs and local-env imports stream live output with keepalives so long dependency/build operations do not end as proxy timeout pages
 - `/usr/local/bin/app-sync.sh` generates nginx and TLS config
 - `/usr/local/bin/pm2-smart-restart.sh` restarts PM2 apps when watched files change
 - `/usr/local/bin/projectctl` manages GitHub project installs and updates

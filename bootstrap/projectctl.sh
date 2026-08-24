@@ -66,6 +66,7 @@ Usage:
   projectctl install [--domain example.com] [--domain-bindings-json json] [--https yes|no] [--branch main] [--pm2-name name] [--port N] [--db-machine id] [--runtime auto|node|docker] [--vpn-profile name] [--env-file path] [--entrypoint path] owner/repo
   projectctl update owner/repo
   projectctl build [--all] owner/repo
+  projectctl import-local-env --source path [--target .env] owner/repo
   projectctl duplicate [--domain example.com] [--env-mode share|copy] [--db-mode same|separate] [--pm2-name name] [--port N] owner/repo
   projectctl restart owner/repo
   projectctl stop owner/repo
@@ -96,6 +97,7 @@ Defaults:
   - `projectctl ssh` shows or rotates the project's SSH/SFTP upload credentials
   - `projectctl update` prompts before pulling local changes; set PROJECTCTL_PULL_MODE=merge-env|stash-all to force the choice
   - `projectctl build` runs the root build script, or `--all` to also build server/ and client/ when they exist
+  - `projectctl import-local-env` imports app keys from a local env file, preserves VPS-owned values, then builds and restarts the project
   - `projectctl install --runtime docker` runs the app through a Docker container with host networking so local MySQL still works; use `auto` to keep the existing node/PM2 flow
   - `projectctl install --vpn-profile name` stores a per-project VPN/egress profile and runs `/etc/vps-vpn-profiles/<name>.sh` if such a hook exists
 EOF
@@ -2480,6 +2482,81 @@ PY
   cp -p "${tmp}" "${dest_file}"
   rm -f "${tmp}" >/dev/null 2>&1 || true
   ensure_env_file_accessible "${dest_file}"
+}
+
+restore_vps_managed_env_values() {
+  local previous_file="$1"
+  local imported_file="$2"
+  local tmp
+  tmp="$(mktemp)"
+
+  python3 - "${previous_file}" "${imported_file}" "${tmp}" <<'PY'
+import re
+import sys
+
+previous_path, imported_path, output_path = sys.argv[1:4]
+assignment = re.compile(r'^([ \t]*)(export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)([ \t]*)=(.*)$')
+exact = {
+    'PORT', 'APP_PORT', 'API_PORT', 'GUI_PORT', 'SERVER_PORT', 'CLIENT_PORT',
+    'FRONTEND_PORT', 'BACKEND_PORT', 'CONNECTOR_PORT',
+    'APP_DOMAIN', 'APP_HTTPS', 'PUBLIC_URL', 'APP_URL', 'SITE_URL', 'BASE_URL',
+    'SERVER_URL', 'FRONTEND_URL', 'BACKEND_URL', 'API_BASE_URL', 'ORIGIN_URL',
+    'WEB_URL', 'CORS_ORIGIN', 'VITE_ALLOWED_HOSTS', 'VITE_API_BASE_URL',
+    'VITE_APP_URL', 'VITE_SERVER_URL', 'NEXT_PUBLIC_SITE_URL',
+    'NEXT_PUBLIC_API_URL', 'NUXT_PUBLIC_SITE_URL',
+    'NODE_ENV', 'APP_ENV', 'ENVIRONMENT', 'MODE', 'DEPLOYMENT', 'RUNTIME_ENV',
+    'BUILD_ENV', 'STAGE', 'SERVER_LOCATION', 'APP_LOCATION', 'LOCATION',
+    'DEPLOY_LOCATION', 'DEPLOY_TARGET', 'TARGET_LOCATION', 'RUNTIME_TARGET',
+    'SERVER_MODE', 'DB_TYPE', 'VITE_DB_TYPE',
+}
+
+def is_managed(key):
+    return (
+        key in exact
+        or key.startswith('DB_')
+        or key.startswith('MYSQL_')
+        or key.startswith('POSTGRES_')
+        or key.endswith('_PORT')
+    )
+
+def read_lines(path):
+    with open(path, 'r', encoding='utf-8', errors='surrogateescape') as handle:
+        return handle.read().splitlines(True)
+
+previous = {}
+for raw in read_lines(previous_path):
+    match = assignment.match(raw.rstrip('\n'))
+    if match and is_managed(match.group(3)):
+        previous[match.group(3)] = match.group(5)
+
+seen = set()
+output = []
+for raw in read_lines(imported_path):
+    line = raw.rstrip('\n')
+    match = assignment.match(line)
+    if match and match.group(3) in previous:
+        key = match.group(3)
+        line = f'{match.group(1)}{match.group(2) or ""}{key}{match.group(4)}={previous[key]}'
+        seen.add(key)
+        output.append(line + '\n')
+    else:
+        output.append(raw if raw.endswith('\n') else raw + '\n')
+
+present = {
+    match.group(3)
+    for raw in output
+    if (match := assignment.match(raw.rstrip('\n')))
+}
+for key, value in previous.items():
+    if key not in present:
+        output.append(f'{key}={value}\n')
+
+with open(output_path, 'w', encoding='utf-8', errors='surrogateescape') as handle:
+    handle.writelines(output)
+PY
+  cp -p "${tmp}" "${imported_file}"
+  rm -f -- "${tmp}" >/dev/null 2>&1 || true
+  ensure_env_file_accessible "${imported_file}"
 }
 
 seed_project_env_from_templates_for_dir() {
@@ -5016,30 +5093,61 @@ do_build() {
   local mode="${2:-root}"
   local slug
   local meta
-  local build_failed="no"
 
   slug="$(slug_from_ref "$(project_ref_from_arg "${ref}")")"
   meta="$(meta_path_for_slug "${slug}")"
   load_meta "${meta}"
 
   [[ -d "${APP_DIR}" ]] || die "Missing app directory: ${APP_DIR}"
-  (
+  if ! (
     cd "${APP_DIR}"
     if [[ "${mode}" == "all" ]]; then
-      if ! maybe_build "${meta}" "all"; then
-        build_failed="yes"
-      fi
+      maybe_build "${meta}" "all"
     else
-      if ! maybe_build "${meta}" "root"; then
-        build_failed="yes"
-      fi
+      maybe_build "${meta}" "root"
     fi
-  )
-  if [[ "${build_failed}" == "yes" ]]; then
+  ); then
     die "Build failed for ${REPO_REF}"
   fi
   touch_meta_file "${meta}"
   printf '[projectctl] built %s (%s)\n' "${REPO_REF}" "${mode}"
+}
+
+do_import_local_env() {
+  local ref="$1"
+  local source_file="$2"
+  local target_relative="${3:-.env}"
+  local slug
+  local meta
+  local project_root
+  local target_file
+  local previous_file
+
+  slug="$(slug_from_ref "$(project_ref_from_arg "${ref}")")"
+  meta="$(meta_path_for_slug "${slug}")"
+  load_meta "${meta}"
+
+  [[ -f "${source_file}" ]] || die "Local env upload not found: ${source_file}"
+  [[ -d "${APP_DIR}" ]] || die "Missing app directory: ${APP_DIR}"
+  project_root="$(realpath -m -- "${APP_DIR}")"
+  target_file="$(realpath -m -- "${APP_DIR}/${target_relative}")"
+  [[ "${target_file}" == "${project_root}/"* ]] || die "Env target must stay inside ${APP_DIR}"
+  [[ "$(basename -- "${target_file}")" == .env* ]] || die "Env target must be an .env file"
+
+  mkdir -p -- "$(dirname -- "${target_file}")"
+  touch "${target_file}"
+  previous_file="$(mktemp)"
+  cp -p -- "${target_file}" "${previous_file}"
+  merge_env_file_preserving_current_values "${source_file}" "${target_file}" "${target_file}"
+  restore_vps_managed_env_values "${previous_file}" "${target_file}"
+  rm -f -- "${previous_file}" >/dev/null 2>&1 || true
+
+  normalize_project_deployment_env_file "${target_file}"
+  sync_project_runtime_ports "${APP_PORT}" "${APP_DIR}"
+  do_build "${REPO_REF}" "all"
+  do_restart "${REPO_REF}"
+  touch_meta_file "${meta}"
+  printf '[projectctl] imported local env into %s, rebuilt all components, and restarted %s\n' "${target_relative}" "${REPO_REF}"
 }
 
 do_restart() {
@@ -6021,6 +6129,32 @@ main() {
       [[ $# -eq 1 ]] || { usage; exit 1; }
       register_active_job "build" "$1"
       do_build "$1" "${build_mode}"
+      ;;
+    import-local-env)
+      local import_source=""
+      local import_target=".env"
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --source)
+            import_source="${2:-}"
+            shift 2
+            ;;
+          --target)
+            import_target="${2:-.env}"
+            shift 2
+            ;;
+          --help|-h)
+            usage
+            exit 0
+            ;;
+          *)
+            break
+            ;;
+        esac
+      done
+      [[ $# -eq 1 && -n "${import_source}" ]] || { usage; exit 1; }
+      register_active_job "import-local-env" "$1"
+      do_import_local_env "$1" "${import_source}" "${import_target}"
       ;;
     restart)
       [[ $# -eq 1 ]] || { usage; exit 1; }

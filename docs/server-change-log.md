@@ -1,5 +1,9 @@
 # Server Change Log
 
+- Added streamed project installation and local-env imports to avoid reverse-proxy timeouts during long installs/builds.
+- Added per-file `Upload local env` with VPS-value preservation, automatic env backup, full build, and restart.
+- Fixed multi-domain installs so an empty alias port inherits the primary listener instead of requiring or implying a second process.
+
 This document records only the server-side changes applied on `seach-web` and `seach-db`.
 
 ## `seach-web`

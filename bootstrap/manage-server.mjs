@@ -4553,7 +4553,7 @@ function runSyncScript(scriptName) {
   return (res.stdout || '').trim();
 }
 
-function streamProjectCtl(req, res, args, extraEnv = {}) {
+function streamProjectCtl(req, res, args, extraEnv = {}, hooks = {}) {
   const child = spawn(PROJECTCTL, args, {
     cwd: '/',
     env: { ...process.env, ...extraEnv },
@@ -4585,6 +4585,14 @@ function streamProjectCtl(req, res, args, extraEnv = {}) {
   const writeChunk = (stream, chunk) => {
     sendEvent('chunk', { stream, chunk: String(chunk) });
   };
+  const runAfterClose = (code) => {
+    if (typeof hooks.afterClose !== 'function') return;
+    try {
+      hooks.afterClose(code);
+    } catch (error) {
+      console.error('projectctl stream cleanup failed:', error);
+    }
+  };
 
   child.stdout.on('data', (chunk) => writeChunk('stdout', chunk));
   child.stderr.on('data', (chunk) => writeChunk('stderr', chunk));
@@ -4593,13 +4601,20 @@ function streamProjectCtl(req, res, args, extraEnv = {}) {
     clearInterval(heartbeat);
     if (!res.writableEnded) {
       if (code === 0) {
-        sendEvent('done', { code });
-        res.end();
+        try {
+          if (typeof hooks.afterSuccess === 'function') hooks.afterSuccess();
+          sendEvent('done', { code });
+          res.end();
+        } catch (error) {
+          sendEvent('error', { code: 1, message: error.message || String(error) });
+          res.end();
+        }
       } else {
         sendEvent('error', { code, message: `projectctl exited with code ${code}` });
         res.end();
       }
     }
+    runAfterClose(code);
   });
 
   child.on('error', (error) => {
@@ -4609,14 +4624,16 @@ function streamProjectCtl(req, res, args, extraEnv = {}) {
       sendEvent('error', { code: 500, message: error.message || String(error) });
       res.end();
     }
+    runAfterClose(500);
   });
 
-  req.on('close', () => {
+  res.on('close', () => {
     clearInterval(heartbeat);
-    if (!child.killed) {
+    if (!res.writableEnded && !child.killed) {
       child.kill('SIGTERM');
     }
   });
+  return child;
 }
 
 function formatBytes(bytes) {
@@ -6874,6 +6891,8 @@ function renderPage() {
             <div class="small">Editing: <code id="envCurrentFileLabel">(n/a)</code></div>
           </div>
           <div class="copy-actions">
+            <input id="envLocalUploadInput" type="file" accept=".env,.local,.txt,text/plain" hidden>
+            <button id="envLocalUploadBtn" class="secondary" type="button">Upload local env</button>
             <button id="envReloadBtn" class="ghost" type="button">Reload</button>
             <button id="envSaveBtn" class="secondary" type="button">Save env</button>
           </div>
@@ -7172,6 +7191,8 @@ function renderPage() {
     const envDownloadZipBtn = document.getElementById('envDownloadZipBtn');
     const envFileSelect = document.getElementById('envFileSelect');
     const envEditor = document.getElementById('envEditor');
+    const envLocalUploadInput = document.getElementById('envLocalUploadInput');
+    const envLocalUploadBtn = document.getElementById('envLocalUploadBtn');
     const envSaveBtn = document.getElementById('envSaveBtn');
     const envReloadBtn = document.getElementById('envReloadBtn');
     const envSaveTarget = document.getElementById('envSaveTarget');
@@ -8152,6 +8173,7 @@ function renderPage() {
       if (envRestoreSelect) envRestoreSelect.innerHTML = '';
       envFlash.hidden = true;
       envUploadInput.value = '';
+      if (envLocalUploadInput) envLocalUploadInput.value = '';
       if (envEditor) envEditor.value = '';
       if (envMergeOverlay) envMergeOverlay.value = '';
       if (envMergeBox) envMergeBox.hidden = true;
@@ -8400,11 +8422,12 @@ function renderPage() {
       await loadLog(ref, currentLogType);
     }
 
-    async function consumeProgressStream(url, signal) {
+    async function consumeProgressStream(url, signal, options = {}) {
       const res = await fetch(url, {
         method: 'POST',
         credentials: 'same-origin',
         signal,
+        ...options,
       });
       if (!res.ok || !res.body) {
         const text = await res.text();
@@ -8635,6 +8658,27 @@ function renderPage() {
       }
       showMessage(envFlash, data.message || 'Environment files uploaded');
       await refresh();
+    }
+
+    async function uploadLocalEnv(ref, file) {
+      if (!currentEnvFilePath) {
+        throw new Error('Choose the VPS env file that should receive the local values.');
+      }
+      if (file.size > ${MAX_ENV_FILE_BYTES}) {
+        throw new Error('Local env upload is too large (maximum 1 MB).');
+      }
+      const envText = await file.text();
+      await consumeProgressStream(API + \`/projects/\${ref}/env/import-local\`, null, {
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          envText,
+          fileName: file.name || 'local.env',
+          targetFile: currentEnvFilePath,
+        }),
+      });
+      showMessage(envFlash, 'Local env imported, all components rebuilt, and the project restarted');
+      await refresh();
+      await loadEnv(ref, { selectedFile: currentEnvFilePath });
     }
 
     async function saveMysql(ref, ips, moveData = false) {
@@ -9239,6 +9283,37 @@ function renderPage() {
       }
     });
 
+    if (envLocalUploadBtn && envLocalUploadInput) {
+      envLocalUploadBtn.addEventListener('click', () => {
+        if (!currentEnvRef) return;
+        envLocalUploadInput.value = '';
+        envLocalUploadInput.click();
+      });
+      envLocalUploadInput.addEventListener('change', async () => {
+        if (!currentEnvRef) return;
+        const file = envLocalUploadInput.files && envLocalUploadInput.files[0];
+        if (!file) return;
+        const targetLabel = envCurrentFileLabel?.textContent || currentEnvFilePath || '.env';
+        const confirmed = window.confirm(
+          'Import ' + file.name + ' into ' + targetLabel + '? App keys and credentials from the local file will be used. Existing VPS database, port, domain, URL, and production values will be preserved. The project will then build all components and restart.'
+        );
+        if (!confirmed) {
+          envLocalUploadInput.value = '';
+          return;
+        }
+        envLocalUploadBtn.disabled = true;
+        try {
+          await uploadLocalEnv(currentEnvRef, file);
+        } catch (error) {
+          showMessage(envFlash, error.message, false);
+          envPanel.hidden = false;
+        } finally {
+          envLocalUploadBtn.disabled = false;
+          envLocalUploadInput.value = '';
+        }
+      });
+    }
+
     envBackupBtn.addEventListener('click', async () => {
       if (!currentEnvRef) return;
       envBackupBtn.disabled = true;
@@ -9468,7 +9543,7 @@ function renderPage() {
                 <input data-install-domain type="text" value="\${escapeHtml(domainValue)}" placeholder="\${primary ? 'app.example.com' : 'api.example.com'}">
               </label>
               <label>Listener port
-                <input data-install-port type="number" min="1" max="65535" value="\${escapeHtml(portValue)}" placeholder="e.g. 8787">
+                <input data-install-port type="number" min="1" max="65535" value="\${escapeHtml(portValue)}" placeholder="\${primary ? 'e.g. 8787' : 'blank = primary port'}">
               </label>
               <label>HTTPS
                 <select data-install-https>
@@ -9494,14 +9569,16 @@ function renderPage() {
     if (installDomainsContinueBtn) {
       installDomainsContinueBtn.addEventListener('click', () => {
         const rows = [...installDomainsList.querySelectorAll('[data-install-domain-row]')];
-        let primaryDomain = '';
-        let primaryPort = '';
+        const primaryRow = rows.find((row) => row.dataset.primary === 'yes') || null;
+        let primaryDomain = String(primaryRow?.querySelector('[data-install-domain]')?.value || '').trim().toLowerCase();
+        let primaryPort = String(primaryRow?.querySelector('[data-install-port]')?.value || '').trim();
         const bindings = [];
         for (const row of rows) {
           const domain = String(row.querySelector('[data-install-domain]')?.value || '').trim().toLowerCase();
-          const port = String(row.querySelector('[data-install-port]')?.value || '').trim();
           const required = row.dataset.required === 'yes';
           const primary = row.dataset.primary === 'yes';
+          const enteredPort = String(row.querySelector('[data-install-port]')?.value || '').trim();
+          const port = enteredPort || (!primary ? primaryPort : '');
           if (!domain && !required) continue;
           if (!domain || !/^[a-z0-9.-]+$/.test(domain) || domain.includes('..') || domain.startsWith('.') || domain.endsWith('.')) {
             showMessage(installDomainsFlash, 'Enter a valid domain for every required mapping.', false);
@@ -9509,7 +9586,9 @@ function renderPage() {
           }
           const numericPort = Number(port);
           if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65535) {
-            showMessage(installDomainsFlash, 'Enter a valid listener port (1-65535) for ' + domain + '.', false);
+            showMessage(installDomainsFlash, primary
+              ? 'Enter a valid primary listener port (1-65535) for ' + domain + '.'
+              : 'Enter a valid listener port for ' + domain + ', or leave it blank to share the primary port.', false);
             return;
           }
           if (primary) {
@@ -9601,18 +9680,18 @@ function renderPage() {
         domainBindings,
       };
       try {
-        const result = await api('/projects', {
-          method: 'POST',
+        if (progressAbort) progressAbort.abort();
+        progressAbort = new AbortController();
+        openProgressPanel(repo, 'Installing ' + repo + ' with live output', 'Install Progress');
+        await consumeProgressStream(API + '/projects/install-stream', progressAbort.signal, {
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         });
-        const installSummary = [
-          result.message || 'Installed',
-          result.project ? ('Project: ' + result.project) : '',
-          result.port ? ('Port: ' + result.port) : '',
-          result.pm2Name ? ('PM2: ' + result.pm2Name) : '',
-        ].filter(Boolean).join('\\n');
+        const installSummary = 'Installed ' + repo + '. Build, DB setup, PM2 restart, and domain verification completed.';
         showMessage(installResult, installSummary);
-        renderInstallDbScripts(result.repo || payload.repo, result.dbScripts || [], result.project || result.repo || payload.repo);
+        showMessage(progressFlash, installSummary);
+        progressFlash.hidden = false;
+        renderInstallDbScripts('', []);
         for (const id of ['repo', 'domain', 'branch', 'pm2Name', 'port', 'entrypoint']) {
           const el = document.getElementById(id);
           if (el) el.value = '';
@@ -9633,12 +9712,16 @@ function renderPage() {
           );
         }
         if (openMergeMode) {
-          await loadEnv(result.repo || payload.repo, { mergeMode: true });
+          await loadEnv(payload.repo, { mergeMode: true });
           showMessage(envFlash, 'Paste extra .env keys in the overlay and click Merge overlay & save.');
         }
       } catch (error) {
         renderInstallDbScripts('', []);
         showMessage(installResult, error.message, false);
+        showMessage(progressFlash, error.message, false);
+        progressFlash.hidden = false;
+      } finally {
+        progressAbort = null;
       }
     }
 
@@ -10444,6 +10527,53 @@ async function handleRequest(req, res) {
       return;
     }
 
+    if (req.method === 'POST' && routePath === '/api/projects/install-stream') {
+      const body = await readBody(req);
+      const repo = repoRefFromArg(body.repo || '');
+      const domain = String(body.domain || '').trim().toLowerCase();
+      const args = ['install'];
+      if (domain) args.push('--domain', domain);
+      if (body.branch) args.push('--branch', String(body.branch).trim());
+      if (body.pm2Name) args.push('--pm2-name', String(body.pm2Name).trim());
+      if (body.port) args.push('--port', String(body.port).trim());
+      if (body.deployRuntime) args.push('--runtime', String(body.deployRuntime).trim());
+      if (body.vpnProfile) args.push('--vpn-profile', String(body.vpnProfile).trim());
+      if (body.dbMachineId) args.push('--db-machine', String(body.dbMachineId).trim());
+      if (body.entrypoint) args.push('--entrypoint', String(body.entrypoint).trim());
+      const domainBindings = [];
+      const seenDomains = new Set(domain ? [domain] : []);
+      for (const item of Array.isArray(body.domainBindings) ? body.domainBindings : []) {
+        const binding = normalizeDomainBinding(item, {
+          port: String(body.port || '').trim(),
+          https: 'yes',
+          type: 'project',
+        });
+        if (!binding || binding.primary || seenDomains.has(binding.domain)) continue;
+        seenDomains.add(binding.domain);
+        domainBindings.push(binding);
+      }
+      if (domainBindings.length) args.push('--domain-bindings-json', JSON.stringify(domainBindings));
+      let tempDir = '';
+      if (body.envText && String(body.envText).trim()) {
+        tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vps-manage-'));
+        const tempEnv = path.join(tempDir, 'project.env');
+        fs.writeFileSync(tempEnv, String(body.envText).replace(/\r\n/g, '\n'), { mode: 0o600 });
+        args.push('--env-file', tempEnv);
+      }
+      args.push(repo);
+      streamProjectCtl(req, res, args, {}, {
+        afterSuccess: () => {
+          if (body.accessPassword && String(body.accessPassword).trim()) {
+            runProjectCtl(['password', '--password', String(body.accessPassword).trim(), repo]);
+          }
+        },
+        afterClose: () => {
+          if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
+        },
+      });
+      return;
+    }
+
     if (req.method === 'POST' && routePath === '/api/projects') {
       const body = await readBody(req);
       const repo = repoRefFromArg(body.repo || '');
@@ -10734,7 +10864,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const envMatch = routePath.match(/^\/api\/projects\/(.+?)\/env(?:\/(download|upload|backup|restore|backups|save))?$/);
+    const envMatch = routePath.match(/^\/api\/projects\/(.+?)\/env(?:\/(download|upload|import-local|backup|restore|backups|save))?$/);
     if (envMatch) {
       const ref = decodeURIComponent(envMatch[1]);
       const mode = envMatch[2] || '';
@@ -10833,6 +10963,35 @@ async function handleRequest(req, res) {
           selectedFile: targetPath,
           backups: refreshedBackups,
           latestBackup: refreshedBackups[0] || null,
+        });
+        return;
+      }
+
+      if (req.method === 'POST' && mode === 'import-local') {
+        if (!projectPath || !fs.existsSync(projectPath)) {
+          throw new Error(`Project path not found for ${ref}`);
+        }
+        const body = await readBody(req);
+        const envText = String(body.envText || '');
+        if (!envText.trim()) {
+          throw new Error('The uploaded local env file is empty');
+        }
+        if (Buffer.byteLength(envText, 'utf8') > MAX_ENV_FILE_BYTES) {
+          throw new Error('Local env upload is too large (maximum 1 MB)');
+        }
+        const targetPath = resolveProjectEnvSaveTarget(projectPath, files, body.targetFile || body.targetPath || '');
+        if (!targetPath) {
+          throw new Error(`Unable to choose env import target for ${ref}`);
+        }
+        const targetRelative = path.relative(projectPath, targetPath);
+        createProjectEnvBackup(ref, projectPath);
+        const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'multidev-local-env-'));
+        const sourcePath = path.join(tempDir, '.env.local-upload');
+        fs.writeFileSync(sourcePath, envText, { encoding: 'utf8', mode: 0o600 });
+        streamProjectCtl(req, res, ['import-local-env', '--source', sourcePath, '--target', targetRelative, ref], {}, {
+          afterClose: () => {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+          },
         });
         return;
       }
