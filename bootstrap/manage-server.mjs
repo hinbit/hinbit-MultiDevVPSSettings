@@ -873,6 +873,7 @@ install -m 0755 "$CHECKOUT_DIR/bootstrap/install.sh" /usr/local/bin/install.sh
 install -m 0755 "$CHECKOUT_DIR/bootstrap/manage-server.mjs" /usr/local/bin/manage-server.mjs
 install -m 0755 "$CHECKOUT_DIR/bootstrap/security-harden.sh" /usr/local/bin/multidev-security-harden
 install -m 0755 "$CHECKOUT_DIR/bootstrap/weekly-upgrade.sh" /usr/local/bin/multidev-weekly-upgrade
+install -m 0755 "$CHECKOUT_DIR/bootstrap/update-cloudflare-ips.sh" /usr/local/bin/multidev-update-cloudflare-ips
 install -m 0644 "$CHECKOUT_DIR/bootstrap/multidev-weekly-upgrade.service" /etc/systemd/system/multidev-weekly-upgrade.service
 install -m 0644 "$CHECKOUT_DIR/bootstrap/multidev-weekly-upgrade.timer" /etc/systemd/system/multidev-weekly-upgrade.timer
 install -m 0755 "$CHECKOUT_DIR/bootstrap/projectctl.sh" /usr/local/bin/projectctl

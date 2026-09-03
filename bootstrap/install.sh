@@ -1032,6 +1032,7 @@ EOF
   install -m 0755 "${ROOT_DIR}/bootstrap/manage-server.mjs" "${BIN_DIR}/manage-server.mjs"
   install -m 0755 "${ROOT_DIR}/bootstrap/security-harden.sh" "${BIN_DIR}/multidev-security-harden"
   install -m 0755 "${ROOT_DIR}/bootstrap/weekly-upgrade.sh" "${BIN_DIR}/multidev-weekly-upgrade"
+  install -m 0755 "${ROOT_DIR}/bootstrap/update-cloudflare-ips.sh" "${BIN_DIR}/multidev-update-cloudflare-ips"
   install -m 0644 "${ROOT_DIR}/bootstrap/multidev-weekly-upgrade.service" /etc/systemd/system/multidev-weekly-upgrade.service
   install -m 0644 "${ROOT_DIR}/bootstrap/multidev-weekly-upgrade.timer" /etc/systemd/system/multidev-weekly-upgrade.timer
 

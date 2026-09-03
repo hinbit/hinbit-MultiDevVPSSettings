@@ -12,6 +12,7 @@ Run `sudo multidev-security-harden --audit` at any time. New installs and `--app
 - unattended security upgrades are enabled.
 - all package upgrades run every Sunday around 04:15 with a randomized delay; automatic reboot and package autoremove are disabled.
 - nginx defines a reusable login rate-limit zone; the standard server configuration hides its version.
+- nginx trusts real visitor IP headers only from Cloudflare's published networks and refreshes those networks weekly.
 - project `.env*` and infrastructure credential files are restricted to mode `0600`.
 - the built-in shared proxy password is removed; proxy access requires an explicitly configured password.
 

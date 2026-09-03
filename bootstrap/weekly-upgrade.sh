@@ -9,6 +9,9 @@ exec 9>/run/lock/multidev-weekly-upgrade.lock
 flock -n 9 || { echo "Another package upgrade is already running"; exit 0; }
 apt-get update
 apt-get -y upgrade
+if [[ -x /usr/local/bin/multidev-update-cloudflare-ips ]]; then
+  /usr/local/bin/multidev-update-cloudflare-ips
+fi
 
 if [[ -f /var/run/reboot-required ]]; then
   echo "NOTICE: reboot required; automatic reboot is disabled"

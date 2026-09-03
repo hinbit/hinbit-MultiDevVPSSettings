@@ -148,6 +148,8 @@ server {
     listen 80;
     server_name ${domain};
     client_max_body_size 100M;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 ${auth_block}
     location /.well-known/acme-challenge/ {
         auth_basic off;
@@ -184,6 +186,8 @@ server {
     listen 80;
     server_name ${domain};
     client_max_body_size 100M;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
     location /.well-known/acme-challenge/ {
         auth_basic off;
@@ -201,6 +205,8 @@ server {
     listen 443 ssl http2;
     server_name ${domain};
     client_max_body_size 100M;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 ${auth_block}
     ssl_certificate ${cert_path};
     ssl_certificate_key ${key_path};
