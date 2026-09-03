@@ -33,7 +33,6 @@ apply_safe() {
 
   install -d -m 0755 /etc/nginx/conf.d /etc/fail2ban/jail.d
   cat > /etc/nginx/conf.d/00-multidev-security.conf <<'EOF'
-server_tokens off;
 limit_req_zone $binary_remote_addr zone=multidev_login:10m rate=10r/m;
 EOF
   cat > /etc/fail2ban/jail.d/sshd.local <<'EOF'
