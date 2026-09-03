@@ -5,7 +5,7 @@ import http from 'http';
 import net from 'net';
 import { execFileSync, spawn, spawnSync } from 'child_process';
 import os from 'os';
-import { createHash, createHmac, createSign, randomUUID, randomBytes } from 'crypto';
+import { createHash, createHmac, createSign, randomUUID, randomBytes, timingSafeEqual } from 'crypto';
 import { fileURLToPath } from 'url';
 
 const META_DIR = '/etc/vps-projects';
@@ -39,6 +39,8 @@ const BASIC_USER = 'manage';
 const PORT = Number(process.env.MANAGE_PORT || 8090);
 const BIND_HOST = process.env.MANAGE_BIND_HOST || '127.0.0.1';
 const PASSWORD = process.env.MANAGE_PASSWORD || '';
+const SECURITY_AUDIT_LOG = '/var/log/multidev-security-audit.jsonl';
+const authFailures = new Map();
 const LOCAL_DB_MACHINE_ID = 'local-current';
 const CUSTOM_DB_MACHINE_ID = 'custom';
 const LOCAL_DB_MACHINE = {
@@ -9872,11 +9874,35 @@ function basicAuth(req, res) {
       allowed.set(name, secret);
     }
   }
-  return allowed.has(user) && allowed.get(user) === pass;
+  if (!allowed.has(user)) return false;
+  const expected = Buffer.from(allowed.get(user));
+  const supplied = Buffer.from(pass);
+  return expected.length === supplied.length && timingSafeEqual(expected, supplied);
+}
+
+function requestIp(req) {
+  return String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+}
+
+function auditRequest(req, outcome) {
+  if (req.method === 'GET' || req.method === 'HEAD') return;
+  fs.appendFileSync(SECURITY_AUDIT_LOG, `${JSON.stringify({ at: new Date().toISOString(), ip: requestIp(req), method: req.method, path: req.url, outcome })}\n`, { mode: 0o600 });
 }
 
 function requireAuth(req, res) {
-  if (basicAuth(req, res)) return true;
+  const ip = requestIp(req);
+  const now = Date.now();
+  const failures = (authFailures.get(ip) || []).filter((at) => now - at < 15 * 60 * 1000);
+  if (failures.length >= 10) {
+    sendText(res, 429, 'Too many authentication failures');
+    return false;
+  }
+  if (basicAuth(req, res)) {
+    authFailures.delete(ip);
+    return true;
+  }
+  failures.push(now);
+  authFailures.set(ip, failures);
   res.writeHead(401, {
     'WWW-Authenticate': 'Basic realm="MultiDev Manage"',
     'Content-Type': 'text/plain; charset=utf-8',
@@ -9904,6 +9930,17 @@ function clearLogFile(filePath) {
 
 async function handleRequest(req, res) {
   if (!requireAuth(req, res)) return;
+
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    const origin = String(req.headers.origin || '');
+    const host = String(req.headers.host || '');
+    if (origin && new URL(origin).host !== host) {
+      auditRequest(req, 'blocked-cross-origin');
+      sendJson(res, 403, { error: 'Cross-origin state change rejected' });
+      return;
+    }
+    auditRequest(req, 'authorized');
+  }
 
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const pathname = url.pathname.replace(/\/+$/, '') || '/';
@@ -11313,6 +11350,10 @@ async function handleRequest(req, res) {
 }
 
 const server = http.createServer((req, res) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
   handleRequest(req, res).catch((error) => {
     if (res.headersSent || res.writableEnded) {
       console.error('[manage] late request failure', error);
