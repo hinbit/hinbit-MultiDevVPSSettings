@@ -37,7 +37,7 @@ const PROJECTCTL = '/usr/local/bin/projectctl';
 const PM2 = 'pm2';
 const BASIC_USER = 'manage';
 const PORT = Number(process.env.MANAGE_PORT || 8090);
-const BIND_HOST = process.env.MANAGE_BIND_HOST || '0.0.0.0';
+const BIND_HOST = process.env.MANAGE_BIND_HOST || '127.0.0.1';
 const PASSWORD = process.env.MANAGE_PASSWORD || '';
 const LOCAL_DB_MACHINE_ID = 'local-current';
 const CUSTOM_DB_MACHINE_ID = 'custom';
@@ -72,7 +72,7 @@ const TINYPROXY_CONF_FILE = '/etc/tinyproxy/tinyproxy.conf';
 const TINYPROXY_SERVICE = 'tinyproxy';
 const DEFAULT_PROXY_AUTH = {
   username: 'multidev.hinbit',
-  password: 'hinbit2026',
+  password: '',
 };
 const DEFAULT_PROXY_CONFIG = {
   enabled: true,
@@ -869,6 +869,7 @@ fi
 install -m 0755 "$CHECKOUT_DIR/bootstrap/app-sync.sh" /usr/local/bin/app-sync.sh
 install -m 0755 "$CHECKOUT_DIR/bootstrap/install.sh" /usr/local/bin/install.sh
 install -m 0755 "$CHECKOUT_DIR/bootstrap/manage-server.mjs" /usr/local/bin/manage-server.mjs
+install -m 0755 "$CHECKOUT_DIR/bootstrap/security-harden.sh" /usr/local/bin/multidev-security-harden
 install -m 0755 "$CHECKOUT_DIR/bootstrap/projectctl.sh" /usr/local/bin/projectctl
 install -m 0755 "$CHECKOUT_DIR/bootstrap/system-sync.sh" /usr/local/bin/system-sync.sh
 bash -n /usr/local/bin/app-sync.sh

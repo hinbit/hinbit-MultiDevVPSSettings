@@ -136,9 +136,10 @@ configure_fail2ban() {
 enabled = true
 backend = systemd
 mode = aggressive
-bantime = 1h
+bantime = 24h
 findtime = 10m
-maxretry = 5
+maxretry = 4
+ignoreip = 127.0.0.1/8 ::1
 EOF
   systemctl enable --now fail2ban
 }
@@ -1029,6 +1030,7 @@ EOF
   install -m 0755 "${ROOT_DIR}/bootstrap/system-sync.sh" "${BIN_DIR}/system-sync.sh"
   install -m 0755 "${ROOT_DIR}/bootstrap/projectctl.sh" "${BIN_DIR}/projectctl"
   install -m 0755 "${ROOT_DIR}/bootstrap/manage-server.mjs" "${BIN_DIR}/manage-server.mjs"
+  install -m 0755 "${ROOT_DIR}/bootstrap/security-harden.sh" "${BIN_DIR}/multidev-security-harden"
 
   if [[ -n "${MANAGE_PASSWORD:-}" ]]; then
     cat > "${SYSTEM_ENV_FILE}" <<EOF
@@ -1049,7 +1051,7 @@ User=root
 WorkingDirectory=/root
 EnvironmentFile=-${SYSTEM_ENV_FILE}
 Environment=MANAGE_PORT=8090
-Environment=MANAGE_BIND_HOST=0.0.0.0
+Environment=MANAGE_BIND_HOST=127.0.0.1
 Environment=TZ=Asia/Jerusalem
 ExecStart=${NODE_BIN} ${BIN_DIR}/manage-server.mjs
 Restart=always
