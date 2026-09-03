@@ -46,6 +46,9 @@ maxretry = 4
 ignoreip = 127.0.0.1/8 ::1
 EOF
   systemctl enable --now fail2ban unattended-upgrades
+  if [[ -f /etc/systemd/system/multidev-weekly-upgrade.timer ]]; then
+    systemctl enable --now multidev-weekly-upgrade.timer
+  fi
 
   find /var/www -maxdepth 3 -type f -name '.env*' -exec chmod 0600 {} + 2>/dev/null || true
   chmod 0600 /etc/vps-system.env /etc/vps-db-machines.json /etc/vps-ssh-keys.json /etc/vps-proxy-service.json 2>/dev/null || true

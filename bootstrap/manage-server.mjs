@@ -870,6 +870,9 @@ install -m 0755 "$CHECKOUT_DIR/bootstrap/app-sync.sh" /usr/local/bin/app-sync.sh
 install -m 0755 "$CHECKOUT_DIR/bootstrap/install.sh" /usr/local/bin/install.sh
 install -m 0755 "$CHECKOUT_DIR/bootstrap/manage-server.mjs" /usr/local/bin/manage-server.mjs
 install -m 0755 "$CHECKOUT_DIR/bootstrap/security-harden.sh" /usr/local/bin/multidev-security-harden
+install -m 0755 "$CHECKOUT_DIR/bootstrap/weekly-upgrade.sh" /usr/local/bin/multidev-weekly-upgrade
+install -m 0644 "$CHECKOUT_DIR/bootstrap/multidev-weekly-upgrade.service" /etc/systemd/system/multidev-weekly-upgrade.service
+install -m 0644 "$CHECKOUT_DIR/bootstrap/multidev-weekly-upgrade.timer" /etc/systemd/system/multidev-weekly-upgrade.timer
 install -m 0755 "$CHECKOUT_DIR/bootstrap/projectctl.sh" /usr/local/bin/projectctl
 install -m 0755 "$CHECKOUT_DIR/bootstrap/system-sync.sh" /usr/local/bin/system-sync.sh
 bash -n /usr/local/bin/app-sync.sh
@@ -877,6 +880,8 @@ bash -n /usr/local/bin/install.sh
 bash -n /usr/local/bin/projectctl
 bash -n /usr/local/bin/system-sync.sh
 node --check /usr/local/bin/manage-server.mjs
+systemctl daemon-reload
+systemctl enable --now multidev-weekly-upgrade.timer
 commit="$(git -C "$CHECKOUT_DIR" rev-parse HEAD)"
 short="$(git -C "$CHECKOUT_DIR" rev-parse --short=12 HEAD)"
 date="$(git -C "$CHECKOUT_DIR" log -1 --format=%cI)"

@@ -1031,6 +1031,9 @@ EOF
   install -m 0755 "${ROOT_DIR}/bootstrap/projectctl.sh" "${BIN_DIR}/projectctl"
   install -m 0755 "${ROOT_DIR}/bootstrap/manage-server.mjs" "${BIN_DIR}/manage-server.mjs"
   install -m 0755 "${ROOT_DIR}/bootstrap/security-harden.sh" "${BIN_DIR}/multidev-security-harden"
+  install -m 0755 "${ROOT_DIR}/bootstrap/weekly-upgrade.sh" "${BIN_DIR}/multidev-weekly-upgrade"
+  install -m 0644 "${ROOT_DIR}/bootstrap/multidev-weekly-upgrade.service" /etc/systemd/system/multidev-weekly-upgrade.service
+  install -m 0644 "${ROOT_DIR}/bootstrap/multidev-weekly-upgrade.timer" /etc/systemd/system/multidev-weekly-upgrade.timer
 
   if [[ -n "${MANAGE_PASSWORD:-}" ]]; then
     cat > "${SYSTEM_ENV_FILE}" <<EOF
@@ -1129,6 +1132,7 @@ EOF
   systemctl enable --now nginx
   systemctl enable --now mysql
   systemctl enable --now unattended-upgrades
+  systemctl enable --now multidev-weekly-upgrade.timer
 
   systemctl daemon-reload
   systemctl enable --now pm2-root

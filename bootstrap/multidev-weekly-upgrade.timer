@@ -1,0 +1,11 @@
+[Unit]
+Description=Run MultiDev package upgrades weekly
+
+[Timer]
+OnCalendar=Sun *-*-* 04:15:00
+RandomizedDelaySec=45m
+Persistent=true
+Unit=multidev-weekly-upgrade.service
+
+[Install]
+WantedBy=timers.target
