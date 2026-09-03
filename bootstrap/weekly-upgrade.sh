@@ -9,7 +9,6 @@ exec 9>/run/lock/multidev-weekly-upgrade.lock
 flock -n 9 || { echo "Another package upgrade is already running"; exit 0; }
 apt-get update
 apt-get -y upgrade
-apt-get -y autoremove --purge
 
 if [[ -f /var/run/reboot-required ]]; then
   echo "NOTICE: reboot required; automatic reboot is disabled"

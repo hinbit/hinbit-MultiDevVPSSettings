@@ -10,7 +10,7 @@ Run `sudo multidev-security-harden --audit` at any time. New installs and `--app
 - The manage service listens on `127.0.0.1:8090` and is reached through nginx.
 - fail2ban protects SSH with four attempts per ten minutes and a 24-hour ban.
 - unattended security upgrades are enabled.
-- all package upgrades run every Sunday around 04:15 with a randomized delay; automatic reboot is disabled.
+- all package upgrades run every Sunday around 04:15 with a randomized delay; automatic reboot and package autoremove are disabled.
 - nginx defines a reusable login rate-limit zone; the standard server configuration hides its version.
 - project `.env*` and infrastructure credential files are restricted to mode `0600`.
 - the built-in shared proxy password is removed; proxy access requires an explicitly configured password.
