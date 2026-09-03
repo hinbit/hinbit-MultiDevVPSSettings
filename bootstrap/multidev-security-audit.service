@@ -1,0 +1,8 @@
+[Unit]
+Description=MultiDev daily security audit
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/multidev-security-harden --audit
+Nice=10

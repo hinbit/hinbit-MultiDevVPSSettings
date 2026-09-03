@@ -1035,6 +1035,8 @@ EOF
   install -m 0755 "${ROOT_DIR}/bootstrap/update-cloudflare-ips.sh" "${BIN_DIR}/multidev-update-cloudflare-ips"
   install -m 0644 "${ROOT_DIR}/bootstrap/multidev-weekly-upgrade.service" /etc/systemd/system/multidev-weekly-upgrade.service
   install -m 0644 "${ROOT_DIR}/bootstrap/multidev-weekly-upgrade.timer" /etc/systemd/system/multidev-weekly-upgrade.timer
+  install -m 0644 "${ROOT_DIR}/bootstrap/multidev-security-audit.service" /etc/systemd/system/multidev-security-audit.service
+  install -m 0644 "${ROOT_DIR}/bootstrap/multidev-security-audit.timer" /etc/systemd/system/multidev-security-audit.timer
 
   if [[ -n "${MANAGE_PASSWORD:-}" ]]; then
     cat > "${SYSTEM_ENV_FILE}" <<EOF
@@ -1134,6 +1136,7 @@ EOF
   systemctl enable --now mysql
   systemctl enable --now unattended-upgrades
   systemctl enable --now multidev-weekly-upgrade.timer
+  systemctl enable --now multidev-security-audit.timer
 
   systemctl daemon-reload
   systemctl enable --now pm2-root

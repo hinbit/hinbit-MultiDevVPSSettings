@@ -1,0 +1,10 @@
+[Unit]
+Description=Run MultiDev security audit daily
+
+[Timer]
+OnCalendar=*-*-* 03:35:00
+RandomizedDelaySec=20m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -50,6 +50,7 @@ sudo nginx -t
 sudo certbot renew --dry-run
 systemctl list-timers multidev-weekly-upgrade.timer
 journalctl -u multidev-weekly-upgrade.service
+journalctl -u multidev-security-audit.service
 ```
 
 Do not close the current SSH session while changing SSH or firewall rules. Validate a new login first and retain provider-console access until verification is complete.

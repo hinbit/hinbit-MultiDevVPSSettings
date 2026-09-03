@@ -876,6 +876,8 @@ install -m 0755 "$CHECKOUT_DIR/bootstrap/weekly-upgrade.sh" /usr/local/bin/multi
 install -m 0755 "$CHECKOUT_DIR/bootstrap/update-cloudflare-ips.sh" /usr/local/bin/multidev-update-cloudflare-ips
 install -m 0644 "$CHECKOUT_DIR/bootstrap/multidev-weekly-upgrade.service" /etc/systemd/system/multidev-weekly-upgrade.service
 install -m 0644 "$CHECKOUT_DIR/bootstrap/multidev-weekly-upgrade.timer" /etc/systemd/system/multidev-weekly-upgrade.timer
+install -m 0644 "$CHECKOUT_DIR/bootstrap/multidev-security-audit.service" /etc/systemd/system/multidev-security-audit.service
+install -m 0644 "$CHECKOUT_DIR/bootstrap/multidev-security-audit.timer" /etc/systemd/system/multidev-security-audit.timer
 install -m 0755 "$CHECKOUT_DIR/bootstrap/projectctl.sh" /usr/local/bin/projectctl
 install -m 0755 "$CHECKOUT_DIR/bootstrap/system-sync.sh" /usr/local/bin/system-sync.sh
 bash -n /usr/local/bin/app-sync.sh
@@ -885,6 +887,7 @@ bash -n /usr/local/bin/system-sync.sh
 node --check /usr/local/bin/manage-server.mjs
 systemctl daemon-reload
 systemctl enable --now multidev-weekly-upgrade.timer
+systemctl enable --now multidev-security-audit.timer
 commit="$(git -C "$CHECKOUT_DIR" rev-parse HEAD)"
 short="$(git -C "$CHECKOUT_DIR" rev-parse --short=12 HEAD)"
 date="$(git -C "$CHECKOUT_DIR" log -1 --format=%cI)"
